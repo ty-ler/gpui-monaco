@@ -1087,6 +1087,18 @@ fn move_to(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: PointUtf
     cx.simulate_mouse_move(position, None, Modifiers::default());
 }
 
+/// Near the bottom of `at`'s line: right by a card below it, so moving up
+/// the line takes the mouse away from the card (Monaco
+/// `isMouseGettingCloser` off).
+fn low_on_line(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    at: PointUtf16,
+) -> gpui::Point<gpui::Pixels> {
+    let next = mouse_at(editor, cx, p(at.row + 1, 0));
+    gpui::point(mouse_at(editor, cx, at).x, next.y - px(4.))
+}
+
 fn x_of(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: PointUtf16) -> gpui::Pixels {
     editor
         .read_with(cx, |e, _| e.scrolled_visible_position(at))
@@ -1123,7 +1135,8 @@ fn moving_along_a_squiggle_keeps_the_hover(cx: &mut TestAppContext) {
         ],
     );
     rest(cx, 0);
-    move_to(&editor, cx, p(0, 5));
+    let start = low_on_line(&editor, cx, p(0, 5));
+    cx.simulate_mouse_move(start, None, Modifiers::default());
     rest(cx, 400);
     assert_eq!(messages(&editor, cx), ["short", "long"]);
     // Anchored at the parts' start on the line, the long squiggle's, not
@@ -1155,11 +1168,12 @@ fn another_line_or_no_valid_part_hides_the_hover(cx: &mut TestAppContext) {
         vec![marker(MarkerSeverity::Warning, p(0, 0)..p(0, 12))],
     );
     rest(cx, 0);
-    let on_marker = mouse_at(&editor, cx, p(0, 5));
+    let on_marker = low_on_line(&editor, cx, p(0, 5));
     cx.simulate_mouse_move(on_marker, None, Modifiers::default());
     rest(cx, 400);
     assert!(editor.read_with(cx, |e, _| e.is_hover_visible()));
-    // Off the squiggle on its line: nothing applies there.
+    // Off the squiggle on its line, away from the card: nothing applies
+    // there.
     move_to(&editor, cx, p(0, 15));
     rest(cx, 0);
     rest(cx, 350);

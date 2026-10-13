@@ -524,8 +524,9 @@ fn clicks_off_the_card_hide_the_hover(cx: &mut TestAppContext) {
     cx.simulate_click(card.center(), Modifiers::default());
     rest(cx, 0);
     assert!(visible(&editor, cx));
-    // On the word it's about: it goes.
-    let p = mouse_at(&editor, cx, 0, 7);
+    // On the word it's about: it goes. (Monaco's card hides when the
+    // mouse leaves it for within 3px of the editor's edge, as if outside.)
+    let p = mouse_at(&editor, cx, 0, 7) + gpui::point(px(0.), px(4.));
     cx.simulate_mouse_move(p, None, Modifiers::default());
     rest(cx, 0);
     assert!(visible(&editor, cx));

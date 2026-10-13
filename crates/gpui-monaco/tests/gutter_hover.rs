@@ -155,7 +155,9 @@ fn whole_line_decorations_hover_anywhere_on_the_line(cx: &mut TestAppContext) {
     assert!(hover_text(&editor, cx, 2, 8).is_empty());
 }
 
-/// Monaco: a `showIfCollapsed` decoration takes a character more each side.
+/// Monaco: a `showIfCollapsed` decoration takes a character more each side
+/// of the character under the mouse (the hover's anchor); a plain empty one
+/// holds no character, so the mouse never shows it.
 #[gpui::test]
 fn show_if_collapsed_decorations_take_a_character_more(cx: &mut TestAppContext) {
     let (editor, cx) = setup(cx);
@@ -180,8 +182,11 @@ fn show_if_collapsed_decorations_take_a_character_more(cx: &mut TestAppContext) 
             ),
         ],
     );
-    assert_eq!(hover_text(&editor, cx, 0, 7), ["collapsed"]);
-    assert!(hover_text(&editor, cx, 0, 9).is_empty());
+    assert_eq!(hover_text(&editor, cx, 0, 5), ["collapsed"]);
+    assert_eq!(hover_text(&editor, cx, 0, 6), ["collapsed"]);
+    assert!(hover_text(&editor, cx, 0, 4).is_empty());
+    assert!(hover_text(&editor, cx, 0, 7).is_empty());
+    assert!(hover_text(&editor, cx, 2, 5).is_empty());
     assert!(hover_text(&editor, cx, 2, 6).is_empty());
 }
 
