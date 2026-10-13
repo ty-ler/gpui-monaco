@@ -6,9 +6,9 @@
 use std::sync::Arc;
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, InteractiveElement as _, IntoElement,
-    KeyDownEvent, ParentElement as _, Render, Role, ScrollHandle, SharedString,
-    StatefulInteractiveElement as _, Styled as _, WeakEntity, Window, div, px,
+    App, Context, Entity, FocusHandle, Focusable, HighlightStyle, InteractiveElement as _,
+    IntoElement, KeyDownEvent, ParentElement as _, Render, Role, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, StyledText, WeakEntity, Window, div, px,
 };
 use text::{PointUtf16, Rope};
 
@@ -170,6 +170,85 @@ fn line_text(rope: &Rope, line: usize) -> String {
     } else {
         String::new()
     }
+}
+
+/// A viewer row's highlights, in its rendered text.
+type RowHighlights = Vec<(std::ops::Range<usize>, HighlightStyle)>;
+
+/// Monaco `AccessibleDiffViewer._getLineHtml`: `line` as `renderViewLine2`
+/// draws it with its side's `options` and `tab_size`: tabs expanded,
+/// whitespace and control characters rendered as in the inline deleted
+/// lines, and cut off after `stop_rendering_line_after` with a "Show more"
+/// label. Returns the text and its highlights.
+pub(super) fn row_display(
+    line: &str,
+    options: &crate::options::EditorOptions,
+    tab_size: usize,
+    colors: &crate::theme::EditorColors,
+) -> (String, RowHighlights) {
+    let mut overflow = 0;
+    let mut line = line;
+    if let Some(limit) = options.stop_rendering_line_after {
+        let len = line.encode_utf16().count() as u32;
+        if len > limit {
+            overflow = len - limit;
+            line = &line[..super::utf16_to_byte(line, limit)];
+        }
+    }
+    let whitespace =
+        crate::view::guides::whitespace_columns(line, 0, 0, false, options.render_whitespace, &[]);
+    let super::DeletedLineDisplay {
+        mut text,
+        whitespace,
+        controls,
+        ..
+    } = super::deleted_line_display(
+        line,
+        tab_size.max(1),
+        &whitespace,
+        options.render_control_characters,
+    );
+    // Monaco `mtkw` and `mtkcontrol`.
+    let mut highlights: Vec<_> = whitespace
+        .into_iter()
+        .map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    color: Some(colors.whitespace),
+                    ..Default::default()
+                },
+            )
+        })
+        .chain(controls.into_iter().map(|range| {
+            (
+                range,
+                HighlightStyle {
+                    color: Some(crate::element::CONTROL_CHARACTER_FOREGROUND),
+                    background_color: Some(crate::element::CONTROL_CHARACTER_BACKGROUND),
+                    ..Default::default()
+                },
+            )
+        }))
+        .collect();
+    highlights.sort_by_key(|(range, _)| range.start);
+    // Monaco's `mtkoverflow`.
+    if overflow > 0 {
+        let start = text.len();
+        text.push_str(&format!(
+            "Show more ({})",
+            crate::element::overflow_size(overflow)
+        ));
+        highlights.push((
+            start..text.len(),
+            HighlightStyle {
+                color: Some(colors.button_foreground),
+                background_color: Some(colors.button_background),
+                ..Default::default()
+            },
+        ));
+    }
+    (text, highlights)
 }
 
 /// The viewer (Monaco `AccessibleDiffViewer`'s view model and view).
@@ -469,6 +548,48 @@ impl AccessibleDiffViewer {
         }
     }
 
+    /// Row `element`'s text, highlights and font features, rendered with
+    /// its side's options (Monaco `_getLineHtml` with the modified model
+    /// and options, or for a deleted line the original ones); `None` for a
+    /// header.
+    fn element_display(
+        &self,
+        element: ViewElement,
+        cx: &App,
+    ) -> Option<(String, RowHighlights, gpui::FontFeatures)> {
+        let (editor, line) = match element {
+            ViewElement::Unchanged { modified, .. } | ViewElement::Added { modified } => {
+                (self.modified.read(cx), modified)
+            }
+            ViewElement::Deleted { original, .. } => (self.original.read(cx), original),
+            ViewElement::Header => return None,
+        };
+        let model = editor.model().read(cx);
+        let options = editor.options();
+        let (text, highlights) = row_display(
+            &line_text(model.buffer().rope(), line),
+            options,
+            model.options().tab_size as usize,
+            editor.colors(),
+        );
+        Some((text, highlights, options.font_ligatures.features()))
+    }
+
+    /// The current group's rows' text, as rendered, for tests.
+    pub(crate) fn row_texts_for_tests(&self, cx: &App) -> Vec<String> {
+        self.groups
+            .get(self.current_group)
+            .map(|group| {
+                group
+                    .lines
+                    .iter()
+                    .filter_map(|element| self.element_display(*element, cx))
+                    .map(|(text, _, _)| text)
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// The groups, for tests.
     pub(crate) fn state_for_tests(&self) -> (usize, usize, usize) {
         (self.groups.len(), self.current_group, self.current_element)
@@ -502,7 +623,6 @@ impl Render for AccessibleDiffViewer {
             .rope()
             .clone();
         let modified_rope = modified_editor.model().read(cx).buffer().rope().clone();
-        let tab_size = modified_editor.model().read(cx).options().tab_size.max(1) as usize;
         let group_count = self.groups.len();
         let em_width = modified_editor
             .layout
@@ -517,20 +637,8 @@ impl Render for AccessibleDiffViewer {
                 group
                     .lines
                     .iter()
-                    .map(|element| match *element {
-                        ViewElement::Unchanged { modified, .. }
-                        | ViewElement::Added { modified } => line_text(&modified_rope, modified),
-                        ViewElement::Deleted { original, .. } => {
-                            line_text(&original_rope, original)
-                        }
-                        ViewElement::Header => String::new(),
-                    })
-                    .map(|text| {
-                        crate::colorize::expand_tabs(&text, tab_size)
-                            .0
-                            .chars()
-                            .count()
-                    })
+                    .filter_map(|element| self.element_display(*element, cx))
+                    .map(|(text, _, _)| text.chars().count())
                     .max()
                     .unwrap_or(0)
             })
@@ -576,11 +684,8 @@ impl Render for AccessibleDiffViewer {
                             ViewElement::Added { modified } => (None, Some(modified), 1),
                             ViewElement::Header => unreachable!(),
                         };
-                        let content = match modified {
-                            Some(line) if kind >= 0 => line_text(&modified_rope, line),
-                            _ => line_text(&original_rope, original.unwrap_or(1)),
-                        };
-                        let (text, _) = crate::colorize::expand_tabs(&content, tab_size);
+                        let (text, highlights, font_features) =
+                            self.element_display(element, cx).unwrap_or_default();
                         let (row_background, number_background, sign) = match kind {
                             1 => (
                                 Some(colors.diff_inserted_line_background),
@@ -626,7 +731,11 @@ impl Render for AccessibleDiffViewer {
                                     .items_center()
                                     .children(sign.map(|sign| codicon(sign).size(px(14.)))),
                             )
-                            .child(text);
+                            .child(
+                                div()
+                                    .font_features(font_features)
+                                    .child(StyledText::new(text).with_highlights(highlights)),
+                            );
                         if let Some(background) = row_background {
                             row = row.bg(background);
                         }

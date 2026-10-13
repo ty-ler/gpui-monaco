@@ -980,6 +980,25 @@ struct GutterItem {
     mapping: DetailedLineRangeMapping,
 }
 
+/// A gutter toolbar's open overflow menu: the actions past its limit.
+struct GutterOverflowMenu {
+    /// Where it opens, in window coordinates.
+    position: gpui::Point<Pixels>,
+    actions: Vec<DiffHunkAction>,
+    revert: GutterRevert,
+    mapping: DetailedLineRangeMapping,
+}
+
+/// Monaco `WorkbenchToolBar`'s `overflowBehavior`: the first `max_items`
+/// actions are buttons, the rest go into the "More Actions..." menu.
+fn split_toolbar_actions(
+    mut actions: Vec<DiffHunkAction>,
+    max_items: usize,
+) -> (Vec<DiffHunkAction>, Vec<DiffHunkAction>) {
+    let overflow = actions.split_off(max_items.min(actions.len()));
+    (actions, overflow)
+}
+
 /// Monaco `DiffToolBar.layout`: the button's top for an item spanning
 /// `top..bottom` in a viewport of `viewport` height. It centers on the item,
 /// staying inside both while there's room.
@@ -991,6 +1010,11 @@ fn gutter_button_top(top: Pixels, bottom: Pixels, viewport: Pixels, height: Pixe
     if viewport_range.0 < viewport_range.1 && parent_range.0 < parent_range.1 {
         button_top = button_top.clamp(viewport_range.0, viewport_range.1);
         button_top = button_top.clamp(parent_range.0, parent_range.1);
+    }
+    // Keep the whole toolbar in the gutter, which clips it: a small change
+    // at the top with a "More Actions..." button is taller than its line.
+    if height <= viewport {
+        button_top = button_top.clamp(px(0.), viewport - height);
     }
     button_top
 }
@@ -1704,9 +1728,13 @@ impl DeletedCode {
         if start == end {
             return None;
         }
-        let rope = self.source.original.read(cx).buffer().rope();
+        let model = self.source.original.read(cx);
+        let rope = model.buffer().rope();
         let range = rope.point_utf16_to_offset(start)..rope.point_utf16_to_offset(end);
-        Some(rope.text_for_range(range))
+        Some(with_line_ending(
+            rope.text_for_range(range),
+            model.line_ending(),
+        ))
     }
 
     /// Copies the selection to the clipboard.
@@ -1721,7 +1749,8 @@ impl DeletedCode {
     /// Monaco's "Copy deleted lines": the change's original lines, through
     /// the start of the line after them (`toExclusiveRange`).
     fn deleted_text(&self, cx: &App) -> String {
-        let rope = self.source.original.read(cx).buffer().rope();
+        let model = self.source.original.read(cx);
+        let rope = model.buffer().rope();
         let rows = &self.source.rows;
         let start = rope.point_to_offset(Point::new(rows.start.min(rope.max_point().row), 0));
         let end = if rows.end < rope.line_count() {
@@ -1729,15 +1758,16 @@ impl DeletedCode {
         } else {
             rope.len()
         };
-        rope.text_for_range(start..end)
+        with_line_ending(rope.text_for_range(start..end), model.line_ending())
     }
 
-    /// Monaco's "Copy deleted line (N)": one line, or a line break for an
-    /// empty one.
+    /// Monaco's "Copy deleted line (N)": one line, or the model's line
+    /// ending for an empty one.
     fn deleted_line_text(&self, row: u32, cx: &App) -> String {
-        let line = self.source.original.read(cx).buffer().rope().line(row);
+        let model = self.source.original.read(cx);
+        let line = model.buffer().rope().line(row);
         if line.is_empty() {
-            "\n".to_string()
+            model.line_ending().as_str().to_string()
         } else {
             line
         }
@@ -2456,13 +2486,25 @@ impl std::fmt::Debug for DiffHunkAction {
     }
 }
 
+/// `text` (from a rope, so with `\n` line breaks) with `line_ending`'s
+/// breaks (Monaco `getValueInRange`'s default `EndOfLinePreference`).
+fn with_line_ending(text: String, line_ending: text::LineEnding) -> String {
+    match line_ending {
+        text::LineEnding::Lf => text,
+        text::LineEnding::Crlf => text.replace('\n', "\r\n"),
+    }
+}
+
 /// Monaco `DiffEditorGutter.computeStagedValue`: `original` with
-/// `mapping`'s inner changes applied.
+/// `mapping`'s inner changes applied. Like Monaco's `TextModelText`, each
+/// side's text has its model's line ending.
 fn staged_value(
-    original: &text::Rope,
-    modified: &text::Rope,
+    (original, original_eol): (&text::Rope, text::LineEnding),
+    (modified, modified_eol): (&text::Rope, text::LineEnding),
     mapping: &DetailedLineRangeMapping,
 ) -> String {
+    let original_text =
+        |range: Range<usize>| with_line_ending(original.text_for_range(range), original_eol);
     let mut result = String::new();
     let mut last = 0;
     let offset = |rope: &text::Rope, range: &crate::diff::Range| {
@@ -2476,11 +2518,14 @@ fn staged_value(
         if original_range.start < last {
             continue;
         }
-        result.push_str(&original.text_for_range(last..original_range.start));
-        result.push_str(&modified.text_for_range(modified_range));
+        result.push_str(&original_text(last..original_range.start));
+        result.push_str(&with_line_ending(
+            modified.text_for_range(modified_range),
+            modified_eol,
+        ));
         last = original_range.end;
     }
-    result.push_str(&original.text_for_range(last..original.len()));
+    result.push_str(&original_text(last..original.len()));
     result
 }
 
@@ -2663,6 +2708,8 @@ pub struct DiffEditor {
     gutter_fade: usize,
     /// Host buttons in the gutter menu.
     hunk_actions: Vec<DiffHunkAction>,
+    /// A gutter toolbar's open "More Actions..." menu.
+    gutter_overflow: Option<GutterOverflowMenu>,
     /// Commands from [`DiffEditor::add_command`], by id.
     command_handlers: std::collections::HashMap<SharedString, DiffCommandHandler>,
     /// A hidden-lines bar's edge being dragged.
@@ -2769,6 +2816,7 @@ impl DiffEditor {
             breadcrumb_task: None,
             gutter_hovered: false,
             gutter_fade: 0,
+            gutter_overflow: None,
             hunk_actions: Vec::new(),
             command_handlers: Default::default(),
             unchanged_drag: None,
@@ -2813,7 +2861,10 @@ impl DiffEditor {
                         cx.notify();
                     }
                     CodeEditorEvent::SelectionsChanged(change) => {
-                        this.ensure_selections_visible(original, cx);
+                        // Monaco's cursor listeners skip content flushes.
+                        if change.reason != crate::events::CursorChangeReason::ContentFlush {
+                            this.ensure_selections_visible(original, cx);
+                        }
                         this.update_active_move(original, cx);
                         if change.reason == crate::events::CursorChangeReason::Explicit {
                             this.signal_change_at_cursor(original, cx);
@@ -3841,6 +3892,62 @@ impl DiffEditor {
         true
     }
 
+    /// Gutter item `item`'s toolbar for tests: the labels of its buttons
+    /// and of its "More Actions..." menu, as the gutter renders them.
+    #[doc(hidden)]
+    pub fn gutter_toolbar_for_tests(
+        &self,
+        item: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<(Vec<SharedString>, Vec<SharedString>)> {
+        let (shown, overflow) = self.gutter_toolbar(item, cx)?;
+        let labels = |actions: Vec<DiffHunkAction>| actions.into_iter().map(|a| a.label).collect();
+        Some((labels(shown), labels(overflow)))
+    }
+
+    /// Gutter item `item`'s toolbar where it is now.
+    fn gutter_toolbar(
+        &self,
+        item: usize,
+        cx: &mut Context<Self>,
+    ) -> Option<(Vec<DiffHunkAction>, Vec<DiffHunkAction>)> {
+        let item = self.gutter_items(cx).into_iter().nth(item)?;
+        let (top, bottom) = self
+            .modified
+            .read(cx)
+            .rows_y_span_with_zones(item.lines.to_rows())?;
+        Some(self.item_toolbar(&item, bottom - top, cx))
+    }
+
+    /// Opens gutter item `item`'s "More Actions..." menu and runs its
+    /// `index`th action, for tests. Returns whether there was one.
+    #[doc(hidden)]
+    pub fn run_gutter_overflow_for_tests(
+        &mut self,
+        item: usize,
+        index: usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(gutter_item) = self.gutter_items(cx).into_iter().nth(item) else {
+            return false;
+        };
+        let Some((_, actions)) = self.gutter_toolbar(item, cx) else {
+            return false;
+        };
+        if index >= actions.len() {
+            return false;
+        }
+        self.gutter_overflow = Some(GutterOverflowMenu {
+            position: gpui::Point::default(),
+            actions,
+            revert: gutter_item.revert,
+            mapping: gutter_item.mapping,
+        });
+        self.run_gutter_overflow_item(index, window, cx);
+        true
+    }
+
     /// Whether the gutter menu shows, for tests.
     #[doc(hidden)]
     pub fn shows_gutter_for_tests(&self, cx: &App) -> bool {
@@ -3980,27 +4087,34 @@ impl DiffEditor {
         {
             self.move_to_compare = None;
         }
-        // Comparing a moved block shows only its changes.
+        // Comparing a moved block shows only its changes, with Monaco's
+        // compare decorations.
         let compared = self
             .move_to_compare
             .and_then(|ix| self.shown_moves(&diff).get(ix));
-        let changes = compared.map_or(&diff.changes, |m| &m.changes);
-        let original_rope = self
-            .original
-            .read(cx)
-            .model()
-            .read(cx)
-            .buffer()
-            .rope()
-            .clone();
-        let (original_decorations, modified_decorations) = diff_decorations(
-            changes,
-            &self.options,
-            self.uses_true_inline_view(),
-            &original_rope,
-            &colors,
-            high_contrast,
-        );
+        let (original_decorations, modified_decorations) = match compared {
+            Some(moved) => {
+                compare_decorations(&moved.changes, &self.options, &colors, high_contrast)
+            }
+            None => {
+                let original_rope = self
+                    .original
+                    .read(cx)
+                    .model()
+                    .read(cx)
+                    .buffer()
+                    .rope()
+                    .clone();
+                diff_decorations(
+                    &diff.changes,
+                    &self.options,
+                    self.uses_true_inline_view(),
+                    &original_rope,
+                    &colors,
+                    high_contrast,
+                )
+            }
+        };
         let original_id = self.original.entity_id();
         let modified_id = self.modified.entity_id();
         let (old_original, old_modified) = std::mem::take(&mut self.decorations);
@@ -5393,8 +5507,15 @@ impl DiffEditor {
 
     /// Monaco `ensureModifiedLineIsVisible`/`ensureOriginalLineIsVisible`
     /// for each selection's ends: the cursor never sits in hidden lines.
+    /// Like Monaco, nothing is revealed while the diff has no changes: the
+    /// whole-file region of an identical diff stays collapsed.
     fn ensure_selections_visible(&mut self, original: bool, cx: &mut Context<Self>) {
-        if self.unchanged_regions().is_empty() {
+        if self.unchanged_regions().is_empty()
+            || self
+                .diff
+                .as_ref()
+                .is_some_and(|diff| diff.changes.is_empty())
+        {
             return;
         }
         let editor = if original {
@@ -5865,6 +5986,23 @@ impl DiffEditor {
         actions
     }
 
+    /// Gutter item `item`'s toolbar, `height` tall: its buttons, and the
+    /// actions in its "More Actions..." menu (Monaco's `overflowBehavior`:
+    /// 3 buttons, or 1 when the item is small).
+    fn item_toolbar(
+        &self,
+        item: &GutterItem,
+        height: Pixels,
+        cx: &App,
+    ) -> (Vec<DiffHunkAction>, Vec<DiffHunkAction>) {
+        let toolbar = match item.revert {
+            GutterRevert::Block(_) => DiffHunkToolbar::Hunk,
+            GutterRevert::Selection(_) => DiffHunkToolbar::Selection,
+        };
+        let small = item.mapping.original.start_line_number == 1 && height < px(30.);
+        split_toolbar_actions(self.toolbar_actions(toolbar, cx), if small { 1 } else { 3 })
+    }
+
     /// Monaco `DiffEditorGutter._hasActions`: the gutter shows while its
     /// menus have actions.
     fn shows_gutter(&self, cx: &App) -> bool {
@@ -5889,25 +6027,15 @@ impl DiffEditor {
             }
             return;
         }
-        let original = self
-            .original
-            .read(cx)
-            .model()
-            .read(cx)
-            .buffer()
-            .rope()
-            .clone();
-        let modified = self
-            .modified
-            .read(cx)
-            .model()
-            .read(cx)
-            .buffer()
-            .rope()
-            .clone();
+        let original = self.original.read(cx).model().read(cx);
+        let modified = self.modified.read(cx).model().read(cx);
         let context = DiffHunkContext {
             mapping: mapping.clone(),
-            original_with_modified_changes: staged_value(&original, &modified, mapping),
+            original_with_modified_changes: staged_value(
+                (original.buffer().rope(), original.line_ending()),
+                (modified.buffer().rope(), modified.line_ending()),
+                mapping,
+            ),
         };
         (action.run)(&context, window, cx);
     }
@@ -5948,18 +6076,12 @@ impl DiffEditor {
             if bottom < px(0.) || top > viewport {
                 continue;
             }
-            let toolbar = match item.revert {
-                GutterRevert::Block(_) => DiffHunkToolbar::Hunk,
-                GutterRevert::Selection(_) => DiffHunkToolbar::Selection,
-            };
-            let mut actions = self.toolbar_actions(toolbar, cx);
-            // Monaco's `overflowBehavior`: 3 buttons, or 1 when small.
-            let small = item.mapping.original.start_line_number == 1 && bottom - top < px(30.);
-            actions.truncate(if small { 1 } else { 3 });
+            let (actions, overflow) = self.item_toolbar(&item, bottom - top, cx);
             if actions.is_empty() {
                 continue;
             }
-            let toolbar_height = px(GUTTER_BUTTON_HEIGHT) * actions.len() as f32;
+            let button_count = actions.len() + usize::from(!overflow.is_empty());
+            let toolbar_height = px(GUTTER_BUTTON_HEIGHT) * button_count as f32;
             let button_top = gutter_button_top(top, bottom, viewport, toolbar_height);
             // Monaco's `.gutterItem`: shown always, while the gutter is
             // hovered, or fading out (0.7s) after.
@@ -5988,7 +6110,53 @@ impl DiffEditor {
                         this.run_hunk_action(&action, &revert, &mapping, window, cx)
                     }))
                     .children(label_with_icons(&icon))
+                    .into_any_element()
             });
+            let menu_open = self.gutter_overflow.is_some();
+            let more = (!overflow.is_empty()).then(|| {
+                let (revert, mapping) = (item.revert.clone(), item.mapping.clone());
+                let label: SharedString = "More Actions...".into();
+                // The button's bounds, which the menu opens below.
+                let bounds = Rc::new(Cell::new(Bounds::default()));
+                let sink = bounds.clone();
+                div()
+                    .id(("diff-hunk-more", ix))
+                    .relative()
+                    // Monaco hides the button's hover while its menu is open.
+                    .when(!menu_open, |button| {
+                        button.tooltip(crate::tooltip::tooltip(label.clone(), &colors))
+                    })
+                    .h(px(GUTTER_BUTTON_HEIGHT))
+                    .px(px(2.))
+                    .py(px(1.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .rounded(px(4.))
+                    .hover(|style| colors.toolbar_hover(style))
+                    .role(gpui::Role::Button)
+                    .aria_label(label)
+                    .child(
+                        canvas(move |b, _, _| sink.set(b), |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        let bounds = bounds.get();
+                        this.gutter_overflow = Some(GutterOverflowMenu {
+                            position: bounds.bottom_left(),
+                            actions: overflow.clone(),
+                            revert: revert.clone(),
+                            mapping: mapping.clone(),
+                        });
+                        cx.notify();
+                    }))
+                    .child(codicon(Codicon::ToolBarMore))
+                    .into_any_element()
+            });
+            let buttons = buttons.chain(more);
             let element = div()
                 .absolute()
                 .top(top)
@@ -6086,8 +6254,77 @@ impl DiffEditor {
                 }))
                 .on_scroll_wheel(cx.listener(|this, event, _, cx| this.delegate_wheel(event, cx)))
                 .children(items)
+                .children(self.render_gutter_overflow(&colors, cx))
                 .into_any_element(),
         )
+    }
+
+    /// The open "More Actions..." menu of a gutter toolbar (the
+    /// `WorkbenchToolBar`'s overflow).
+    fn render_gutter_overflow(
+        &self,
+        colors: &EditorColors,
+        cx: &mut Context<Self>,
+    ) -> Option<impl IntoElement + use<>> {
+        let menu = self.gutter_overflow.as_ref()?;
+        let items = menu.actions.iter().enumerate().map(|(ix, action)| {
+            div()
+                .id(("diff-hunk-more-item", ix))
+                .px(px(12.))
+                .h(px(24.))
+                .flex()
+                .items_center()
+                .whitespace_nowrap()
+                .cursor_pointer()
+                .role(gpui::Role::MenuItem)
+                .hover(|style| {
+                    style
+                        .bg(colors.menu_selection_background)
+                        .text_color(colors.menu_selection_foreground)
+                })
+                .on_click(cx.listener(move |this, _, window, cx| {
+                    cx.stop_propagation();
+                    this.run_gutter_overflow_item(ix, window, cx);
+                }))
+                .child(action.label.clone())
+        });
+        Some(
+            deferred(
+                anchored().position(menu.position).child(
+                    div()
+                        .id("diff-hunk-more-menu")
+                        .occlude()
+                        .min_w(px(130.))
+                        .py(px(4.))
+                        .rounded(px(5.))
+                        .bg(colors.menu_background)
+                        .text_color(colors.menu_foreground)
+                        .text_size(px(13.))
+                        .when_some(colors.menu_border, |menu, border| {
+                            menu.border_1().border_color(border)
+                        })
+                        .shadow_md()
+                        .role(gpui::Role::Menu)
+                        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                            this.gutter_overflow = None;
+                            cx.notify();
+                        }))
+                        .children(items),
+                ),
+            )
+            .with_priority(1),
+        )
+    }
+
+    /// Runs item `ix` of the open gutter overflow menu and closes it.
+    fn run_gutter_overflow_item(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(menu) = self.gutter_overflow.take() else {
+            return;
+        };
+        if let Some(action) = menu.actions.get(ix) {
+            self.run_hunk_action(action, &menu.revert, &menu.mapping, window, cx);
+        }
+        cx.notify();
     }
 
     /// Shows or hides the accessible diff viewer.
@@ -6157,6 +6394,18 @@ impl DiffEditor {
     #[doc(hidden)]
     pub fn accessible_viewer_aria_for_tests(&self, cx: &App) -> Option<AccessibleDiffViewerAria> {
         Some(self.accessible_viewer.as_ref()?.read(cx).aria_for_tests(cx))
+    }
+
+    /// The accessible diff viewer's current rows' text as rendered, for
+    /// tests.
+    #[doc(hidden)]
+    pub fn accessible_viewer_row_texts_for_tests(&self, cx: &App) -> Option<Vec<String>> {
+        Some(
+            self.accessible_viewer
+                .as_ref()?
+                .read(cx)
+                .row_texts_for_tests(cx),
+        )
     }
 
     /// The accessible diff viewer's current line, for tests: its kind
@@ -6838,6 +7087,125 @@ fn diff_overview_colors(theme: &crate::theme::Theme) -> (Hsla, Hsla) {
 /// A decoration on one side of the diff.
 type SideDecoration = (Side, DecorationOptions);
 
+/// The diff border style: dashed in high contrast themes.
+fn diff_border_style(high_contrast: bool) -> gpui::BorderStyle {
+    if high_contrast {
+        gpui::BorderStyle::Dashed
+    } else {
+        gpui::BorderStyle::Solid
+    }
+}
+
+/// Monaco `diffLineAddDecorationBackground(WithIndicator)`/
+/// `diffLineDeleteDecorationBackground(WithIndicator)`: a changed line's
+/// background, gutter background and, with `render_indicators`, sign.
+fn diff_line_decoration(
+    inserted: bool,
+    options: &DiffEditorOptions,
+    colors: &EditorColors,
+    high_contrast: bool,
+) -> DecorationOptions {
+    let border_style = diff_border_style(high_contrast);
+    let (background, gutter, sign, border) = if inserted {
+        (
+            colors.diff_inserted_line_background,
+            colors.diff_gutter_inserted_line_background,
+            Codicon::Add,
+            colors.diff_inserted_text_border,
+        )
+    } else {
+        (
+            colors.diff_removed_line_background,
+            colors.diff_gutter_removed_line_background,
+            Codicon::Remove,
+            colors.diff_removed_text_border,
+        )
+    };
+    DecorationOptions {
+        background: Some(background),
+        border,
+        border_style,
+        is_whole_line: true,
+        margin_background: Some(gutter),
+        // Monaco's `insert-sign`/`delete-sign`: 0.7 opacity.
+        lines_decoration_text: options
+            .render_indicators
+            .then(|| (sign.text(), colors.foreground.opacity(0.7))),
+        ..Default::default()
+    }
+}
+
+/// Monaco `diffAddDecoration`/`diffDeleteDecoration` (or, `whole_line`,
+/// the whole-line `char-insert`/`char-delete` of a pure insertion or
+/// deletion): a changed range's text background.
+fn diff_text_decoration(
+    inserted: bool,
+    whole_line: bool,
+    colors: &EditorColors,
+    high_contrast: bool,
+) -> DecorationOptions {
+    let border_style = diff_border_style(high_contrast);
+    let (background, border) = if inserted {
+        (
+            colors.diff_inserted_text_background,
+            colors.diff_inserted_text_border,
+        )
+    } else {
+        (
+            colors.diff_removed_text_background,
+            colors.diff_removed_text_border,
+        )
+    };
+    DecorationOptions {
+        background: (background.a > 0.).then_some(background),
+        border,
+        border_style,
+        is_whole_line: whole_line,
+        // Monaco `diffAddDecoration`/`diffDeleteDecoration`.
+        should_fill_line_on_line_break: !whole_line,
+        ..Default::default()
+    }
+}
+
+/// Monaco `DiffEditorDecorations` while `movedTextToCompare` is set: each
+/// change's line backgrounds and a text background for every inner change,
+/// without the whole-line text backgrounds, empty-range bars and range
+/// filter of [`diff_decorations`].
+fn compare_decorations(
+    changes: &[DetailedLineRangeMapping],
+    options: &DiffEditorOptions,
+    colors: &EditorColors,
+    high_contrast: bool,
+) -> (Vec<SideDecoration>, Vec<SideDecoration>) {
+    let mut original = Vec::new();
+    let mut modified = Vec::new();
+    for m in changes {
+        if !m.original.is_empty() {
+            original.push((
+                Side::Lines(m.original),
+                diff_line_decoration(false, options, colors, high_contrast),
+            ));
+        }
+        if !m.modified.is_empty() {
+            modified.push((
+                Side::Lines(m.modified),
+                diff_line_decoration(true, options, colors, high_contrast),
+            ));
+        }
+        for i in &m.inner_changes {
+            original.push((
+                Side::Text(i.original_range.to_point_utf16_range()),
+                diff_text_decoration(false, false, colors, high_contrast),
+            ));
+            modified.push((
+                Side::Text(i.modified_range.to_point_utf16_range()),
+                diff_text_decoration(true, false, colors, high_contrast),
+            ));
+        }
+    }
+    (original, modified)
+}
+
 /// Monaco `DiffEditorDecorations`: line backgrounds and gutter signs for
 /// changed lines, and text backgrounds for the changed characters. Both
 /// get the `diffEditor.insertedTextBorder`/`removedTextBorder`, dashed in
@@ -6851,61 +7219,9 @@ fn diff_decorations(
     colors: &EditorColors,
     high_contrast: bool,
 ) -> (Vec<SideDecoration>, Vec<SideDecoration>) {
-    let border_style = if high_contrast {
-        gpui::BorderStyle::Dashed
-    } else {
-        gpui::BorderStyle::Solid
-    };
-    let line = |inserted: bool| {
-        let (background, gutter, sign, border) = if inserted {
-            (
-                colors.diff_inserted_line_background,
-                colors.diff_gutter_inserted_line_background,
-                Codicon::Add,
-                colors.diff_inserted_text_border,
-            )
-        } else {
-            (
-                colors.diff_removed_line_background,
-                colors.diff_gutter_removed_line_background,
-                Codicon::Remove,
-                colors.diff_removed_text_border,
-            )
-        };
-        DecorationOptions {
-            background: Some(background),
-            border,
-            border_style,
-            is_whole_line: true,
-            margin_background: Some(gutter),
-            // Monaco's `insert-sign`/`delete-sign`: 0.7 opacity.
-            lines_decoration_text: options
-                .render_indicators
-                .then(|| (sign.text(), colors.foreground.opacity(0.7))),
-            ..Default::default()
-        }
-    };
+    let line = |inserted: bool| diff_line_decoration(inserted, options, colors, high_contrast);
     let text = |inserted: bool, whole_line: bool| {
-        let (background, border) = if inserted {
-            (
-                colors.diff_inserted_text_background,
-                colors.diff_inserted_text_border,
-            )
-        } else {
-            (
-                colors.diff_removed_text_background,
-                colors.diff_removed_text_border,
-            )
-        };
-        DecorationOptions {
-            background: (background.a > 0.).then_some(background),
-            border,
-            border_style,
-            is_whole_line: whole_line,
-            // Monaco `diffAddDecoration`/`diffDeleteDecoration`.
-            should_fill_line_on_line_break: !whole_line,
-            ..Default::default()
-        }
+        diff_text_decoration(inserted, whole_line, colors, high_contrast)
     };
     // Monaco `diffDeleteDecorationEmpty`/`diffAddDecorationEmpty`: a 3px
     // bar in the text background color (`diff-range-empty`), a pixel left
@@ -7597,9 +7913,48 @@ mod tests {
             &["a", "foo bar", "b"],
             &DiffOptions::default(),
         );
+        let lf = text::LineEnding::Lf;
         assert_eq!(
-            staged_value(&original, &modified, &diff.changes[0]),
+            staged_value((&original, lf), (&modified, lf), &diff.changes[0]),
             "a\nfoo bar\nb"
+        );
+    }
+
+    /// A toolbar centers on its change, but stays inside the gutter: a
+    /// small change on the first line with a "More Actions..." button.
+    #[test]
+    fn gutter_toolbars_stay_in_the_gutter() {
+        // Centered on a change in the middle.
+        assert_eq!(
+            gutter_button_top(px(200.), px(300.), px(600.), px(40.)),
+            px(230.)
+        );
+        // A 20px change at the top: 40px of buttons start at 0, not -10.
+        assert_eq!(
+            gutter_button_top(px(0.), px(20.), px(600.), px(40.)),
+            px(0.)
+        );
+        // And at the bottom, end at the viewport's bottom.
+        assert_eq!(
+            gutter_button_top(px(580.), px(600.), px(600.), px(40.)),
+            px(560.)
+        );
+    }
+
+    /// Monaco's `TextModelText`: each side's text has its model's EOL.
+    #[test]
+    fn staged_value_keeps_the_models_line_endings() {
+        let original = text::Rope::from("a\nb\nc");
+        let modified = text::Rope::from("a\nx\ny\nc");
+        let diff = compute_diff(
+            &["a", "b", "c"],
+            &["a", "x", "y", "c"],
+            &DiffOptions::default(),
+        );
+        let crlf = text::LineEnding::Crlf;
+        assert_eq!(
+            staged_value((&original, crlf), (&modified, crlf), &diff.changes[0]),
+            "a\r\nx\r\ny\r\nc"
         );
     }
 }

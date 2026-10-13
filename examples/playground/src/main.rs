@@ -843,6 +843,24 @@ fn main() {
                                     });
                                 }
                             }
+                            // `PLAYGROUND_DIFF_HUNK_ACTIONS=N` adds N host
+                            // buttons to the gutter's hunk toolbars.
+                            let hunk_actions = std::env::var("PLAYGROUND_DIFF_HUNK_ACTIONS")
+                                .ok()
+                                .and_then(|n| n.parse::<usize>().ok())
+                                .unwrap_or(0);
+                            for i in 1..=hunk_actions {
+                                diff.add_hunk_action(
+                                    gpui_monaco::DiffHunkAction {
+                                        id: format!("playground.action{i}").into(),
+                                        label: format!("Action {i}").into(),
+                                        icon: "$(add)".into(),
+                                        toolbar: gpui_monaco::DiffHunkToolbar::Hunk,
+                                        run: std::rc::Rc::new(|_, _, _| {}),
+                                    },
+                                    cx,
+                                );
+                            }
                             diff
                         });
                         // Typing goes to the modified side.
