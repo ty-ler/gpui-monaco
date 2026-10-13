@@ -106,7 +106,7 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
   - Alt-click it to fold the regions around it instead (or unfold them if any are folded).
   - A click keeps the view on the clicked line rather than scrolling back to the cursor. The folding commands, Go to Parent/Previous/Next Fold included, show the cursor, centered if it was off screen.
   - A collapsed region the ranges no longer include stays folded, with the manual icons.
-- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it, or at the end of the line's text, unfolds the region and puts the cursor there, and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color, in the minimap too: a half-color band on every wrapped piece of the line and the full color over its text.
+- **Placeholder:** a collapsed region shows `⋯` after its first line. Clicking it, or at the end of the line's text, unfolds the region and puts the cursor there (a middle click unfolds everything inside it too), and so does clicking after the end of the line with `unfold_on_click_after_end_of_line`. With `folding_highlight` (the default), the line gets the `editor.foldBackground` color, in the minimap too: a half-color band on every wrapped piece of the line and the full color over its text.
 - **Commands:** Monaco's, with Cmd on macOS and Ctrl elsewhere:
 
 | Keys | Command |
@@ -121,8 +121,10 @@ Fold ranges come from these sources, in order (Monaco's `foldingStrategy: auto`)
 | Cmd+K Cmd+/ | Fold All Block Comments |
 | Cmd+K Cmd+8 / Cmd+K Cmd+9 | Fold / Unfold All Regions (`#region` markers) |
 | Cmd+K Cmd+, | Create a manual folding range from the selection (it's collapsed and kept across edits) |
-| Cmd+K Cmd+. | Remove manual folding ranges at the cursor or in the selection |
+| Cmd+K Cmd+. | Remove manual folding ranges at the cursor or in the selection (the ranges are computed again, bringing back the regions they replaced) |
 | – | Go to Parent / Previous / Next Fold, Toggle Import Fold |
+
+A folding command run before the editor's first ranges are computed, from `CodeEditor::new`, `set_model` or `set_value` on, waits for them and runs when they arrive (on the first frame), as Monaco's actions await the folding model.
 
 Block comments and regions are found by kind when a folding range provider gives ranges with kinds. Otherwise they're found by the first line matching the language's block comment or region marker, as in Monaco. `folding_imports_by_default` collapses import ranges the first time a computation finds some, even from a provider registered later; a saved view state remembers it (`FoldingViewState::folded_imports`), so restored imports aren't folded again.
 - **View state:** `save_view_state` keeps the collapsed and manual regions, and `restore_view_state` folds them again, leaving cursors where they were saved, even in a fold.

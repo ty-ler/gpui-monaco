@@ -808,6 +808,11 @@ pub struct CodeEditor {
     /// `triggerFoldingModelChanged` after an option, language
     /// configuration or provider change).
     pub(crate) fold_stale: bool,
+    /// No ranges have been computed for this model, or since `setValue`,
+    /// yet: folding commands wait for them in `fold_pending` (Monaco's
+    /// actions await `FoldingController.getFoldingModel()`).
+    pub(crate) fold_ranges_missing: bool,
+    pub(crate) fold_pending: Vec<crate::folding_commands::PendingFoldCommand>,
     /// Imports were folded by `folding_imports_by_default` (Monaco
     /// `_currentModelHasFoldedImports`).
     pub(crate) folded_imports: bool,
@@ -1244,6 +1249,8 @@ impl CodeEditor {
             fold_computing: false,
             fold_rerun: false,
             fold_stale: false,
+            fold_ranges_missing: true,
+            fold_pending: Vec::new(),
             folded_imports: false,
             folding_limit: FoldingLimit::default(),
             fold_mouse_down: None,
@@ -2996,6 +3003,8 @@ impl CodeEditor {
                 // the whole text drops them.
                 if *kind == EditKind::SetValue {
                     self.folds.clear(model.read(cx).buffer());
+                    // Folding commands wait for the new text's ranges.
+                    self.fold_ranges_missing = true;
                 } else {
                     self.folds.sync(model.read(cx).buffer());
                 }
@@ -5305,6 +5314,12 @@ impl CodeEditor {
                 if std::mem::take(&mut this.fold_rerun) {
                     this.fold_requested = None;
                 }
+                // Monaco `FoldingAction.runEditorCommand`: the commands run
+                // before there were ranges for this text run now.
+                if version == this.snapshot.version() {
+                    this.fold_ranges_missing = false;
+                    this.run_pending_fold_commands(cx);
+                }
                 cx.notify();
             })
             .ok();
@@ -5407,6 +5422,38 @@ impl CodeEditor {
             .map(|control| control.row)
     }
 
+    /// The row whose collapsed line's end a press at `position` is on
+    /// (Monaco `FoldingController.onEditorMouseDown`'s `CONTENT_TEXT` and
+    /// `CONTENT_EMPTY` cases): the `⋯` after a collapsed line ends its
+    /// text, as does empty space after the line with
+    /// `unfold_on_click_after_end_of_line`.
+    fn fold_line_end_at(
+        &self,
+        mouse: &crate::mouse_target::EditorMouseEvent,
+        position: Point<Pixels>,
+    ) -> Option<u32> {
+        let placeholder = self.layout.as_ref().and_then(|layout| {
+            layout
+                .fold_placeholders
+                .iter()
+                .find(|(_, bounds)| bounds.contains(&position))
+                .map(|(row, _)| *row)
+        });
+        let at_end = mouse
+            .target
+            .position
+            .filter(|position| match mouse.target.kind {
+                crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false } => {
+                    self.options.unfold_on_click_after_end_of_line
+                }
+                crate::mouse_target::MouseTargetKind::ContentText => {
+                    position.column == self.snapshot.line_len_utf16(position.row)
+                }
+                _ => false,
+            });
+        placeholder.or(at_end.map(|position| position.row))
+    }
+
     /// Monaco `FoldingController.onEditorMouseUp` for `mouse`, a release.
     fn folding_mouse_up_on(
         &mut self,
@@ -5459,6 +5506,21 @@ impl CodeEditor {
             self.folding_mouse_down(Some(row), true);
             return;
         }
+        // And on the end of a collapsed line's text, its `⋯` included: the
+        // release unfolds it recursively. The press goes on to scroll or
+        // column-select, as Monaco's mouse handler and middle scroll
+        // controller see it too.
+        let mouse = self.emit_mouse(
+            event.position,
+            Some(event.button),
+            event.modifiers,
+            event.click_count,
+            window,
+            cx,
+        );
+        if let Some(row) = self.fold_line_end_at(&mouse, event.position) {
+            self.folding_mouse_down(Some(row), false);
+        }
         if self.options.scroll_on_middle_click {
             self.animation.middle_scroll =
                 Some(crate::view::animation::MiddleScroll::new(event.position));
@@ -5468,14 +5530,6 @@ impl CodeEditor {
         window.focus(&self.focus_handle, cx);
         // Monaco `mouseMiddleClickAction`: the link gesture notes the click,
         // to open a link (or act like a Cmd/Ctrl+click) on mouse-up.
-        let mouse = self.emit_mouse(
-            event.position,
-            Some(event.button),
-            event.modifiers,
-            event.click_count,
-            window,
-            cx,
-        );
         self.click_link_mouse_down(&mouse);
         let position = self.mouse_position_for_point(event.position, window, cx);
         // Monaco `dispatchMouse`: with the selection clipboard (Linux) a
@@ -5802,26 +5856,7 @@ impl CodeEditor {
             self.folding_mouse_down(Some(row), true);
             return;
         }
-        // The `⋯` after a collapsed line ends its text, as does empty space
-        // after the line with `unfold_on_click_after_end_of_line`.
-        let placeholder = layout
-            .fold_placeholders
-            .iter()
-            .find(|(_, bounds)| bounds.contains(&event.position))
-            .map(|(row, _)| *row);
-        let at_end = mouse
-            .target
-            .position
-            .filter(|position| match mouse.target.kind {
-                crate::mouse_target::MouseTargetKind::ContentEmpty { after_lines: false } => {
-                    self.options.unfold_on_click_after_end_of_line
-                }
-                crate::mouse_target::MouseTargetKind::ContentText => {
-                    position.column == self.snapshot.line_len_utf16(position.row)
-                }
-                _ => false,
-            });
-        if let Some(row) = placeholder.or(at_end.map(|position| position.row)) {
+        if let Some(row) = self.fold_line_end_at(&mouse, event.position) {
             self.folding_mouse_down(Some(row), false);
         }
         // Clicking a color swatch opens the color picker.

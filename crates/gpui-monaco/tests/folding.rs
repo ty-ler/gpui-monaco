@@ -1146,3 +1146,88 @@ fn recovered_folds_get_the_manual_icon(cx: &mut TestAppContext) {
     assert_eq!(collapsed(&editor, cx), [(0, 3)]);
     assert_eq!(icons(cx), [(0, FoldingIcon::ManualCollapsed)]);
 }
+
+/// Monaco `FoldingAction.runEditorCommand` awaits `getFoldingModel()`:
+/// commands run before the first ranges are computed wait for them.
+#[gpui::test]
+fn commands_before_the_first_ranges_wait_for_them(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(NESTED).with_language("rust"));
+        let mut editor = CodeEditor::new(model, window, cx);
+        editor.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                9, 0,
+            ))],
+            cx,
+        );
+        editor.fold_all(cx);
+        editor.go_to_previous_fold(cx);
+        editor
+    });
+    settle(cx);
+    // In order: everything folds, then the cursor goes to `fn b`.
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+    assert_eq!(head(&editor, cx), PointUtf16::new(7, 0));
+}
+
+/// After `setValue` drops the regions, a command waits for the new text's
+/// ranges (`editor.trigger('', 'editor.foldAll')` right after it).
+#[gpui::test]
+fn commands_after_set_value_wait_for_the_new_ranges(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    editor.update_in(cx, |e, window, cx| {
+        e.set_value(RUST, cx);
+        e.trigger("editor.foldAll", window, cx).unwrap();
+    });
+    settle(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 7)]);
+}
+
+/// Monaco `RemoveFoldRangeFromSelectionAction` computes the ranges again:
+/// the regions the manual range replaced or crossed come back.
+#[gpui::test]
+fn removing_a_manual_range_brings_back_the_regions_it_displaced(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(NESTED, cx);
+    let before = ranges(&editor, cx);
+    assert_eq!(before, [(0, 3), (1, 2), (5, 6), (7, 8)]);
+    // Rows 0–7: replaces `fn a`'s region and crosses `fn b`'s.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::new(
+                PointUtf16::new(0, 0),
+                PointUtf16::new(7, 3),
+            )],
+            cx,
+        );
+        e.create_fold_from_selection(cx);
+    });
+    assert_eq!(collapsed(&editor, cx), [(0, 7)]);
+    assert!(!ranges(&editor, cx).contains(&(7, 8)));
+    editor.update(cx, |e, cx| e.remove_manual_folding_ranges(cx));
+    settle(cx);
+    assert_eq!(ranges(&editor, cx), before);
+    assert!(collapsed(&editor, cx).is_empty());
+}
+
+/// Monaco `onEditorMouseDown` takes middle presses on a collapsed line's
+/// `⋯` too, and the release unfolds it recursively.
+#[gpui::test]
+fn a_middle_click_on_the_placeholder_unfolds_recursively(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (editor, cx) = setup(NESTED, cx);
+    cursor(&editor, cx, 9);
+    editor.update(cx, |e, cx| e.fold_all(cx));
+    draw(cx);
+    assert_eq!(collapsed(&editor, cx), [(0, 3), (1, 2), (5, 6), (7, 8)]);
+    let at = editor.read_with(cx, |e, _| {
+        let end = e.scrolled_visible_position(PointUtf16::new(0, 8)).unwrap();
+        gpui::point(end.x + gpui::px(5.), end.y + gpui::px(8.))
+    });
+    cx.simulate_mouse_down(at, MouseButton::Middle, Modifiers::default());
+    cx.simulate_mouse_up(at, MouseButton::Middle, Modifiers::default());
+    assert_eq!(collapsed(&editor, cx), [(5, 6), (7, 8)]);
+}

@@ -16,7 +16,40 @@ use crate::view::folding::{FoldSource, FoldState, FoldingLimit, MergeRange};
 /// [`CodeEditor::reveal_cursor_in_folds`].
 const REVEAL_CURSOR_DELAY: std::time::Duration = std::time::Duration::from_millis(200);
 
+/// A folding command waiting for the first ranges (see
+/// [`CodeEditor::defer_fold_command`]).
+pub(crate) type PendingFoldCommand = Box<dyn FnOnce(&mut CodeEditor, &mut Context<CodeEditor>)>;
+
 impl CodeEditor {
+    /// Monaco `FoldingAction.runEditorCommand` awaits
+    /// `getFoldingModel()`: until ranges have been computed for the model
+    /// (or since `setValue`), `command` waits for them and runs when they
+    /// arrive. Returns whether it waits. Once there are ranges, commands
+    /// act on them at once, moved through any edits since.
+    fn defer_fold_command(
+        &mut self,
+        cx: &mut Context<Self>,
+        command: impl FnOnce(&mut Self, &mut Context<Self>) + 'static,
+    ) -> bool {
+        if !self.fold_ranges_missing
+            || !self.options.folding
+            || self.model().read(cx).is_too_large_for_tokenization()
+        {
+            return false;
+        }
+        self.fold_pending.push(Box::new(command));
+        // The ranges are computed from the next frame.
+        cx.notify();
+        true
+    }
+
+    /// Runs the folding commands that waited for the ranges, in order.
+    pub(crate) fn run_pending_fold_commands(&mut self, cx: &mut Context<Self>) {
+        for command in std::mem::take(&mut self.fold_pending) {
+            command(self, cx);
+        }
+    }
+
     /// Monaco `FoldingAction.getSelectedLines`: each selection's first row.
     fn selected_rows(&self) -> Vec<u32> {
         self.cursors
@@ -56,6 +89,9 @@ impl CodeEditor {
     /// Collapses the innermost expanded region at each selection, or its
     /// parent (Monaco `editor.fold`).
     pub fn fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.fold(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| fm::set_collapse_state_up(m, true, rows));
     }
 
@@ -73,6 +109,13 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if !self.options.folding {
+            return;
+        }
+        let owned = direction.map(str::to_owned);
+        let waiting = lines.clone();
+        if self.defer_fold_command(cx, move |this, cx| {
+            this.fold_with_args(levels, owned.as_deref(), waiting, collapse, cx)
+        }) {
             return;
         }
         let rows = lines.unwrap_or_else(|| self.selected_rows());
@@ -97,6 +140,9 @@ impl CodeEditor {
 
     /// Expands the region at each selection (Monaco `editor.unfold`).
     pub fn unfold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.unfold(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| {
             fm::set_collapse_state_levels_down(m, false, 1, Some(rows))
         });
@@ -105,6 +151,9 @@ impl CodeEditor {
     /// Collapses the region at each selection and everything inside it
     /// (Monaco `editor.foldRecursively`).
     pub fn fold_recursively(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.fold_recursively(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| {
             fm::set_collapse_state_levels_down(m, true, usize::MAX, Some(rows))
         });
@@ -113,6 +162,9 @@ impl CodeEditor {
     /// Expands the region at each selection and everything inside it
     /// (Monaco `editor.unfoldRecursively`).
     pub fn unfold_recursively(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.unfold_recursively(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| {
             fm::set_collapse_state_levels_down(m, false, usize::MAX, Some(rows))
         });
@@ -120,17 +172,26 @@ impl CodeEditor {
 
     /// Toggles the region at each selection (Monaco `editor.toggleFold`).
     pub fn toggle_fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.toggle_fold(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| fm::toggle_collapse_state(m, 1, rows));
     }
 
     /// Toggles the region at each selection and everything inside it
     /// (Monaco `editor.toggleFoldRecursively`).
     pub fn toggle_fold_recursively(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.toggle_fold_recursively(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| fm::toggle_collapse_state(m, usize::MAX, rows));
     }
 
     /// Collapses every region (Monaco `editor.foldAll`).
     pub fn fold_all(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.fold_all(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, _| {
             fm::set_collapse_state_levels_down(m, true, usize::MAX, None)
         });
@@ -138,6 +199,9 @@ impl CodeEditor {
 
     /// Expands every region (Monaco `editor.unfoldAll`).
     pub fn unfold_all(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.unfold_all(cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, _| {
             fm::set_collapse_state_levels_down(m, false, usize::MAX, None)
         });
@@ -146,6 +210,9 @@ impl CodeEditor {
     /// Collapses every region at nesting `level` (1 is the top) except those
     /// around a selection (Monaco `editor.foldLevel1`…`7`).
     pub fn fold_level(&mut self, level: usize, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, move |this, cx| this.fold_level(level, cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| {
             fm::set_collapse_state_at_level(m, level, true, rows)
         });
@@ -154,6 +221,9 @@ impl CodeEditor {
     /// Collapses (or expands) every region except those around a selection
     /// (Monaco `editor.foldAllExcept` / `editor.unfoldAllExcept`).
     pub fn fold_all_except(&mut self, collapse: bool, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, move |this, cx| this.fold_all_except(collapse, cx)) {
+            return;
+        }
         self.run_fold_command(cx, |m, rows| {
             fm::set_collapse_state_for_rest(m, collapse, rows)
         });
@@ -163,6 +233,9 @@ impl CodeEditor {
     /// comment ranges from providers, else ranges starting with the
     /// language's block comment.
     pub fn fold_all_block_comments(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.fold_all_block_comments(cx)) {
+            return;
+        }
         if self.folds.has_types() {
             self.run_fold_command(cx, |m, _| {
                 fm::set_collapse_state_for_type(m, &FoldingRangeKind::Comment, true)
@@ -198,6 +271,11 @@ impl CodeEditor {
     /// region ranges from providers, else ranges starting with the
     /// language's region start marker.
     pub fn fold_all_marker_regions(&mut self, collapse: bool, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, move |this, cx| {
+            this.fold_all_marker_regions(collapse, cx)
+        }) {
+            return;
+        }
         if self.folds.has_types() {
             self.run_fold_command(cx, |m, _| {
                 fm::set_collapse_state_for_type(m, &FoldingRangeKind::Region, collapse)
@@ -232,6 +310,9 @@ impl CodeEditor {
     /// Toggles the import ranges (Monaco `editor.toggleImportFold`), then
     /// computes the ranges again.
     pub fn toggle_import_fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.toggle_import_fold(cx)) {
+            return;
+        }
         if !self.options.folding {
             return;
         }
@@ -270,23 +351,35 @@ impl CodeEditor {
     /// Moves to the start of the enclosing fold (Monaco
     /// `editor.gotoParentFold`).
     pub fn go_to_parent_fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.go_to_parent_fold(cx)) {
+            return;
+        }
         self.go_to_fold_line(cx, fm::parent_fold_line);
     }
 
     /// Moves to the previous fold at this level (Monaco
     /// `editor.gotoPreviousFold`).
     pub fn go_to_previous_fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.go_to_previous_fold(cx)) {
+            return;
+        }
         self.go_to_fold_line(cx, fm::previous_fold_line);
     }
 
     /// Moves to the next fold at this level (Monaco `editor.gotoNextFold`).
     pub fn go_to_next_fold(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.go_to_next_fold(cx)) {
+            return;
+        }
         self.go_to_fold_line(cx, fm::next_fold_line);
     }
 
     /// Folds each multi-line selection as a manual range (Monaco
     /// `editor.createFoldingRangeFromSelection`, Cmd/Ctrl+K Cmd/Ctrl+,).
     pub fn create_fold_from_selection(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.create_fold_from_selection(cx)) {
+            return;
+        }
         if !self.options.folding {
             return;
         }
@@ -315,6 +408,9 @@ impl CodeEditor {
     /// Removes manual folding ranges around the cursors or touching the
     /// selections (Monaco `editor.removeManualFoldingRanges`).
     pub fn remove_manual_folding_ranges(&mut self, cx: &mut Context<Self>) {
+        if self.defer_fold_command(cx, |this, cx| this.remove_manual_folding_ranges(cx)) {
+            return;
+        }
         if !self.options.folding {
             return;
         }
@@ -329,8 +425,14 @@ impl CodeEditor {
             })
             .collect();
         let model = self.model().clone();
+        let count = self.folds.ranges().len();
         self.folds
             .remove_manual(model.read(cx).buffer(), &selections);
+        // Monaco `triggerFoldingModelChanged`: computing again brings back
+        // the regions the manual ones had replaced or crossed.
+        if self.folds.ranges().len() != count {
+            self.refresh_folding(cx);
+        }
         self.after_fold_command(cx);
     }
 
@@ -573,6 +675,9 @@ impl CodeEditor {
         self.folded_imports = false;
         self.fold_mouse_down = None;
         self.fold_reveal_task = None;
+        // Monaco cancels the pending computation the actions await.
+        self.fold_ranges_missing = true;
+        self.fold_pending.clear();
     }
 
     /// Computes the ranges again for the current text on the next frame
