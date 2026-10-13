@@ -2,6 +2,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
@@ -81,8 +82,17 @@ fn setup<'a>(
         CodeEditor::new(model, window, cx)
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
-    cx.run_until_parked();
+    settle_focus(cx);
     (editor, cx, requests)
+}
+
+/// Monaco's `onDidFocusEditorText` asks for the lenses again after the
+/// debounce: let that request come back (the visible lenses resolve a
+/// pause later).
+fn settle_focus(cx: &mut VisualTestContext) {
+    draw(cx);
+    cx.executor().advance_clock(Duration::from_millis(300));
+    draw(cx);
 }
 
 fn lenses(
@@ -96,6 +106,8 @@ fn lenses(
 #[gpui::test]
 fn lenses_show_above_their_lines_and_resolve(cx: &mut TestAppContext) {
     let (editor, cx, requests) = setup("fn a() {}\n\nfn b() {}\n", cx);
+    // Monaco `_resolveCodeLensesInViewportSoon`: after a pause.
+    cx.executor().advance_clock(Duration::from_millis(400));
     assert_eq!(
         lenses(&editor, cx),
         vec![
@@ -104,7 +116,8 @@ fn lenses_show_above_their_lines_and_resolve(cx: &mut TestAppContext) {
             (2, vec![Some("Run test".into())]),
         ]
     );
-    assert_eq!(requests.get(), 1);
+    // Once for the model, once for the focus.
+    assert_eq!(requests.get(), 2);
 }
 
 #[gpui::test]
@@ -127,6 +140,7 @@ fn clicking_runs_the_command(cx: &mut TestAppContext) {
         })
         .detach()
     });
+    cx.executor().advance_clock(Duration::from_millis(400));
     lenses(&editor, cx);
     editor.update(cx, |e, cx| e.click_code_lens_for_tests(0, 0, cx));
     assert_eq!(*ran.borrow(), vec![vec![serde_json::json!(0)]]);
@@ -145,10 +159,10 @@ fn refreshed_after_edits(cx: &mut TestAppContext) {
     });
     // The zones follow the edit until new lenses arrive after a pause.
     cx.run_until_parked();
-    assert_eq!(requests.get(), 1);
+    assert_eq!(requests.get(), 2);
     cx.executor().advance_clock(Duration::from_millis(500));
     assert_eq!(lenses(&editor, cx).len(), 2);
-    assert_eq!(requests.get(), 2);
+    assert_eq!(requests.get(), 3);
 }
 
 /// Monaco `CodeLensContribution` listens to
@@ -177,6 +191,8 @@ fn lenses_follow_providers_registered_and_removed_later(cx: &mut TestAppContext)
         register_code_lens_provider(cx, LanguageSelector::All, provider(&requests))
     });
     cx.executor().advance_clock(Duration::from_millis(500));
+    lenses(&editor, cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
     // Both providers' lenses, two per line.
     assert_eq!(
         lenses(&editor, cx),
@@ -189,6 +205,8 @@ fn lenses_follow_providers_registered_and_removed_later(cx: &mut TestAppContext)
         ]
     );
     cx.update(|_, cx| unregister_provider(cx, a));
+    cx.executor().advance_clock(Duration::from_millis(500));
+    lenses(&editor, cx);
     cx.executor().advance_clock(Duration::from_millis(500));
     assert_eq!(
         lenses(&editor, cx),
@@ -331,7 +349,7 @@ fn setup_slow<'a>(
         CodeEditor::new(model, window, cx)
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
-    draw(cx);
+    settle_focus(cx);
     (editor, cx)
 }
 
@@ -364,7 +382,8 @@ fn unresolved_lenses_leave_their_zone_empty(cx: &mut TestAppContext) {
             .iter()
             .all(|(_, text, fading, _)| text.is_empty() && !fading)
     );
-    cx.executor().advance_clock(Duration::from_millis(150));
+    // After Monaco's resolve delay and the provider's.
+    cx.executor().advance_clock(Duration::from_millis(500));
     draw(cx);
     let shown = lines(&editor, cx);
     assert_eq!(shown[0].1, "$(references) 3 references");
@@ -420,7 +439,7 @@ fn lenses_follow_font_zoom_and_theme(cx: &mut TestAppContext) {
     assert_eq!(style(cx).1, gpui::px(20.));
 
     editor.update(cx, |e, cx| {
-        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::hc_black()), cx)
+        e.set_theme(Arc::new(gpui_monaco::Theme::hc_black()), cx)
     });
     draw(cx);
     assert_ne!(style(cx).2, color);
@@ -501,7 +520,7 @@ fn lenses_come_back_after_set_model(cx: &mut TestAppContext) {
 #[gpui::test]
 fn lenses_keep_their_titles_across_edits(cx: &mut TestAppContext) {
     let (editor, cx) = setup_slow("fn a() {}\n\nfn b() {}\n", Duration::from_millis(100), cx);
-    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.executor().advance_clock(Duration::from_millis(500));
     draw(cx);
     let shown = lines(&editor, cx);
     assert_eq!(shown.len(), 2);
@@ -539,7 +558,7 @@ fn lenses_keep_their_titles_across_edits(cx: &mut TestAppContext) {
         vec![(0, vec![None]), (1, vec![None]), (2, vec![None])],
         "the new lenses are still resolving"
     );
-    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.executor().advance_clock(Duration::from_millis(400));
     draw(cx);
     let shown = lines(&editor, cx);
     assert!(shown.iter().all(|(_, text, _, _)| !text.is_empty()));
@@ -559,7 +578,7 @@ fn lenses_keep_their_titles_across_edits(cx: &mut TestAppContext) {
     });
     cx.executor().advance_clock(Duration::from_millis(400));
     draw(cx);
-    cx.executor().advance_clock(Duration::from_millis(150));
+    cx.executor().advance_clock(Duration::from_millis(500));
     draw(cx);
     assert_eq!(
         lines(&editor, cx)
@@ -571,4 +590,281 @@ fn lenses_keep_their_titles_across_edits(cx: &mut TestAppContext) {
             (1, "$(references) 3 references".to_string()),
         ]
     );
+}
+
+/// The height of the zones above `row`.
+fn zones_above(row: u32, editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> gpui::Pixels {
+    editor.read_with(cx, |e, _| {
+        e.top_for_line_number(row, false).unwrap() - e.top_for_line_number(row, true).unwrap()
+    })
+}
+
+fn edit(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    range: std::ops::Range<usize>,
+    text: &str,
+) {
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |m, cx| m.edit([(range, text)], cx).unwrap())
+    });
+    draw(cx);
+}
+
+/// Monaco's `onDidChangeModelContent` listener (`codelensController.ts`)
+/// moves each line's lenses with their tracked range right away (no blank,
+/// no fade when the new lenses come), and drops the ones whose range an
+/// edit removed, or that now share a line with others.
+#[gpui::test]
+fn lens_zones_follow_their_line_during_edits(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("a\nb\nc\nd\nx\nfn foo() {}\n", Duration::ZERO, cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    let titled = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        lines(editor, cx)
+            .into_iter()
+            .map(|(row, text, fading, _)| (row, text, fading))
+            .collect::<Vec<_>>()
+    };
+    let lens = "$(references) 3 references".to_string();
+    assert_eq!(titled(&editor, cx), [(5, lens.clone(), true)]);
+    std::thread::sleep(Duration::from_millis(120));
+    draw(cx);
+    let height = zones_above(5, &editor, cx);
+    assert!(height > gpui::px(0.));
+
+    // Enter at the end of line 5: the lens moves down with `fn foo()`.
+    edit(&editor, cx, 9..9, "\n");
+    assert_eq!(titled(&editor, cx), [(6, lens.clone(), false)]);
+    assert_eq!(zones_above(5, &editor, cx), gpui::px(0.));
+    assert_eq!(zones_above(6, &editor, cx), height);
+    // The new lenses keep the zone: no blank, no fade in.
+    cx.executor().advance_clock(Duration::from_millis(300));
+    draw(cx);
+    assert_eq!(titled(&editor, cx), [(6, lens.clone(), false)]);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(titled(&editor, cx), [(6, lens.clone(), false)]);
+
+    // The two lines above deleted: the lens moves up with it.
+    edit(&editor, cx, 8..11, "");
+    assert_eq!(titled(&editor, cx), [(4, lens.clone(), false)]);
+    assert_eq!(zones_above(4, &editor, cx), height);
+    assert_eq!(zones_above(5, &editor, cx), gpui::px(0.));
+
+    // Its range deleted: the lens goes before any new request.
+    edit(&editor, cx, 8..10, "");
+    assert!(lines(&editor, cx).is_empty());
+    assert_eq!(zones_above(4, &editor, cx), gpui::px(0.));
+}
+
+/// Monaco: "lenses should never be on the same line", so joining two
+/// lenses' lines drops the second's.
+#[gpui::test]
+fn lenses_joined_onto_one_line_keep_one_zone(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("fn a() {}\nfn b() {}\n", Duration::ZERO, cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(lines(&editor, cx).len(), 2);
+    edit(&editor, cx, 9..10, " ");
+    assert_eq!(
+        lines(&editor, cx)
+            .into_iter()
+            .map(|(row, ..)| row)
+            .collect::<Vec<_>>(),
+        [0]
+    );
+}
+
+/// Monaco: gaining text focus schedules a request (after the debounce),
+/// and losing it cancels one still waiting.
+#[gpui::test]
+fn lenses_are_asked_for_again_on_focus(cx: &mut TestAppContext) {
+    let (editor, cx, requests) = setup("fn a() {}\n", cx);
+    assert_eq!(lenses(&editor, cx).len(), 1);
+    assert_eq!(requests.get(), 2);
+    let focus = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+        draw(cx);
+    };
+    let blur = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.blur(cx));
+        draw(cx);
+    };
+    blur(cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(requests.get(), 2);
+    focus(&editor, cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(requests.get(), 3);
+    // Blurred before the delay is out: no request.
+    blur(cx);
+    focus(&editor, cx);
+    blur(cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    assert_eq!(requests.get(), 3);
+}
+
+/// A lens above every `fn` line, resolved after `delay`, recording the
+/// rows resolves start and finish for.
+struct Counting {
+    delay: Duration,
+    started: Arc<Mutex<Vec<u32>>>,
+    finished: Arc<Mutex<Vec<u32>>>,
+}
+
+impl CodeLensProvider for Counting {
+    fn provide_code_lenses(
+        &self,
+        context: &ProviderContext,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<CodeLens>>> {
+        let rope = context.snapshot.rope().to_string();
+        let lenses = rope
+            .lines()
+            .enumerate()
+            .filter(|(_, line)| line.starts_with("fn "))
+            .map(|(row, _)| CodeLens {
+                range: PointUtf16::new(row as u32, 0)..PointUtf16::new(row as u32, 2),
+                ..Default::default()
+            })
+            .collect();
+        Task::ready(Ok(lenses))
+    }
+
+    fn resolve_code_lens(
+        &self,
+        _: &ProviderContext,
+        lens: &CodeLens,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CodeLens>>> {
+        let row = lens.range.start.row;
+        self.started.lock().unwrap().push(row);
+        let finished = self.finished.clone();
+        let lens = lens.clone();
+        let timer = cx.background_executor().timer(self.delay);
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            finished.lock().unwrap().push(row);
+            Ok(CodeLens {
+                command: Some(Command::new("", "1 reference")),
+                ..lens
+            })
+        }))
+    }
+}
+
+type Rows = Arc<Mutex<Vec<u32>>>;
+
+fn setup_counting<'a>(
+    text: &str,
+    delay: Duration,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext, Rows, Rows) {
+    let started = Rows::default();
+    let finished = Rows::default();
+    let provider = Counting {
+        delay,
+        started: started.clone(),
+        finished: finished.clone(),
+    };
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_code_lens_provider(cx, LanguageSelector::All, provider);
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    settle_focus(cx);
+    (editor, cx, started, finished)
+}
+
+/// Monaco resolves from a `RunOnceScheduler` that scrolling restarts: a
+/// fling resolves only the lenses where it stops, not each one it passes.
+#[gpui::test]
+fn scrolling_resolves_only_where_it_stops(cx: &mut TestAppContext) {
+    let text: String = (0..400).map(|ix| format!("fn f{ix}() {{}}\n")).collect();
+    let (editor, cx, started, _) = setup_counting(&text, Duration::ZERO, cx);
+    assert_eq!(lines(&editor, cx).len(), 400);
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    for step in 1..=20 {
+        editor.update(cx, |e, cx| {
+            e.set_scroll_top(
+                line_height * (step * 15) as f32,
+                gpui_monaco::ScrollType::Immediate,
+                cx,
+            )
+        });
+        cx.executor().advance_clock(Duration::from_millis(16));
+        draw(cx);
+    }
+    assert!(
+        started.lock().unwrap().is_empty(),
+        "resolved while scrolling"
+    );
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    let first = editor.read_with(cx, |e, cx| e.visible_ranges(cx)[0].start.row);
+    let resolved = started.lock().unwrap().clone();
+    assert!(!resolved.is_empty());
+    assert!(
+        resolved.iter().all(|row| *row + 1 >= first),
+        "resolved {resolved:?} above the viewport at {first}"
+    );
+}
+
+/// Monaco cancels resolves still running when the text changes.
+#[gpui::test]
+fn edits_cancel_running_resolves(cx: &mut TestAppContext) {
+    let (editor, cx, started, finished) =
+        setup_counting("fn a() {}\n", Duration::from_millis(200), cx);
+    cx.executor().advance_clock(Duration::from_millis(400));
+    draw(cx);
+    assert_eq!(*started.lock().unwrap(), [0]);
+    // Typing on the lens's line keeps the lens, but not its resolve.
+    edit(&editor, cx, 9..9, " ");
+    cx.executor().advance_clock(Duration::from_millis(250));
+    draw(cx);
+    assert!(finished.lock().unwrap().is_empty());
+    // The new lenses are resolved in turn.
+    cx.executor().advance_clock(Duration::from_millis(1000));
+    draw(cx);
+    assert_eq!(*finished.lock().unwrap(), [0]);
+    assert_eq!(lines(&editor, cx)[0].1, "1 reference");
+}
+
+/// Lenses after an edit move by its line count without being measured
+/// again, and those before it stay.
+#[gpui::test]
+fn lenses_after_an_edit_shift_with_it(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_slow("fn a() {}\nx\nfn b() {}\nfn c() {}\n", Duration::ZERO, cx);
+    cx.executor().advance_clock(Duration::from_millis(500));
+    draw(cx);
+    let rows = |editor: &Entity<CodeEditor>, cx: &mut VisualTestContext| {
+        lines(editor, cx)
+            .into_iter()
+            .map(|(row, ..)| row)
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(rows(&editor, cx), [0, 2, 3]);
+    // Two lines typed after `x`: the later lenses move down two lines.
+    edit(&editor, cx, 11..11, "\ny\nz");
+    assert_eq!(rows(&editor, cx), [0, 4, 5]);
+    let height = zones_above(4, &editor, cx);
+    assert!(height > gpui::px(0.));
+    assert_eq!(zones_above(5, &editor, cx), height);
+    // Their tracked ranges moved too: deleting `fn` of the last one drops it.
+    let start = editor.read_with(cx, |e, cx| {
+        let rope = e.model().read(cx).buffer().rope().clone();
+        rope.point_to_offset(text::Point::new(5, 0))
+    });
+    edit(&editor, cx, start..start + 2, "");
+    assert_eq!(rows(&editor, cx), [0, 4]);
 }

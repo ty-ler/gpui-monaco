@@ -1349,9 +1349,10 @@ impl CodeEditor {
         let Some(lightbulb) = self.code_actions.lightbulb.clone() else {
             return;
         };
-        // Monaco `autoRun`: a lone AI fix runs on the click.
+        // Monaco `autoRun`: a lone AI fix runs on the click, without asking
+        // for the actions again afterwards (`retrigger: false`).
         if let Some(item) = lightbulb_auto_run(&lightbulb).cloned() {
-            self.apply_code_action(item, true, false, cx);
+            self.apply_code_action(item, false, false, cx);
             return;
         }
         let set = CodeActionSet {

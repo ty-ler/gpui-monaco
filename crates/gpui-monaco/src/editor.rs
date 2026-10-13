@@ -2996,6 +2996,7 @@ impl CodeEditor {
                 self.cancel_rename(false, cx);
                 self.color_picker_after_edit(version, cx);
                 self.inlay_hints_after_edit(cx);
+                self.cancel_code_lens_resolves();
                 self.semantic_tokens_after_edit(changes, cx);
                 self.inline_completions_after_edit(*kind, cx);
                 self.linked_editing_after_edit(changes, own, cx);
@@ -3067,6 +3068,11 @@ impl CodeEditor {
                         &self.cursors.selections(),
                     );
                     self.cursors.set_selections(&selections);
+                }
+                // Monaco's code lenses follow the edit.
+                if self.has_code_lenses() {
+                    let old = self.snapshot.rope().clone();
+                    self.code_lenses_after_edit(&patch, &old, latest.rope(), cx);
                 }
                 self.snapshot = latest;
                 self.cursors.validate(self.snapshot.rope());
@@ -6286,6 +6292,21 @@ impl CodeEditor {
             self.animation.scrollbars.mouse_position,
             self.layout.as_ref(),
         );
+        // Monaco `LightBulbWidget`'s `mouseenter`: a drag with the primary
+        // button entering the bulb hides it.
+        if event.pressed_button == Some(MouseButton::Left)
+            && self.code_actions.lightbulb.is_some()
+            && let Some((bulb, _)) = self.layout.as_ref().and_then(|layout| layout.lightbulb)
+            && bulb.contains(&event.position)
+            && !self
+                .animation
+                .scrollbars
+                .mouse_position
+                .is_some_and(|previous| bulb.contains(&previous))
+        {
+            self.code_actions.lightbulb = None;
+            cx.notify();
+        }
         self.animation.scrollbars.mouse_position = Some(event.position);
         if was_over
             != (over_thumb(Some(event.position), self.layout.as_ref())
