@@ -22,6 +22,7 @@ use crate::editor::CodeEditor;
 use crate::element::{HighlightSource, ZoneLayout, row_segment};
 use crate::layout_info::MinimapLayoutInfo;
 use crate::options::{EditorOptions, MinimapSize};
+use crate::semantic_theme::SemanticStyle;
 use crate::theme::Theme;
 use crate::view::minimap::{
     CharRenderer, GUTTER_DECORATION_WIDTH, ImageData, LayoutInput, LayoutOptions, LineStyle,
@@ -69,6 +70,10 @@ pub(crate) struct MinimapCache {
     /// first, and how many there have been.
     token_changes: std::collections::VecDeque<TokenChange>,
     token_change_count: usize,
+    /// The semantic tokens the tiles were last drawn with
+    /// ([`CodeEditor::semantic_tokens_key`]); new ones are a highlighter
+    /// change of every row.
+    semantic_tokens_seen: Option<u64>,
     /// What the layout remembers between frames (Monaco
     /// `ComputeOptionsMemory`).
     pub layout_memory: crate::layout_info::LayoutMemory,
@@ -160,6 +165,19 @@ impl MinimapCache {
         self.token_changes.push_back(TokenChange {
             version: buffer.version(),
             ranges,
+        });
+        self.token_change_count += 1;
+        if self.token_changes.len() > TOKEN_CHANGES_KEPT {
+            self.token_changes.pop_front();
+        }
+    }
+
+    /// Remembers that the highlights of any row may have changed (new
+    /// semantic tokens).
+    fn note_all_tokens_changed(&mut self, buffer: &text::Buffer) {
+        self.token_changes.push_back(TokenChange {
+            version: buffer.version(),
+            ranges: std::iter::once(0..buffer.rope().len()).collect(),
         });
         self.token_change_count += 1;
         if self.token_changes.len() > TOKEN_CHANGES_KEPT {
@@ -437,6 +455,18 @@ pub(crate) fn prepaint(
     let shown = (start.max(1) - 1) / TILE_LINES..=(end.max(1) - 1) / TILE_LINES;
     let tiles = shown.start().saturating_sub(1)
         ..=(shown.end() + 1).min((line_count.max(1) - 1) / TILE_LINES);
+    // Monaco's minimap colors lines from the model's tokens, semantic
+    // tokens included (`getMinimapLinesRenderingData`): new ones redraw.
+    let semantic_key = editor.semantic_tokens_key();
+    if editor
+        .minimap_cache
+        .semantic_tokens_seen
+        .replace(semantic_key)
+        .is_some_and(|seen| seen != semantic_key)
+    {
+        let model = editor.model().read(cx);
+        editor.minimap_cache.note_all_tokens_changed(model.buffer());
+    }
     {
         let cache = &mut editor.minimap_cache;
         let (keep, drop): (Vec<Tile>, Vec<Tile>) = std::mem::take(&mut cache.tiles)
@@ -509,6 +539,18 @@ pub(crate) fn prepaint(
             .zip(old)
             .map(|(plan, ix)| (editor.minimap_cache.tiles[ix].pixels.clone(), plan));
         let source = HighlightSource::new(editor.model().read(cx));
+        // The semantic token styles on the tile's rows, read here (they
+        // live on the editor).
+        let semantic = if semantic_key == 0 {
+            Vec::new()
+        } else {
+            let mut rows: Vec<u32> = lines
+                .iter()
+                .map(|line| view_lines.view_line(*line).row)
+                .collect();
+            rows.dedup();
+            editor.semantic_spans(rows, cx)
+        };
         let build = {
             let (view_lines, snapshot, theme) =
                 (view_lines.clone(), snapshot.clone(), theme.clone());
@@ -518,6 +560,7 @@ pub(crate) fn prepaint(
                 let lines_to = |lines: &[u32]| {
                     render_lines(
                         source.as_ref(),
+                        &semantic,
                         &view_lines,
                         &snapshot,
                         &theme,
@@ -1063,6 +1106,7 @@ fn to_gpui_pixels(rows: &mut [u8]) {
 #[allow(clippy::too_many_arguments)]
 fn render_lines(
     highlights: Option<&HighlightSource>,
+    semantic: &[(std::ops::Range<usize>, SemanticStyle)],
     view_lines: &ViewLines,
     snapshot: &text::BufferSnapshot,
     theme: &Theme,
@@ -1088,19 +1132,31 @@ fn render_lines(
         snapshot.point_to_offset(text::Point::new(first_row, 0))
             ..snapshot.point_to_offset(text::Point::new(last_row, u32::MAX))
     };
-    // Each span's color, converted once.
-    let colored = |spans: Vec<(std::ops::Range<usize>, crate::theme::TokenStyle)>| {
+    // The highlights of byte `range`, semantic tokens on top, each span's
+    // color converted once.
+    let colored = |range: std::ops::Range<usize>| {
+        let spans =
+            highlights.map_or_else(Vec::new, |source| source.highlights(theme, range.clone()));
+        let spans = if semantic.is_empty() {
+            spans
+        } else {
+            let first = semantic.partition_point(|(r, _)| r.end <= range.start);
+            let last = semantic.partition_point(|(r, _)| r.start < range.end);
+            crate::semantic_tokens::merge_styles(&spans, &semantic[first..last.max(first)])
+        };
         spans
             .into_iter()
             .map(|(range, style)| (range, style.foreground.map(Rgba8::from_hsla)))
             .collect::<Vec<_>>()
     };
-    let shared = match (contiguous, highlights) {
-        (true, Some(source)) => colored(source.highlights(theme, row_range(first_row, last_row))),
-        _ => Vec::new(),
+    let shared = if contiguous {
+        colored(row_range(first_row, last_row))
+    } else {
+        Vec::new()
     };
     let mut content = Vec::new();
     let mut line_colors = Vec::new();
+    let (mut row_content, mut row_colors) = (Vec::new(), Vec::new());
     let mut dy = 0.;
     for &view_line in lines {
         let segment = row_segment(view_lines, view_line);
@@ -1108,39 +1164,96 @@ fn render_lines(
         let spans: &[(std::ops::Range<usize>, Option<Rgba8>)] = if contiguous {
             &shared
         } else {
-            line_highlights = highlights.map_or_else(Vec::new, |source| {
-                colored(source.highlights(theme, row_range(segment.row, segment.row)))
-            });
+            line_highlights = colored(row_range(segment.row, segment.row));
             &line_highlights
         };
         let full = snapshot.line(segment.row);
         let line_start = snapshot.point_to_offset(text::Point::new(segment.row, 0));
-        let byte_start = utf16_to_byte(&full, segment.columns.start);
-        let byte_end = utf16_to_byte(&full, segment.columns.end);
         content.clear();
         line_colors.clear();
-        // Continuation lines start with their indentation (Monaco's view
-        // line content).
-        for _ in 0..segment.indent {
-            content.push(u16::from(b' '));
-            line_colors.push(default_color);
-        }
-        let mut next = spans.partition_point(|(r, _)| r.end <= line_start + byte_start);
-        let mut buf = [0u16; 2];
-        for (byte, ch) in full[byte_start..byte_end].char_indices() {
-            let offset = line_start + byte_start + byte;
-            while spans.get(next).is_some_and(|(r, _)| r.end <= offset) {
-                next += 1;
+        let injected = view_lines.injected_text(segment.row);
+        if injected.is_empty() {
+            let byte_start = utf16_to_byte(&full, segment.columns.start);
+            let byte_end = utf16_to_byte(&full, segment.columns.end);
+            // Continuation lines start with their indentation (Monaco's
+            // view line content).
+            for _ in 0..segment.indent {
+                content.push(u16::from(b' '));
+                line_colors.push(default_color);
             }
-            let color = spans
-                .get(next)
-                .filter(|(r, _)| r.start <= offset)
-                .and_then(|(_, color)| *color)
-                .unwrap_or(default_color);
-            for unit in ch.encode_utf16(&mut buf) {
-                content.push(*unit);
-                line_colors.push(color);
+            let mut next = spans.partition_point(|(r, _)| r.end <= line_start + byte_start);
+            push_colored(
+                &mut content,
+                &mut line_colors,
+                &full[byte_start..byte_end],
+                line_start + byte_start,
+                spans,
+                &mut next,
+                default_color,
+            );
+        } else {
+            // Monaco's view line content has the injected text (inlay
+            // hints, `before`/`after` content, ghost text), in its own
+            // `tokens` or the default token color
+            // (`getLineTokensWithInjections`): the row with it, then the
+            // part on this view line.
+            row_content.clear();
+            row_colors.clear();
+            let mut next = spans.partition_point(|(r, _)| r.end <= line_start);
+            let mut last = 0;
+            for text in injected {
+                let at = utf16_to_byte(&full, text.column).max(last);
+                push_colored(
+                    &mut row_content,
+                    &mut row_colors,
+                    &full[last..at],
+                    line_start + last,
+                    spans,
+                    &mut next,
+                    default_color,
+                );
+                last = at;
+                let tokens = text.tokens.as_deref().unwrap_or_default();
+                let mut buf = [0u16; 2];
+                for (byte, ch) in text.content.char_indices() {
+                    let color = tokens
+                        .iter()
+                        .find(|(range, _)| range.contains(&byte))
+                        .and_then(|(_, style)| style.foreground)
+                        .map_or(default_color, Rgba8::from_hsla);
+                    for unit in ch.encode_utf16(&mut buf) {
+                        row_content.push(*unit);
+                        row_colors.push(color);
+                    }
+                }
             }
+            push_colored(
+                &mut row_content,
+                &mut row_colors,
+                &full[last..],
+                line_start + last,
+                spans,
+                &mut next,
+                default_color,
+            );
+            let (shown, indent) = match view_lines.projection(segment.row) {
+                Some(projection) => {
+                    let index = view_lines.view_line(view_line).segment;
+                    let range = projection.output_range(index);
+                    (
+                        range.start as usize..range.end as usize,
+                        projection.min_output_offset(index),
+                    )
+                }
+                None => (0..row_content.len(), 0),
+            };
+            let shown = shown.start.min(row_content.len())..shown.end.min(row_content.len());
+            for _ in 0..indent {
+                content.push(u16::from(b' '));
+                line_colors.push(default_color);
+            }
+            content.extend_from_slice(&row_content[shown.clone()]);
+            line_colors.extend_from_slice(&row_colors[shown]);
         }
         render_line(&mut image, &renderer, style, dy, &content, |i| {
             line_colors[i]
@@ -1149,6 +1262,36 @@ fn render_lines(
     }
     to_gpui_pixels(&mut image.data);
     Some(image.data)
+}
+
+/// Pushes `text`, at byte `offset` of the text, as UTF-16 units with their
+/// colors from `spans` (sorted; `next` is the first that may cover it, and
+/// moves on), or `default_color` outside them.
+fn push_colored(
+    content: &mut Vec<u16>,
+    colors: &mut Vec<Rgba8>,
+    text: &str,
+    offset: usize,
+    spans: &[(std::ops::Range<usize>, Option<Rgba8>)],
+    next: &mut usize,
+    default_color: Rgba8,
+) {
+    let mut buf = [0u16; 2];
+    for (byte, ch) in text.char_indices() {
+        let offset = offset + byte;
+        while spans.get(*next).is_some_and(|(r, _)| r.end <= offset) {
+            *next += 1;
+        }
+        let color = spans
+            .get(*next)
+            .filter(|(r, _)| r.start <= offset)
+            .and_then(|(_, color)| *color)
+            .unwrap_or(default_color);
+        for unit in ch.encode_utf16(&mut buf) {
+            content.push(*unit);
+            colors.push(color);
+        }
+    }
 }
 
 /// A redrawn tile's pixels: each line kept from `old` or taken, in order,
@@ -1254,6 +1397,10 @@ fn plan_tile(
                 .last()
                 .map_or(row, |(old, new)| row - new.end + old.end);
             if old_row >= old_rope.line_count() || (!direct && old_lines.is_row_hidden(old_row)) {
+                return LineSource::Draw;
+            }
+            // Its injected text (shown in the line) changed.
+            if old_lines.injected_text(old_row) != view_lines.injected_text(row) {
                 return LineSource::Draw;
             }
             let old_segment = ViewLine {

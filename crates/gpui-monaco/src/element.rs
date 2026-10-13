@@ -1774,6 +1774,54 @@ pub(crate) fn current_highlights(
     HighlightSource::new(model).map_or_else(Vec::new, |source| source.highlights(theme, range))
 }
 
+/// Monaco's `inline-selected-text` color: selected text is drawn in
+/// `editor.selectionForeground` only in high-contrast themes (`ViewLine`
+/// adds the decoration when `isHighContrast`), and not when it's
+/// transparent.
+pub(crate) fn inline_selected_text_color(theme: &Theme) -> Option<Hsla> {
+    theme
+        .colors
+        .selection_foreground
+        .filter(|color| theme.high_contrast && color.a > 0.)
+}
+
+impl CodeEditor {
+    /// The highlights of model `row` drawn on its sticky scroll line, by
+    /// byte range in the row: the syntax highlights with the semantic
+    /// tokens on top, as on the row itself (Monaco's sticky lines render
+    /// the model's line tokens, `getViewLineRenderingData`).
+    pub(crate) fn sticky_row_highlights(
+        &self,
+        row: u32,
+        cx: &App,
+    ) -> Vec<(Range<usize>, TokenStyle)> {
+        let model = self.model().read(cx);
+        let line_range = model.buffer().rope().line_range(row);
+        let highlights = current_highlights(model, &self.theme, line_range.clone());
+        self.merge_semantic_tokens(highlights, line_range.clone(), cx)
+            .into_iter()
+            .map(|(range, style)| {
+                (
+                    range.start.max(line_range.start) - line_range.start
+                        ..range.end.min(line_range.end) - line_range.start,
+                    style,
+                )
+            })
+            .filter(|(range, _)| range.start < range.end)
+            .collect()
+    }
+
+    /// The text colors of model `row`'s sticky scroll line (before
+    /// decorations), by byte range in the row; for tests.
+    #[doc(hidden)]
+    pub fn sticky_row_colors_for_tests(&self, row: u32, cx: &App) -> Vec<(Range<usize>, Hsla)> {
+        self.sticky_row_highlights(row, cx)
+            .into_iter()
+            .filter_map(|(range, style)| Some((range, style.foreground?)))
+            .collect()
+    }
+}
+
 /// The latest highlights of a model, detached from it so they can be read on
 /// a background thread.
 pub(crate) struct HighlightSource {
@@ -4040,8 +4088,8 @@ fn prepaint_editor(
             overlay_styles(&row_highlights, &decoration_styles)
         };
         // Monaco's `inline-selected-text`: selected text in
-        // `editor.selectionForeground` (high-contrast themes).
-        let row_highlights = match colors.selection_foreground {
+        // `editor.selectionForeground`, in high-contrast themes only.
+        let row_highlights = match inline_selected_text_color(&editor.theme) {
             Some(foreground) => {
                 let rope = snapshot.rope();
                 let mut selected: Vec<(Range<usize>, TokenStyle)> = selections
@@ -4598,19 +4646,7 @@ fn prepaint_editor(
                 // injected text (`RenderedStickyLine`), so they line up with the
                 // real lines.
                 let (row_highlights, injections, fonts) = {
-                    let row_highlights: Vec<(Range<usize>, TokenStyle)> = {
-                        let model = editor.model().read(cx);
-                        current_highlights(model, &theme, line_range.clone())
-                            .into_iter()
-                            .map(|(range, style)| {
-                                (
-                                    range.start.max(line_range.start) - line_range.start
-                                        ..range.end.min(line_range.end) - line_range.start,
-                                    style,
-                                )
-                            })
-                            .collect()
-                    };
+                    let row_highlights = editor.sticky_row_highlights(row, cx);
                     let row_decorations: Vec<_> = editor.model().update(cx, |model, _| {
                         model
                             .decorations_in_range(line_range.clone(), Some(editor_id))
@@ -9157,5 +9193,27 @@ mod gutter_font_tests {
         assert_eq!(guide_left(&metrics, 1), px(0.));
         // The level-2 guide of 4-space indents, on the indented code.
         assert_eq!(guide_left(&metrics, 5), px(16.));
+    }
+}
+
+#[cfg(test)]
+mod inline_selected_text_tests {
+    use super::inline_selected_text_color;
+    use crate::theme::Theme;
+
+    /// Monaco adds `inline-selected-text` only in high-contrast themes
+    /// (`ViewLine.renderLine`'s `isHighContrast` check), and its color rule
+    /// skips a transparent `editor.selectionForeground`.
+    #[test]
+    fn selection_foreground_recolors_only_in_high_contrast_themes() {
+        let red = gpui::hsla(0., 1., 0.5, 1.);
+        let mut dark = Theme::vs_dark();
+        dark.colors.selection_foreground = Some(red);
+        assert_eq!(inline_selected_text_color(&dark), None);
+        let mut high_contrast = Theme::hc_black();
+        high_contrast.colors.selection_foreground = Some(red);
+        assert_eq!(inline_selected_text_color(&high_contrast), Some(red));
+        high_contrast.colors.selection_foreground = Some(gpui::hsla(0., 1., 0.5, 0.));
+        assert_eq!(inline_selected_text_color(&high_contrast), None);
     }
 }

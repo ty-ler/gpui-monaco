@@ -37,7 +37,7 @@ gpui_monaco::set_theme(cx, "dark-modern");
 
 `theme_named` looks one up (`vs`, `vs-dark`, `hc-black`, `hc-light` are built in), and `global_theme` is the current one.
 
-"Toggle High Contrast Theme" (`editor.action.toggleHighContrast`) switches every editor to `hc-black` or `hc-light`, whichever matches the current theme's kind, and back to the theme it replaced. `Theme::high_contrast` says whether a theme is one (VS Code themes of `type` `hc` or `hcLight` are).
+"Toggle High Contrast Theme" (`editor.action.toggleHighContrast`) switches every editor to `hc-black` or `hc-light`, whichever matches the current theme's kind, and back to the theme it replaced. `Theme::high_contrast` says whether a theme is one (VS Code themes of `type` `hc` or `hcLight` are). As in Monaco, `editor.selectionForeground` recolors selected text only in high-contrast themes; others keep the token colors under the selection.
 
 `EditorColors::symbol_icons` holds Monaco's `symbolIcon.*Foreground` colors for the suggest widget's and quick outline's icons; most default to the theme's `foreground`. `banner_background`, `banner_foreground` and `banner_icon_foreground` (`banner.*`) color banners such as the unicode highlighter's. `EditorColors::marker_color`, `indent_guide_colors` and `bracket_pair_guide_colors` resolve a marker's or a guide level's color as the editor draws it.
 

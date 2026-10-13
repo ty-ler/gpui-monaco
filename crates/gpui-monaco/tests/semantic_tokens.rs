@@ -414,3 +414,72 @@ fn every_best_scoring_range_provider_is_asked(cx: &mut TestAppContext) {
     // A lower-scoring provider isn't asked.
     assert_eq!(*worse_requests.borrow(), 0);
 }
+
+// ----- #484: semantic colors outside the main view -----
+
+/// Monaco's sticky lines render the model's line tokens, semantic tokens
+/// included (`getViewLineRenderingData`).
+#[gpui::test]
+fn sticky_lines_show_semantic_colors(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_document_semantic_tokens_provider(cx, LanguageSelector::All, Words::default());
+    });
+    let (editor, cx) = setup(
+        "let value = run(1);\nlet MAX = 2;\n",
+        Some(THEME),
+        |_| {},
+        cx,
+    );
+    let colors = editor.read_with(cx, |e, cx| e.sticky_row_colors_for_tests(0, cx));
+    let hex = |color: gpui::Hsla| {
+        let rgba = gpui::Rgba::from(color);
+        ((rgba.r * 255.).round() as u32) << 16
+            | ((rgba.g * 255.).round() as u32) << 8
+            | (rgba.b * 255.).round() as u32
+    };
+    let colors: Vec<_> = colors.into_iter().map(|(r, c)| (r, hex(c))).collect();
+    assert_eq!(colors, vec![(4..9, 0xff0000), (12..15, 0x00ff00)]);
+}
+
+/// Whether a tile pixel (GPUI's BGRA) is clearly red.
+fn has_red_pixel(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> bool {
+    editor.read_with(cx, |e, _| {
+        e.minimap_tile_pixels_for_tests().iter().any(|(_, pixels)| {
+            pixels.as_chunks::<4>().0.iter().any(|p| {
+                let (b, g, r) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                r > g + 40 && r > b + 40
+            })
+        })
+    })
+}
+
+/// Monaco's minimap colors lines from the model's tokens, semantic tokens
+/// included (`getMinimapLinesRenderingData`), and redraws when they change
+/// (`onTokensChanged`).
+#[gpui::test]
+fn the_minimap_shows_semantic_colors(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_document_semantic_tokens_provider(cx, LanguageSelector::All, Words::default());
+    });
+    let (editor, cx) = setup(
+        "let value = run(1);\nlet MAX = 2;\n",
+        Some(THEME),
+        |o| o.sticky_scroll.enabled = false,
+        cx,
+    );
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests().is_empty()));
+    assert!(has_red_pixel(&editor, cx));
+    // Turned off, the tiles are drawn again without them.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.semantic_highlighting = SemanticHighlighting::Off;
+        e.update_options(options, cx);
+    });
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert!(!has_red_pixel(&editor, cx));
+}

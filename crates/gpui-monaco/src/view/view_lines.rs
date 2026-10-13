@@ -904,6 +904,7 @@ mod tests {
             column,
             content: content.to_string().into(),
             cursor_stops: crate::decorations::InjectedTextCursorStops::Both,
+            tokens: None,
         }
     }
 
