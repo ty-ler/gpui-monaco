@@ -6,8 +6,9 @@
 //! `wheel:x,y,dy` moves the mouse to `x, y` (window pixels) and turns the
 //! wheel by `dy` pixels there, `click:x,y` clicks there with the left
 //! button, `mouse:x,y` moves the mouse to `x, y` (`mouse:x,y,secondary`
-//! with Cmd/Ctrl held, as for a Cmd/Ctrl+hover link), and `wait` pauses 150ms
-//! and draws a frame.
+//! with Cmd/Ctrl held, as for a Cmd/Ctrl+hover link), `down:x,y` presses
+//! the left button there and `drag:x,y` moves the mouse with it held (a
+//! drag in progress), and `wait` pauses 150ms and draws a frame.
 
 use gpui::{AnyWindowHandle, App};
 
@@ -62,6 +63,49 @@ pub fn capture_if_requested(window: AnyWindowHandle, cx: &mut App) {
                         }),
                         cx,
                     );
+                })
+                .ok();
+                continue;
+            }
+            // A left press held through the following `drag:` moves (to
+            // capture a drag in progress, such as the drop line).
+            if let Some((kind, args)) = token
+                .strip_prefix("down:")
+                .map(|args| ("down", args))
+                .or_else(|| token.strip_prefix("drag:").map(|args| ("drag", args)))
+            {
+                let [x, y]: [f32; 2] = args
+                    .split(',')
+                    .map(|n| n.parse().expect("invalid mouse number"))
+                    .collect::<Vec<_>>()
+                    .try_into()
+                    .expect("down:x,y or drag:x,y");
+                let position = gpui::point(gpui::px(x), gpui::px(y));
+                cx.update_window(window, |_, window, cx| {
+                    let event = if kind == "down" {
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position,
+                                ..Default::default()
+                            }),
+                            cx,
+                        );
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                        gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                            button: gpui::MouseButton::Left,
+                            position,
+                            click_count: 1,
+                            ..Default::default()
+                        })
+                    } else {
+                        gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                            position,
+                            pressed_button: Some(gpui::MouseButton::Left),
+                            ..Default::default()
+                        })
+                    };
+                    window.dispatch_event(event, cx);
                 })
                 .ok();
                 continue;

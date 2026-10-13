@@ -475,6 +475,108 @@ fn scrollbar_minimap_and_right_clicks_keep_focus(cx: &mut TestAppContext) {
     assert_eq!(head(cx), PointUtf16::new(5, 0));
 }
 
+/// Monaco `_onMouseDown` handles the middle button as the left one: only
+/// the text, and the line numbers with `selectOnLineNumbers`, take focus
+/// and start the column selection; the minimap, scrollbars and the rest
+/// of the gutter don't (#491).
+#[gpui::test]
+fn middle_clicks_outside_the_text_keep_focus(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        &text(300),
+        |o| {
+            o.minimap.enabled = true;
+            o.glyph_margin = true;
+        },
+        cx,
+    );
+    let info = editor.read_with(cx, |e, _| e.layout_info().unwrap());
+    let line_height = editor.read_with(cx, |e, _| e.view_metrics_for_tests().unwrap().3);
+    let y = line_height * 5.5;
+    let is_focused = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| editor.focus_handle(cx).is_focused(window))
+    };
+    let selections = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.selections());
+    let middle_click = |at: gpui::Point<gpui::Pixels>, cx: &mut VisualTestContext| {
+        cx.simulate_mouse_down(at, gpui::MouseButton::Middle, Modifiers::default());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Middle, Modifiers::default());
+        paint(cx);
+    };
+    let blur = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| window.blur(cx));
+        paint(cx);
+    };
+    blur(cx);
+    let start = selections(cx);
+    for (name, at) in [
+        ("the minimap", point(info.minimap.minimap_left + px(5.), y)),
+        (
+            "the scrollbar",
+            point(info.width - info.vertical_scrollbar_width / 2., y),
+        ),
+        (
+            "the glyph margin",
+            point(info.glyph_margin_left + px(2.), y),
+        ),
+        (
+            "the line decorations",
+            point(info.decorations_left + px(2.), y),
+        ),
+    ] {
+        middle_click(at, cx);
+        assert!(!is_focused(cx), "{name}");
+        assert_eq!(selections(cx), start, "{name}");
+    }
+    let numbers = point(info.line_numbers_left + px(2.), y);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.select_on_line_numbers = false;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    middle_click(numbers, cx);
+    assert!(
+        !is_focused(cx),
+        "the line numbers without selectOnLineNumbers"
+    );
+    assert_eq!(selections(cx), start);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.select_on_line_numbers = true;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    middle_click(numbers, cx);
+    assert!(is_focused(cx), "the line numbers");
+    assert_eq!(
+        selections(cx),
+        vec![Selection::collapsed(PointUtf16::new(5, 0))]
+    );
+
+    // With `scrollOnMiddleClick`, the text takes focus before scrolling,
+    // so a key can end it; elsewhere it scrolls without taking focus.
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.scroll_on_middle_click = true;
+        e.update_options(options, cx);
+    });
+    blur(cx);
+    let minimap = point(info.minimap.minimap_left + px(5.), y);
+    cx.simulate_mouse_down(minimap, gpui::MouseButton::Middle, Modifiers::default());
+    paint(cx);
+    assert!(!is_focused(cx), "middle scroll from the minimap");
+    // A press ends the session.
+    cx.simulate_mouse_down(minimap, gpui::MouseButton::Middle, Modifiers::default());
+    cx.simulate_mouse_up(minimap, gpui::MouseButton::Middle, Modifiers::default());
+    paint(cx);
+    cx.simulate_mouse_down(
+        point(info.content_left + px(20.), y),
+        gpui::MouseButton::Middle,
+        Modifiers::default(),
+    );
+    paint(cx);
+    assert!(is_focused(cx), "middle scroll from the text");
+}
+
 // ----- #295: manual folding icons, glyph margin widget ranges -----
 
 /// Monaco `getDecorationOption`: manual ranges (Create Folding Range from

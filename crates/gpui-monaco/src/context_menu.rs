@@ -1073,10 +1073,15 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         if let Some(position) = position {
-            let inside = self.selections().iter().any(|s| {
-                let (start, end) = (s.start(), s.end());
-                start <= position && position <= end
-            });
+            let contains = |s: &Selection| s.start() <= position && position <= s.end();
+            // With the menu off, Monaco tests only the primary selection
+            // (`getSelection`), so a click in a secondary one collapses to
+            // a single cursor; with it on, every selection.
+            let inside = if self.options.context_menu {
+                self.selections().iter().any(contains)
+            } else {
+                contains(&self.cursors.primary().selection())
+            };
             if !inside {
                 self.set_selections(&[Selection::collapsed(position)], cx);
             }

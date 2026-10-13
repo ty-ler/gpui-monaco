@@ -1731,6 +1731,17 @@ impl Theme {
         ColorScheme::new(self.kind == ThemeKind::Light, self.high_contrast)
     }
 
+    /// Monaco's `.dnd-target` border (`contrib/dnd/browser/dnd.css`), fixed
+    /// by the theme type rather than a theme color: black in vs and
+    /// hc-light, `#AEAFAD` in vs-dark, white in hc-black.
+    pub fn dnd_target_color(&self) -> Hsla {
+        match self.scheme() {
+            ColorScheme::Light | ColorScheme::HcLight => c(rgb(0x000000)),
+            ColorScheme::Dark => c(rgb(0xaeafad)),
+            ColorScheme::HcDark => c(rgb(0xffffff)),
+        }
+    }
+
     /// The theme's color `id` (such as `editorOverviewRuler.findMatchForeground`),
     /// else Monaco's default for it in this kind of theme (Monaco
     /// `IColorTheme.getColor` with `useDefault`); `None` for an unknown id

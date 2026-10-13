@@ -426,3 +426,56 @@ fn items_run_on_mouse_up(cx: &mut TestAppContext) {
 
 /// From a row's center to the separator after it.
 const ROW_PITCH: f32 = 15.;
+
+/// Monaco `_onContextMenu` with `contextmenu: false` keeps the cursors only
+/// when the *primary* selection contains the click (`getSelection`); with
+/// the menu, any selection does (#491).
+#[gpui::test]
+fn without_the_menu_only_the_primary_selection_keeps_the_cursors(cx: &mut TestAppContext) {
+    use gpui::{point, px};
+    use gpui_monaco::cursor::Selection;
+    let (editor, cx) = setup("one two\nthree four\n", cx);
+    draw(cx);
+    let at = |row: u32, column: u32, cx: &mut VisualTestContext| {
+        editor
+            .read_with(cx, |e, _| {
+                e.scrolled_visible_position(PointUtf16::new(row, column))
+            })
+            .unwrap()
+            + point(px(1.), px(5.))
+    };
+    let two = vec![
+        Selection::new(PointUtf16::new(0, 0), PointUtf16::new(0, 3)),
+        Selection::new(PointUtf16::new(1, 0), PointUtf16::new(1, 5)),
+    ];
+    let set = |cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| e.set_selections(&two, cx));
+        draw(cx);
+    };
+    // With the menu: the click in the secondary selection keeps both.
+    set(cx);
+    let p = at(1, 2, cx);
+    right_click(cx, p);
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()), two);
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.context_menu = false;
+        e.update_options(options, cx);
+    });
+    // Without: one cursor at the click.
+    set(cx);
+    let p = at(1, 2, cx);
+    right_click(cx, p);
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()),
+        vec![Selection::collapsed(PointUtf16::new(1, 2))]
+    );
+    // In the primary one, both stay.
+    set(cx);
+    let p = at(0, 2, cx);
+    right_click(cx, p);
+    assert_eq!(editor.read_with(cx, |e, _| e.selections()), two);
+}
