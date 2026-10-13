@@ -342,3 +342,22 @@ fn globs() {
     assert!(glob_matches("[ab].rs", "b.rs"));
     assert!(!glob_matches("[!ab].rs", "b.rs"));
 }
+
+/// Monaco's `LanguagesRegistry` anchors a `firstLine` without a `^` at the
+/// line start, and compiles it as a JavaScript regex.
+#[test]
+fn first_line_is_anchored_javascript() {
+    let registry = LanguageRegistry::new();
+    registry.register(Language::new("xml", "XML").with_first_line(r"<\?xml"));
+    let guess = |first_line| {
+        registry
+            .language_for_path_or_first_line(None, Some(first_line))
+            .map(|language| language.id.to_string())
+    };
+    assert_eq!(guess("<?xml version=\"1.0\"?>").as_deref(), Some("xml"));
+    assert_eq!(guess("foo <?xml"), None);
+    registry.register(Language::new("word", "Word").with_first_line(r"^\w+$"));
+    assert_eq!(guess("plain").as_deref(), Some("word"));
+    // `\w` is ASCII, as in JavaScript.
+    assert_eq!(guess("naïve"), None);
+}

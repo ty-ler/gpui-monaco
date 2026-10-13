@@ -61,6 +61,16 @@ fn push_literal(out: &mut String, c: char) {
 /// Translates the JavaScript regex `source` into `fancy_regex` syntax,
 /// with `(?i)` for `ignore_case`.
 pub(crate) fn translate(source: &str, ignore_case: bool) -> Result<String, String> {
+    translate_with(source, ignore_case, false)
+}
+
+/// [`translate`], where `dot_all` (JavaScript's `s` flag) makes `.` match
+/// any character.
+pub(crate) fn translate_with(
+    source: &str,
+    ignore_case: bool,
+    dot_all: bool,
+) -> Result<String, String> {
     let chars: Vec<char> = source.chars().collect();
     let mut out = String::with_capacity(source.len() + 8);
     if ignore_case {
@@ -78,6 +88,7 @@ pub(crate) fn translate(source: &str, ignore_case: bool) -> Result<String, Strin
                 i = translate_class(&chars, i, &mut out)?;
                 continue;
             }
+            '.' if dot_all => out.push_str(r"[\x00-\x{10FFFF}]"),
             '.' => out.push_str(r"[^\n\r\x{2028}\x{2029}]"),
             '{' => match quantifier_len(&chars[i..]) {
                 Some(len) => {
@@ -287,6 +298,8 @@ fn translate_class(chars: &[char], i: usize, out: &mut String) -> Result<usize, 
         out.push('^');
     }
     let mut previous_dash = false;
+    // Whether the previous atom was a class escape such as `\w`.
+    let mut previous_class_escape = false;
     loop {
         let Some(&c) = chars.get(j) else {
             return Err("unterminated character class".into());
@@ -297,9 +310,15 @@ fn translate_class(chars: &[char], i: usize, out: &mut String) -> Result<usize, 
                 return Ok(j + 1);
             }
             '\\' => {
+                previous_class_escape = is_class_escape(chars, j);
                 j = translate_escape(chars, j, true, out)?;
                 previous_dash = false;
                 continue;
+            }
+            // JavaScript (Annex B) reads a hyphen next to a class escape,
+            // as in `[\w-.]`, as a literal; fancy_regex would see a range.
+            '-' if previous_class_escape || is_class_escape(chars, j + 1) => {
+                out.push_str(r"\-");
             }
             // `[`, `&&` and `~~` are special in fancy_regex classes, and
             // `--` is a difference.
@@ -312,8 +331,16 @@ fn translate_class(chars: &[char], i: usize, out: &mut String) -> Result<usize, 
             c => out.push(c),
         }
         previous_dash = c == '-';
+        previous_class_escape = false;
         j += 1;
     }
+}
+
+/// Whether `chars[i..]` starts with a class escape (`\d`, `\w`, `\s` or
+/// their negations).
+fn is_class_escape(chars: &[char], i: usize) -> bool {
+    chars.get(i) == Some(&'\\')
+        && matches!(chars.get(i + 1), Some('d' | 'D' | 'w' | 'W' | 's' | 'S'))
 }
 
 #[cfg(test)]
@@ -368,6 +395,26 @@ mod tests {
         assert_eq!(matches(r"(?<=a)b", "ab"), Some("b".into()));
         assert_eq!(matches(r"\p{Lu}+", "aBC"), Some("BC".into()));
         assert_eq!(matches(r"a b#", "a b#"), Some("a b#".into()));
+    }
+
+    #[test]
+    fn hyphens_next_to_class_escapes_are_literal() {
+        assert_eq!(matches(r"[\w-.]+", "a-b.c é"), Some("a-b.c".into()));
+        assert_eq!(matches(r"[.-\d]+", "x-.1"), Some("-.1".into()));
+        assert_eq!(matches(r"[\W-z]+", "a z-!"), Some(" z-!".into()));
+        assert_eq!(matches(r"[a-z]+", "-ab"), Some("ab".into()));
+    }
+
+    #[test]
+    fn dot_all() {
+        let dot_all = super::translate_with("a.b", false, true).unwrap();
+        assert!(
+            fancy_regex::Regex::new(&dot_all)
+                .unwrap()
+                .is_match("a\rb")
+                .unwrap()
+        );
+        assert_eq!(matches("a.b", "a\rb"), None);
     }
 
     #[test]

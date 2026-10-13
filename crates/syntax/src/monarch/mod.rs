@@ -69,7 +69,7 @@
 
 mod compile;
 mod highlighter;
-mod js_regex;
+pub(crate) mod js_regex;
 mod lexer;
 #[cfg(test)]
 mod tests;

@@ -231,8 +231,9 @@ pub struct Language {
     /// Glob patterns for file names, or whole paths when they contain a
     /// `/` (Monaco `filenamePatterns`), e.g. `*.config.js`.
     pub filename_patterns: Vec<String>,
-    /// A regex for the first line, used when no file name matches (Monaco
-    /// `firstLine`), e.g. `^#!.*\bpython`.
+    /// A JavaScript regex for the first line, used when no file name
+    /// matches (Monaco `firstLine`), e.g. `^#!.*\bpython`. As in Monaco, it
+    /// is anchored at the line start (a `^` is added when missing).
     pub first_line: Option<String>,
     /// MIME types (Monaco `mimetypes`), e.g. `text/x-rust`.
     pub mimetypes: Vec<String>,
@@ -623,10 +624,10 @@ impl LanguageRegistry {
             .rev()
             .filter(|l| !l.hidden)
             .find(|language| {
-                language.first_line.as_ref().is_some_and(|pattern| {
-                    fancy_regex::Regex::new(pattern)
-                        .is_ok_and(|regex| regex.is_match(first_line).unwrap_or(false))
-                })
+                language
+                    .first_line
+                    .as_ref()
+                    .is_some_and(|pattern| first_line_pattern(pattern).is_match(first_line))
             })
             .cloned()
     }
@@ -759,6 +760,17 @@ impl LanguageRegistry {
                 .unwrap_or_else(|e| e.into_inner())
                 .pending,
         )
+    }
+}
+
+/// A [`Language::first_line`] as Monaco's `LanguagesRegistry` compiles it:
+/// a JavaScript regex, anchored at the line start with a `^` when it
+/// doesn't start with one.
+fn first_line_pattern(source: &str) -> crate::config::Pattern {
+    if source.starts_with('^') {
+        crate::config::Pattern::new(source, "")
+    } else {
+        crate::config::Pattern::new(format!("^{source}"), "")
     }
 }
 

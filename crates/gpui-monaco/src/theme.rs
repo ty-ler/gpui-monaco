@@ -1975,7 +1975,9 @@ impl Theme {
     /// selection). Without it, only `colors` and the registry defaults for
     /// the base's kind apply, and only `rules`. As in Monaco,
     /// `editor.foreground` and `editor.background` in `colors` also become a
-    /// `''` rule, the default token style. A color that isn't hex (`#rgb`,
+    /// `''` rule, the default token style; without `inherit` or
+    /// `editor.foreground`, that rule is `#000000`, as Monaco defaults the
+    /// token foreground to black. A color that isn't hex (`#rgb`,
     /// `#rgba`, `#rrggbb` or `#rrggbbaa`) is red, as Monaco makes it.
     ///
     /// Unlike Monaco, which only accepts `vs`, `vs-dark`, `hc-black` and
@@ -1994,13 +1996,20 @@ impl Theme {
         } else {
             Vec::new()
         };
-        if let Some(foreground) = own.get("editor.foreground") {
+        // Monaco `resolveParsedTokenThemeRules` starts the default token
+        // color at `#000000`; the base's `''` rule replaces it with
+        // `inherit`, else only an `editor.foreground` does.
+        let default_foreground = own
+            .get("editor.foreground")
+            .copied()
+            .or_else(|| (!inherit).then(|| rgb(0x000000).into()));
+        if let Some(foreground) = default_foreground {
             all_rules.push(TokenRule {
                 kind: RuleKind::Monaco,
                 selector: String::new(),
                 foreground: Some(Hsla {
                     a: 1.,
-                    ..*foreground
+                    ..foreground
                 }),
                 font_style: None,
             });
@@ -2779,6 +2788,51 @@ mod tests {
         );
     }
 
+    /// Monaco `resolveParsedTokenThemeRules` defaults the token foreground
+    /// to `#000000`: a theme without `inherit` gets it unless
+    /// `editor.foreground` (or a `''` rule) says otherwise.
+    #[test]
+    fn define_without_inherit_defaults_tokens_to_black() {
+        let unknown = |theme: &Theme, token: &str| {
+            opt_hex(
+                theme
+                    .style_for(HighlightId::intern_monaco_token(token))
+                    .foreground,
+            )
+        };
+        let theme = Theme::define("x", &Theme::vs_dark(), false, vec![], &HashMap::new());
+        assert_eq!(unknown(&theme, "unknown").as_deref(), Some("#000000ff"));
+        // `editor.background` alone leaves the color black.
+        let theme = Theme::define(
+            "bg",
+            &Theme::vs_dark(),
+            false,
+            vec![TokenRule::monaco("keyword", Some("ff0000"), None).unwrap()],
+            &colors(&[("editor.background", "#123456")]),
+        );
+        assert_eq!(unknown(&theme, "unknown").as_deref(), Some("#000000ff"));
+        assert_eq!(unknown(&theme, "keyword").as_deref(), Some("#ff0000ff"));
+        let theme = Theme::define(
+            "fg",
+            &Theme::vs_dark(),
+            false,
+            vec![],
+            &colors(&[("editor.foreground", "#112233")]),
+        );
+        assert_eq!(unknown(&theme, "unknown").as_deref(), Some("#112233ff"));
+        let theme = Theme::define(
+            "rule",
+            &Theme::vs_dark(),
+            false,
+            vec![TokenRule::monaco("", Some("abcdef"), None).unwrap()],
+            &HashMap::new(),
+        );
+        assert_eq!(unknown(&theme, "unknown").as_deref(), Some("#abcdefff"));
+        // With `inherit`, the base's `''` rule applies.
+        let theme = Theme::define("y", &Theme::vs_dark(), true, vec![], &HashMap::new());
+        assert_eq!(unknown(&theme, "unknown").as_deref(), Some("#d4d4d4ff"));
+    }
+
     #[test]
     fn textmate_rules_inherit_too() {
         let theme = Theme::from_vscode_json(
@@ -3259,7 +3313,8 @@ mod tests {
         assert_eq!(opt_hex(c.indent_guides[0]).as_deref(), Some("#33333333"));
         // `lessProminent(selection, background, 0.3, 0.6)`.
         assert_ne!(hex(c.selection_highlight_background), "#add6ff4d");
-        assert_eq!(theme.rules().len(), 0);
+        // Only the default `''` rule, black as Monaco's.
+        assert_eq!(theme.rules().len(), 1);
         // With inherit, themes.ts' colors stay.
         let theme = Theme::define("full", &Theme::vs(), true, Vec::new(), &HashMap::new());
         assert_eq!(hex(theme.colors.inactive_selection_background), "#e5ebf1ff");
