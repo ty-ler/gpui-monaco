@@ -1204,8 +1204,9 @@ pub trait CodeActionProvider: 'static {
 /// Supplies the ranges smart select grows through (Monaco
 /// `SelectionRangeProvider`).
 ///
-/// Register with [`register_selection_range_provider`]. With none, the
-/// syntax tree (or brackets) and words are used.
+/// Register with [`register_selection_range_provider`]. Word ranges are
+/// always added; when none is registered, so are the syntax tree's ranges
+/// (or brackets' without a grammar).
 pub trait SelectionRangeProvider: 'static {
     /// For each of `positions`, ranges containing it (in any order).
     fn provide_selection_ranges(

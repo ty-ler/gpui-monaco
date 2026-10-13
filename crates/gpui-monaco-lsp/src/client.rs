@@ -82,9 +82,9 @@ struct Document {
     _subscriptions: Vec<Subscription>,
 }
 
-/// A running language server bridged to gpui-monaco's providers
-/// (completion, hover, definition, document highlights, signature help)
-/// and markers (diagnostics). Attach models with [`LspClient::attach`].
+/// A running language server bridged to gpui-monaco's providers (one for
+/// each feature the server supports, such as completion, hover, definition,
+/// code actions and rename) and markers (diagnostics). Attach models with [`LspClient::attach`].
 pub struct LspClient {
     options: LspClientOptions,
     connection: Connection,

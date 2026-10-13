@@ -92,12 +92,13 @@ impl CodeEditor {
             .collect();
         self.smart_select.task = Some(cx.spawn(async move |this, cx| {
             let mut provided: Vec<Vec<Range<PointUtf16>>> = vec![Vec::new(); positions.len()];
-            let mut any_provider = false;
+            // Monaco adds its fallback ranges only when no provider is
+            // registered, even if the registered ones answer nothing.
+            let any_provider = !tasks.is_empty();
             for task in tasks {
                 match task.await {
                     // Monaco ignores results that don't match the positions.
                     Ok(ranges) if ranges.len() == positions.len() => {
-                        any_provider = true;
                         for (into, ranges) in provided.iter_mut().zip(ranges) {
                             into.extend(ranges);
                         }
@@ -119,9 +120,10 @@ impl CodeEditor {
         }));
     }
 
-    /// Monaco `provideSelectionRanges` per cursor: providers' ranges (else
-    /// the syntax tree's, else brackets') plus word ranges, merged, inside
-    /// the selection, with the selection itself first.
+    /// Monaco `provideSelectionRanges` per cursor: providers' ranges (or,
+    /// when none is registered, the syntax tree's, else brackets') plus word
+    /// ranges, merged, inside the selection, with the selection itself
+    /// first. Monaco has no syntax ranges; it uses brackets.
     fn compute_selection_ranges(
         &self,
         selections: &[Selection],
