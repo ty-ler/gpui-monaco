@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- Fixed `MultiDiffEditor::set_scroll_top` called before the list's first layout being undone by the first change revealed on load, which also left the stuck file's original and modified sides showing different lines while it caught up. A scroll set after loading now wins over that reveal, as it does in Monaco, where the reveal happens at once; the first change still gets the cursor (#465).
 - **Monaco quirks and VS Code additions, decided (#431):** Ported Monaco's interval line numbers with folded lines, its standard multi diff header without a shadow and its tokenizer disposal, and documented the rest (audit 4 §B.15, §E.4, §E.29, §F.7, §H.5, §G.17).
   - **Interval line numbers:** with `LineNumbers::Interval`, the always-numbered "last" line is the one whose number is the view's line count, as in Monaco: with lines 2–10 of 25 folded, line 16 is numbered and line 25 isn't.
   - **Sticky header shadow:** the default (`NoCardsNonCompact`) multi diff variant no longer draws a shadow under a header with its file scrolled under it. Monaco's rule for it never matches; only the cards variant's header floats with a shadow.
