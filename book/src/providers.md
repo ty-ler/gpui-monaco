@@ -345,7 +345,7 @@ To accept:
 
 Alt+] and Alt+[ show the other completions, and Alt+\\ asks explicitly. Escape or moving the cursor hides it.
 
-Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept and Accept Word with the keys bound to them, and a "⋯" button whose context menu has Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead, in a hover card of its own. The open menu takes the keyboard, as the context menu does: Up, Down, Home and End move, Enter or Space runs, Escape closes it.
+Hovering the ghost text shows Monaco's toolbar: previous and next with a "1/3" count, Accept and Accept Word with the keys bound to them, and a "⋯" button whose context menu has Accept Line, Always Show Toolbar and the list's `commands`. With `inline_suggest.show_toolbar: Always` it stays above the ghost text instead, in a hover card of its own; while it shows, completions are asked for explicitly, typing included, so the count stays. The open menu takes the keyboard, as the context menu does: Up, Down, Home and End move, Enter or Space runs, Escape closes it.
 
 Ghost text is colored like code (`syntax_highlighting_enabled`, faded to 70%). The toolbar's count needs all completions, so showing it asks explicitly.
 
@@ -451,6 +451,7 @@ Hovering a color, or clicking its swatch, opens the color picker; `color_decorat
 - Letting go of the saturation box or a strip writes the color using the provider's first presentation, or the one written like the original text.
 - Clicking the header cycles through the presentations, and clicking the original color restores it.
 - `ShowOrFocusStandaloneColorPicker` opens a standalone picker at the cursor. Enter inserts its color (or replaces the color under the cursor), and Escape closes it.
+- Either picker closes when the text changes other than by the picker: typing, an edit in another editor on the model, or the host's.
 
 The `gpui_monaco::color` module has Monaco's `Color` for conversions and CSS formatting.
 
@@ -468,7 +469,7 @@ The editor has built-in providers for plain text, paths and HTML. When other pro
 
 Providers that take a while show Monaco's inline progress: after 500ms, a spinner where the text goes. Clicking it cancels the providers (a paste then pastes the plain text), as Escape does. Changing the text cancels a pending paste or drop, and so does moving the selection for a paste. Resolving the paste edit shows the spinner at once.
 
-As in Monaco, the edit about to be applied is resolved first: `resolve_document_drop_edit` and `resolve_document_paste_edit` can fill in an edit's text or additional edit only for the one used. `provide_document_paste_edits_with_context` gets Monaco's `DocumentPasteContext`, with `only`, the kind "Paste As..." asks for. Providers can name themselves (`id`), and drop providers list their kinds (`provided_drop_edit_kinds`).
+As in Monaco, the edit about to be applied is resolved first: `resolve_document_drop_edit` and `resolve_document_paste_edit` can fill in an edit's text or additional edit only for the one used. If resolving fails, nothing is applied and the options button shows, offering the other edits. `provide_document_paste_edits_with_context` gets Monaco's `DocumentPasteContext`, with `only`, the kind "Paste As..." asks for. Providers can name themselves (`id`), and drop providers list their kinds (`provided_drop_edit_kinds`).
 
 A paste provider can also prepare data when text is copied or cut, as Monaco's `prepareDocumentPaste` does (with `paste_as.enabled` on). `prepare_document_paste` gets the copied ranges (whole lines for empty selections) and returns a `DataTransfer`, for example the imports the copied code needs; `copy_mime_types` names its MIME types. When that copy is pasted, in this editor or another, the paste waits for the data, adds it to the paste's `DataTransfer` (higher priority providers winning) and asks the providers that handle it. Text copied elsewhere, or before the latest copy, has no such data.
 

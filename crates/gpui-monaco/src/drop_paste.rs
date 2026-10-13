@@ -433,6 +433,10 @@ pub(crate) struct PostEdit {
     /// The text version right after applying it.
     version: text::Version,
     widget: WidgetId,
+    /// Whether the active edit was applied: not when resolving it failed
+    /// (Monaco then shows the button without applying anything), so
+    /// picking another edit has nothing to undo.
+    applied: bool,
 }
 
 #[derive(Default)]
@@ -911,7 +915,8 @@ impl CodeEditor {
 
     /// Resolves `edit` with its provider, if needed, then runs `apply` with
     /// it, unless the text changed meanwhile (Monaco resolves the edit it's
-    /// about to apply).
+    /// about to apply). A failed resolve logs Monaco's "Error resolving
+    /// edit" and runs `apply` with `None`.
     ///
     /// With `progress`, a spinner shows there right away while it resolves
     /// (Monaco's paste resolve `showWhile`, with no delay); clicking it
@@ -920,7 +925,7 @@ impl CodeEditor {
         &mut self,
         mut edit: ProvidedEdit,
         progress: Option<PointUtf16>,
-        apply: impl FnOnce(&mut Self, ProvidedEdit, &mut Context<Self>) + 'static,
+        apply: impl FnOnce(&mut Self, Option<ProvidedEdit>, &mut Context<Self>) + 'static,
         cx: &mut Context<Self>,
     ) {
         let task = edit
@@ -928,7 +933,7 @@ impl CodeEditor {
             .take()
             .and_then(|resolve| resolve(&edit.edit, cx));
         let Some(task) = task else {
-            apply(self, edit, cx);
+            apply(self, Some(edit), cx);
             return;
         };
         let version = self.snapshot.version();
@@ -946,16 +951,22 @@ impl CodeEditor {
             )
         });
         self.drop_paste.resolve_task = Some(cx.spawn(async move |this, cx| {
-            match task.await {
-                Ok(resolved) => edit.edit = resolved,
-                Err(err) => log::warn!("resolving a drop or paste edit failed: {err:#}"),
-            }
+            let resolved = match task.await {
+                Ok(resolved) => {
+                    edit.edit = resolved;
+                    Some(edit)
+                }
+                Err(err) => {
+                    log::error!("Error resolving edit '{}':\n{err:#}", edit.edit.title);
+                    None
+                }
+            };
             this.update(cx, |this, cx| {
                 if let Some(progress) = progress {
                     this.end_inline_progress(ProgressKind::Paste, progress, cx);
                 }
                 if this.snapshot.version() == version {
-                    apply(this, edit, cx);
+                    apply(this, resolved, cx);
                 }
             })
             .ok();
@@ -973,7 +984,11 @@ impl CodeEditor {
         self.resolve_post_edit(
             edit,
             None,
-            move |this, edit, cx| this.apply_post_edit_once(&ranges, &edit.edit, cx),
+            move |this, edit, cx| {
+                if let Some(edit) = edit {
+                    this.apply_post_edit_once(&ranges, &edit.edit, cx);
+                }
+            },
             cx,
         );
     }
@@ -996,9 +1011,20 @@ impl CodeEditor {
             self.resolve_post_edit(
                 edit,
                 progress,
-                move |this, resolved, cx| {
-                    edits[active] = resolved;
-                    this.apply_post_edit(kind, ranges, edits, active, show, cx);
+                move |this, resolved, cx| match resolved {
+                    Some(resolved) => {
+                        edits[active] = resolved;
+                        this.apply_post_edit(kind, ranges, edits, active, show, cx);
+                    }
+                    // Monaco's `handleError`: nothing is applied, and the
+                    // button offers the edits instead.
+                    None if show != crate::options::ShowEditSelector::Never => {
+                        let position = ranges[0].end;
+                        this.show_post_edit_widget(
+                            kind, ranges, edits, active, position, false, cx,
+                        );
+                    }
+                    None => {}
                 },
                 cx,
             );
@@ -1024,6 +1050,23 @@ impl CodeEditor {
             let buffer = self.model().read(cx).buffer();
             buffer.offset_to_point_utf16(buffer.resolve_range(&tracked).end)
         };
+        self.show_post_edit_widget(kind, ranges, edits, active, position, true, cx);
+    }
+
+    /// Monaco `PostEditWidgetManager.show`: the options button at
+    /// `position`, offering `edits`.
+    #[allow(clippy::too_many_arguments)]
+    fn show_post_edit_widget(
+        &mut self,
+        kind: PostEditKind,
+        ranges: Vec<Range<PointUtf16>>,
+        edits: Vec<ProvidedEdit>,
+        active: usize,
+        position: PointUtf16,
+        applied: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_post_edit(cx);
         let editor = cx.entity().downgrade();
         let view = cx.new(|_| PostEditButton {
             editor,
@@ -1049,6 +1092,7 @@ impl CodeEditor {
             ranges,
             version: self.model().read(cx).buffer().version(),
             widget,
+            applied,
         });
     }
 
@@ -1141,15 +1185,24 @@ impl CodeEditor {
             Some(title),
             labels,
             |this, ix, _, cx| {
+                // Monaco only hides the list when the active edit is
+                // picked again; the options button stays.
+                if this
+                    .drop_paste
+                    .post_edit
+                    .as_ref()
+                    .is_none_or(|post_edit| ix == post_edit.active)
+                {
+                    return;
+                }
                 let Some(post_edit) = this.drop_paste.post_edit.take() else {
                     return;
                 };
                 this.remove_widget(post_edit.widget, cx);
-                if ix == post_edit.active {
-                    return;
-                }
                 // Undo the applied edit, then apply the chosen one.
-                this.undo(cx);
+                if post_edit.applied {
+                    this.undo(cx);
+                }
                 this.apply_post_edit(
                     post_edit.kind,
                     post_edit.ranges,

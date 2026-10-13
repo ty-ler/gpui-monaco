@@ -33,8 +33,9 @@ pub(crate) struct InlineMessage {
     view: Option<Entity<MessageView>>,
     /// The row it's shown at.
     row: u32,
-    /// Rows the mouse may move within (Monaco: three lines around the
-    /// position and the mouse's first row) before it closes.
+    /// The rows the mouse may move within before it closes: Monaco's
+    /// `Range(line - 3, 1, mouseLine + 3, 1)` around the position and the
+    /// mouse's first row. The last row is inside only at its first column.
     bounds: Option<Range<u32>>,
     /// The message's source text.
     text: SharedString,
@@ -364,16 +365,24 @@ impl CodeEditor {
     }
 
     /// Closes the message once the mouse leaves the rows around it.
-    pub(crate) fn message_mouse_move(&mut self, row: u32, cx: &mut Context<Self>) {
+    pub(crate) fn message_mouse_move(&mut self, position: PointUtf16, cx: &mut Context<Self>) {
         if self.message.widget.is_none() {
             return;
         }
         match &self.message.bounds {
             None => {
                 let message_row = self.message.row;
-                self.message.bounds = Some(message_row.saturating_sub(3)..row + 4);
+                self.message.bounds = Some(message_row.saturating_sub(3)..position.row + 3);
             }
-            Some(bounds) if !bounds.contains(&row) => self.close_message(cx),
+            // Monaco's `containsPosition`: on the end row only column 1
+            // (the start of the end position) is inside.
+            Some(bounds)
+                if position.row < bounds.start
+                    || position.row > bounds.end
+                    || (position.row == bounds.end && position.column > 0) =>
+            {
+                self.close_message(cx)
+            }
             Some(_) => {}
         }
     }

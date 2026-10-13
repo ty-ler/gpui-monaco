@@ -2703,11 +2703,14 @@ impl CodeEditor {
             }
             return;
         };
+        // Monaco's "request explicit" autorun: while the toolbar shows,
+        // a request that wasn't explicit (typing) is made again
+        // explicitly, so the count and Previous/Next stay.
+        if !self.inline.explicit {
+            self.trigger_inline_suggest(cx);
+        }
         if previous == Some(position) && self.inline.toolbar.is_some() {
             return;
-        }
-        if previous.is_none() && !self.inline.explicit {
-            self.trigger_inline_suggest(cx);
         }
         let view = match self.inline.toolbar.take() {
             Some((view, id)) => {
@@ -2759,6 +2762,17 @@ impl CodeEditor {
             .toolbar
             .as_ref()
             .and(self.inline.toolbar_session)
+    }
+
+    /// The always-shown toolbar's count ("1/3" as `(0, 3)`) and whether
+    /// Previous/Next are enabled, as it last drew them, for tests.
+    #[doc(hidden)]
+    pub fn inline_toolbar_count_for_tests(
+        &self,
+        cx: &gpui::App,
+    ) -> Option<(Option<(usize, usize)>, bool)> {
+        let (toolbar, _) = self.inline.toolbar.as_ref()?;
+        Some(toolbar.read(cx).count_for_tests())
     }
 
     /// The shown ghost text's warning message, and whether the ghost text

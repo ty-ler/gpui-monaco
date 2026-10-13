@@ -497,6 +497,53 @@ fn the_always_shown_toolbar(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco `InlineCompletionsHintsWidget`: while the toolbar shows, a
+/// request typing makes is made again explicitly, so the count and
+/// Previous/Next stay; the toolbar clears them only 100ms after the editor
+/// has no count.
+#[gpui::test]
+fn the_always_shown_toolbar_keeps_its_count_while_typing(cx: &mut TestAppContext) {
+    use gpui_monaco::options::InlineSuggestShowToolbar;
+    let (editor, cx, requests) = setup(vec!["println!(\"hi\");", "print!(\"hi\");"], cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.inline_suggest.show_toolbar = InlineSuggestShowToolbar::Always;
+        e.update_options(options, cx);
+    });
+    cx.simulate_input("pri");
+    draw(cx);
+    draw(cx);
+    let toolbar = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.inline_toolbar_count_for_tests(cx))
+    };
+    assert_eq!(toolbar(cx), Some((Some((0, 2)), true)));
+    requests.borrow_mut().clear();
+    cx.simulate_input("n");
+    // Before the new request answers, the toolbar still shows the count.
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(toolbar(cx), Some((Some((0, 2)), true)));
+    draw(cx);
+    draw(cx);
+    assert!(
+        requests
+            .borrow()
+            .contains(&InlineCompletionTriggerKind::Explicit)
+    );
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.inline_suggestion_index(cx)),
+        Some((0, 2))
+    );
+    assert_eq!(toolbar(cx), Some((Some((0, 2)), true)));
+    // Down to one suggestion: Previous/Next disable 100ms later.
+    cx.simulate_input("tl");
+    cx.update(|window, _| window.refresh());
+    cx.run_until_parked();
+    assert_eq!(toolbar(cx), Some((Some((0, 1)), true)));
+    draw(cx);
+    assert_eq!(toolbar(cx), Some((Some((0, 1)), false)));
+}
+
 #[gpui::test]
 fn the_toolbar_in_the_hover(cx: &mut TestAppContext) {
     let (editor, cx, _) = setup(vec!["println!(\"hi\");"], cx);
