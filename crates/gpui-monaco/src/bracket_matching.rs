@@ -23,6 +23,55 @@ fn contains(range: &Range<PointUtf16>, p: PointUtf16) -> bool {
     range.start <= p && p <= range.end
 }
 
+/// Blocks longer than this aren't measured row by row (a minified file's
+/// one long line).
+const MAX_ROW_TABLE_BYTES: usize = 64 * 1024;
+
+/// A block's strings and comments for [`CodeEditor::with_bracket_context`].
+struct SkipBlock {
+    ranges: Vec<Range<usize>>,
+    rows: Option<RowTable>,
+}
+
+/// Where a block's rows start and end, and which are ASCII, so a bracket's
+/// offset doesn't take a rope seek: measured in one pass over the block.
+struct RowTable {
+    first_row: u32,
+    /// Each row's start and end (before its line break), and whether it's
+    /// all ASCII.
+    rows: Vec<(usize, usize, bool)>,
+}
+
+impl RowTable {
+    fn new(rope: &text::Rope, first_row: u32, range: Range<usize>) -> Self {
+        let mut rows = Vec::new();
+        let (mut start, mut ascii) = (range.start, true);
+        let mut offset = range.start;
+        for chunk in rope.chunks_in_range(range.clone()) {
+            for &byte in chunk.as_bytes() {
+                if byte == b'\n' {
+                    rows.push((start, offset, ascii));
+                    (start, ascii) = (offset + 1, true);
+                } else if !byte.is_ascii() {
+                    ascii = false;
+                }
+                offset += 1;
+            }
+        }
+        if start < range.end || rows.is_empty() {
+            rows.push((start, range.end, ascii));
+        }
+        Self { first_row, rows }
+    }
+
+    /// The offset of `p` on an ASCII row, where columns are bytes, as
+    /// [`text::Rope::point_utf16_to_offset`] gives it.
+    fn ascii_offset(&self, p: PointUtf16) -> Option<usize> {
+        let &(start, end, ascii) = self.rows.get(p.row.checked_sub(self.first_row)? as usize)?;
+        ascii.then(|| (start + p.column as usize).min(end))
+    }
+}
+
 impl CodeEditor {
     /// The bracket pair at (or, with `enclosing`, around) `position`.
     /// Runs `f` with the text, the language configuration and whether the
@@ -39,27 +88,35 @@ impl CodeEditor {
         // can visit hundreds of brackets, and one query per bracket is slow.
         // The model keeps the blocks' tokens until the syntax changes.
         const BLOCK_ROWS: u32 = crate::model::SKIP_BLOCK_ROWS;
-        let blocks: RefCell<HashMap<u32, Vec<Range<usize>>>> = Default::default();
+        let blocks: RefCell<HashMap<u32, SkipBlock>> = Default::default();
         let skippable = |p: PointUtf16| {
             let block = p.row / BLOCK_ROWS;
             let mut blocks = blocks.borrow_mut();
-            let ranges = blocks.entry(block).or_insert_with(|| {
+            let block = blocks.entry(block).or_insert_with(|| {
+                let first_row = block * BLOCK_ROWS;
                 let max_row = rope.max_point().row;
-                let start = rope.point_to_offset(Point::new((block * BLOCK_ROWS).min(max_row), 0));
+                let start = rope.point_to_offset(Point::new(first_row.min(max_row), 0));
                 let end_row = (block + 1) * BLOCK_ROWS;
                 let end = if end_row > max_row {
                     rope.len()
                 } else {
                     rope.point_to_offset(Point::new(end_row, 0))
                 };
-                model.bracket_skip_ranges(start..end)
+                let ranges = model.bracket_skip_ranges(start..end);
+                // Nothing to skip (e.g. plain text) needs no offsets.
+                let rows = (!ranges.is_empty() && end - start <= MAX_ROW_TABLE_BYTES)
+                    .then(|| RowTable::new(rope, first_row, start..end));
+                SkipBlock { ranges, rows }
             });
-            if ranges.is_empty() {
-                // Nothing to skip (e.g. plain text): no need to find the
-                // offset, which is most of the cost on a long line.
+            if block.ranges.is_empty() {
                 return false;
             }
-            let offset = rope.point_utf16_to_offset(p);
+            let offset = block
+                .rows
+                .as_ref()
+                .and_then(|rows| rows.ascii_offset(p))
+                .unwrap_or_else(|| rope.point_utf16_to_offset(p));
+            let ranges = &block.ranges;
             let ix = ranges.partition_point(|r| r.end <= offset);
             ranges.get(ix).is_some_and(|r| r.start <= offset)
         };
@@ -281,5 +338,49 @@ impl CodeEditor {
             RevealType::Simple,
             cx,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use text::{Point, PointUtf16, Rope};
+
+    use super::RowTable;
+
+    /// A row table's offsets are the rope's, on every ASCII row of a
+    /// block, and it has none for the others.
+    #[test]
+    fn row_table_offsets_match_the_rope() {
+        for text in ["", "\n", "ab\n\ncd(e)\n", "a(\né[\nx\n\n{}", "(\n😀)\n[]"] {
+            let rope = Rope::from(text);
+            let max_row = rope.max_point().row;
+            for (first, last) in [(0, max_row), (1.min(max_row), max_row), (0, 0)] {
+                let start = rope.point_to_offset(Point::new(first, 0));
+                let end = if last < max_row {
+                    rope.point_to_offset(Point::new(last + 1, 0))
+                } else {
+                    rope.len()
+                };
+                let table = RowTable::new(&rope, first, start..end);
+                for row in 0..=max_row {
+                    let line = rope.line(row);
+                    for column in 0..=line.encode_utf16().count() as u32 + 1 {
+                        let p = PointUtf16::new(row, column);
+                        let in_block = (first..=last).contains(&row);
+                        match table.ascii_offset(p) {
+                            Some(offset) => {
+                                assert!(in_block && line.is_ascii(), "{text:?} {p:?}");
+                                assert_eq!(offset, rope.point_utf16_to_offset(p), "{text:?} {p:?}");
+                            }
+                            // Only a block's final empty row may go without.
+                            None => assert!(
+                                !in_block || !line.is_ascii() || line.is_empty(),
+                                "{text:?} {p:?}"
+                            ),
+                        }
+                    }
+                }
+            }
+        }
     }
 }
