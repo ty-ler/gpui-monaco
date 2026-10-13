@@ -1,5 +1,7 @@
 //! Mock language feature providers for the playground (off with `PLAYGROUND_PLAIN=1`).
 
+use std::collections::HashMap;
+
 use gpui::{App, Entity, Task};
 use gpui_monaco::providers::*;
 use gpui_monaco::text::PointUtf16;
@@ -594,11 +596,12 @@ struct DemoInlayHints {
     index: std::cell::RefCell<Option<(gpui::SharedString, usize, std::rc::Rc<HintIndex>)>>,
 }
 
-/// The `struct Name` rows and columns, and each `fn`'s name and first
-/// parameter.
+/// The `struct Name` rows and columns (the first of each name), and the
+/// first parameter of each `fn` by its name (in the file's order), so a
+/// request costs only the rows it asks for.
 struct HintIndex {
-    structs: Vec<(String, u32, usize)>,
-    params: Vec<(String, String)>,
+    structs: HashMap<String, (u32, usize)>,
+    params: HashMap<String, Vec<String>>,
 }
 
 fn ident(s: &str) -> String {
@@ -610,13 +613,13 @@ fn ident(s: &str) -> String {
 impl HintIndex {
     /// One pass over the lines, borrowed, not copied.
     fn new(rope: &gpui_monaco::text::Rope) -> Self {
-        let mut structs = Vec::new();
-        let mut params = Vec::new();
+        let mut structs = HashMap::new();
+        let mut params: HashMap<String, Vec<String>> = HashMap::new();
         let mut row = 0;
         rope.for_each_line(0..rope.len(), |_, line| {
             if let Some(at) = line.find("struct ") {
                 let at = at + 7;
-                structs.push((ident(&line[at..]), row, at));
+                structs.entry(ident(&line[at..])).or_insert((row, at));
             }
             let param = (|| {
                 let at = line.find("fn ")? + 3;
@@ -626,7 +629,9 @@ impl HintIndex {
                 let param = ident(rest.trim_start_matches(['&', ' ']));
                 (!param.is_empty() && param != "self").then_some((name, param))
             })();
-            params.extend(param);
+            if let Some((name, param)) = param {
+                params.entry(name).or_default().push(param);
+            }
             row += 1;
             true
         });
@@ -690,7 +695,7 @@ fn demo_inlay_hints(
                 // The type: a `Name::` or `Name {` after `=`, else i32.
                 let value = line[end..].split('=').nth(1).unwrap_or("").trim_start();
                 let ty = ident(value);
-                let known = structs.iter().find(|(s, _, _)| *s == ty);
+                let known = structs.get_key_value(&ty).map(|(s, (r, c))| (s, r, c));
                 let ty = if known.is_some() {
                     ty
                 } else {
@@ -727,20 +732,23 @@ fn demo_inlay_hints(
                 });
             }
         }
-        for (name, param) in params {
-            let call = format!("{name}(");
-            let mut from = 0;
-            while let Some(found) = line[from..].find(&call) {
-                let open = from + found + call.len();
-                from = open;
-                let before = line[..open - call.len()].chars().last();
-                let is_definition = line[..open - call.len()].trim_end().ends_with("fn");
-                if is_definition
-                    || before.is_some_and(|c| c.is_alphanumeric() || c == '_')
-                    || line[open..].starts_with(')')
-                {
-                    continue;
-                }
+        // Calls: each `(` after the name of a `fn` (the whole identifier
+        // before it), not its definition nor an empty call.
+        for (paren, _) in line.match_indices('(') {
+            let name_at = line[..paren]
+                .char_indices()
+                .rev()
+                .take_while(|(_, c)| c.is_alphanumeric() || *c == '_')
+                .last()
+                .map_or(paren, |(at, _)| at);
+            let Some(names) = params.get(&line[name_at..paren]) else {
+                continue;
+            };
+            let open = paren + 1;
+            if line[..name_at].trim_end().ends_with("fn") || line[open..].starts_with(')') {
+                continue;
+            }
+            for param in names {
                 hints.push(InlayHint {
                     position: PointUtf16::new(row, open as u32),
                     label: format!("{param}:").into(),

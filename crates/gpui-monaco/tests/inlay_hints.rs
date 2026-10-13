@@ -806,3 +806,214 @@ fn hints_follow_providers_registered_and_removed_later(cx: &mut TestAppContext) 
     settle(cx);
     assert!(hints(&editor, cx).is_empty());
 }
+
+/// Several hints at each `let` (a type, with its row as tooltip, and two
+/// parameter-like ones at the same position, as when a call matches
+/// functions of one name), and optionally a hint past the end of every
+/// 7th line (where its decoration can't be) and one on the first line
+/// whatever the rows asked for.
+#[derive(Clone, Copy)]
+struct Many {
+    past_line_ends: bool,
+    stray: bool,
+}
+
+impl InlayHintsProvider for Many {
+    fn provide_inlay_hints(
+        &self,
+        context: &ProviderContext,
+        range: Range<PointUtf16>,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlayHint>>> {
+        let mut hints = Vec::new();
+        if self.stray && range.start.row > 0 {
+            hints.push(InlayHint {
+                position: p(0, 0),
+                label: format!("from {}", range.start.row).into(),
+                ..Default::default()
+            });
+        }
+        for row in range.start.row..=range.end.row {
+            let line = context.snapshot.line(row);
+            if let Some(start) = line.find("let ") {
+                let end = (start + 4 + line[start + 4..].find(' ').unwrap_or(0)) as u32;
+                for (ix, label) in [format!(": T{row}"), "a:".into(), "b:".into()]
+                    .into_iter()
+                    .enumerate()
+                {
+                    hints.push(InlayHint {
+                        position: p(row, end),
+                        label: label.into(),
+                        tooltip: (ix == 0)
+                            .then(|| MarkdownString::new(format!("row {row}")).into()),
+                        ..Default::default()
+                    });
+                }
+            }
+            if self.past_line_ends && row % 7 == 0 {
+                hints.push(InlayHint {
+                    position: p(row, 200),
+                    label: "!".into(),
+                    ..Default::default()
+                });
+            }
+        }
+        hints.sort_by_key(|hint| hint.position);
+        Task::ready(Ok(hints))
+    }
+}
+
+/// 600 lines, every third a `let`.
+fn many_lets() -> String {
+    (0..600)
+        .map(|i| {
+            if i % 3 == 0 {
+                format!("let x{i} = {i};\n")
+            } else {
+                format!("// {i}\n")
+            }
+        })
+        .collect()
+}
+
+/// What a scenario leaves after each step: the hints in order, the hints
+/// shown, and whether the next update can replace just its rows' hints.
+type Steps = Vec<(Vec<(PointUtf16, String)>, Vec<(PointUtf16, String)>, bool)>;
+
+/// Scrolls around and edits, recording each step.
+fn hint_steps(provider: Many, full: bool, cx: &mut TestAppContext) -> Steps {
+    let (editor, cx) = setup_with(
+        &many_lets(),
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, provider);
+        },
+        cx,
+    );
+    editor.update(cx, |e, _| e.set_inlay_hints_full_updates_for_tests(full));
+    let mut steps = Vec::new();
+    for keys in [
+        "pagedown",
+        "pagedown pagedown",
+        "pageup",
+        "cmd-down",
+        "pageup pageup",
+        "cmd-up",
+        "pagedown",
+        "x",
+        "pagedown",
+        "pageup",
+        "backspace",
+        "pagedown pagedown pagedown",
+    ] {
+        cx.simulate_keystrokes(keys);
+        settle(cx);
+        settle(cx);
+        let (items, anchored) = editor.read_with(cx, |e, _| e.inlay_hint_items_for_tests());
+        steps.push((items, hints(&editor, cx), anchored));
+    }
+    steps
+}
+
+/// New hints for some rows replace those rows' hints in place when no
+/// edit moved the decorations since they were shown, otherwise every
+/// hint's position is read from its decorations: either way the hints, and
+/// the hints shown, come out the same.
+#[gpui::test]
+fn replacing_hints_in_place_matches_a_full_update(
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let provider = Many {
+        past_line_ends: false,
+        stray: false,
+    };
+    let incremental = hint_steps(provider, false, cx_a);
+    let full = hint_steps(provider, true, cx_b);
+    assert_eq!(incremental.len(), full.len());
+    for (ix, (a, b)) in incremental.iter().zip(&full).enumerate() {
+        assert_eq!(a.0, b.0, "hints after step {ix}");
+        assert_eq!(a.1, b.1, "shown hints after step {ix}");
+        assert!(!b.2);
+    }
+    // Scrolling replaced hints in place; the hints are in order.
+    assert!(incremental.iter().filter(|step| step.2).count() >= 8);
+    for (items, _, _) in &incremental {
+        assert!(items.is_sorted_by_key(|(position, _)| *position));
+        assert!(items.len() > 3);
+    }
+    // The hints at a position show in order.
+    let shown = &incremental[0].1;
+    let first = shown
+        .iter()
+        .position(|(_, text)| text.starts_with(": T"))
+        .unwrap();
+    assert_eq!(shown[first + 1].1, "a:");
+    assert_eq!(shown[first + 2].1, "b:");
+}
+
+/// Hints whose decorations can't be at their positions (past the line's
+/// end), and hints outside the rows asked for, take the full update, with
+/// the same result.
+#[gpui::test]
+fn hints_off_their_positions_take_the_full_update(
+    cx_a: &mut TestAppContext,
+    cx_b: &mut TestAppContext,
+) {
+    let provider = Many {
+        past_line_ends: true,
+        stray: true,
+    };
+    let incremental = hint_steps(provider, false, cx_a);
+    let full = hint_steps(provider, true, cx_b);
+    for (ix, (a, b)) in incremental.iter().zip(&full).enumerate() {
+        assert_eq!(a.0, b.0, "hints after step {ix}");
+        assert_eq!(a.1, b.1, "shown hints after step {ix}");
+    }
+    // The decorations past line ends aren't at their hints' positions.
+    assert!(incremental.iter().all(|step| !step.2));
+}
+
+/// After scrolling replaced hints in place, hovering a label part shows
+/// its own hint's tooltip.
+#[gpui::test]
+fn parts_find_their_hints_after_scrolling(cx: &mut TestAppContext) {
+    let provider = Many {
+        past_line_ends: false,
+        stray: false,
+    };
+    let (editor, cx) = setup_with(
+        &many_lets(),
+        |cx| {
+            register_inlay_hints_provider(cx, LanguageSelector::All, provider);
+        },
+        cx,
+    );
+    cx.simulate_keystrokes("pagedown pagedown pagedown");
+    settle(cx);
+    settle(cx);
+    cx.simulate_keystrokes("pageup");
+    settle(cx);
+    settle(cx);
+    assert!(editor.read_with(cx, |e, _| e.inlay_hint_items_for_tests().1));
+    // The first visible `let`'s type hint.
+    let row = editor.read_with(cx, |e, _| {
+        (0..600)
+            .step_by(3)
+            .find(|row| e.scrolled_visible_position(p(*row, 0)).is_some())
+            .unwrap()
+    });
+    assert!(row > 0);
+    let point = editor
+        .read_with(cx, |e, cx| {
+            e.inlay_hint_part_point_for_tests(&format!(": T{row}"), cx)
+        })
+        .expect("the type hint shown");
+    cx.simulate_mouse_move(point, None, Modifiers::default());
+    cx.executor().advance_clock(HOVER_DELAY * 2);
+    cx.run_until_parked();
+    let contents = editor.read_with(cx, |e, cx| e.hover_contents_for_tests(cx));
+    assert!(
+        contents.contains(&format!("row {row}")),
+        "{contents:?} at row {row}"
+    );
+}
