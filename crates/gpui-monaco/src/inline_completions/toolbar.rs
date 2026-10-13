@@ -10,12 +10,13 @@
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::{
     AnyElement, Bounds, Context, Entity, InteractiveElement, IntoElement, KeyBinding, MouseButton,
-    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, WeakEntity,
-    Window, div, px,
+    ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement, Styled, Task,
+    WeakEntity, Window, div, px,
 };
 
 use crate::codicons::{Codicon, icon as codicon};
@@ -37,7 +38,21 @@ pub struct InlineToolbar {
     /// Where the "⋯" button was painted, in the window: its menu shows
     /// below it.
     more_bounds: Rc<Cell<Bounds<Pixels>>>,
+    /// The "1/3" count shown: it stays [`DEBOUNCE`] after the editor stops
+    /// having one (Monaco `clearAvailableSuggestionCountLabelDebounced`).
+    count: Option<(usize, usize)>,
+    clear_count: Option<Task<()>>,
+    /// Whether Previous and Next are enabled: they stay so [`DEBOUNCE`]
+    /// after there's no longer more than one (Monaco
+    /// `disableButtonsDebounced`).
+    several: bool,
+    disable_buttons: Option<Task<()>>,
 }
+
+/// How long the count and enabled Previous/Next outlive the editor's count
+/// (Monaco's 100ms `RunOnceScheduler`s), so a request made again doesn't
+/// blank them.
+const DEBOUNCE: Duration = Duration::from_millis(100);
 
 /// The binding Monaco's `lookupKeybinding` shows for an inline suggestion
 /// command: `action`'s ([`command_binding`]), else the key of `via`, the
@@ -119,6 +134,49 @@ impl InlineToolbar {
             theme,
             with_border,
             more_bounds: Rc::default(),
+            count: None,
+            clear_count: None,
+            several: false,
+            disable_buttons: None,
+        }
+    }
+
+    /// The count and whether Previous/Next are enabled, as last drawn.
+    pub(crate) fn count_for_tests(&self) -> (Option<(usize, usize)>, bool) {
+        (self.count, self.several)
+    }
+
+    /// Monaco's "counts" autorun: shows the editor's `count` at once, but
+    /// clears the shown count and disables Previous/Next only after
+    /// [`DEBOUNCE`].
+    fn follow_count(&mut self, count: Option<(usize, usize)>, cx: &mut Context<Self>) {
+        if count.is_some() {
+            self.clear_count = None;
+            self.count = count;
+        } else if self.count.is_some() && self.clear_count.is_none() {
+            self.clear_count = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DEBOUNCE).await;
+                this.update(cx, |this, cx| {
+                    this.count = None;
+                    this.clear_count = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
+        }
+        if count.is_some_and(|(_, count)| count > 1) {
+            self.disable_buttons = None;
+            self.several = true;
+        } else if self.several && self.disable_buttons.is_none() {
+            self.disable_buttons = Some(cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(DEBOUNCE).await;
+                this.update(cx, |this, cx| {
+                    this.several = false;
+                    this.disable_buttons = None;
+                    cx.notify();
+                })
+                .ok();
+            }));
         }
     }
 
@@ -230,9 +288,10 @@ impl Render for InlineToolbar {
             accept,
             accept_word,
         } = ToolbarKeys::lookup(&focus, window);
-        let colors = &self.theme.colors;
         // Monaco enables previous/next with more than one suggestion.
-        let several = count.is_some_and(|(_, count)| count > 1);
+        self.follow_count(count, cx);
+        let (count, several) = (self.count, self.several);
+        let colors = &self.theme.colors;
         let mut bar = div().flex().items_center().gap(px(2.));
         bar = bar.child(
             div()

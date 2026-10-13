@@ -170,3 +170,36 @@ fn the_message_stays_on_blur_while_the_mouse_is_over_it(cx: &mut TestAppContext)
     blur(cx);
     assert!(!editor.read_with(cx, |e, _| e.is_message_visible()));
 }
+
+fn move_mouse_to(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, at: text::PointUtf16) {
+    let origin = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(at))
+        .expect("laid out");
+    let position = gpui::point(origin.x + gpui::px(1.), origin.y + gpui::px(2.));
+    cx.simulate_mouse_move(position, None, gpui::Modifiers::default());
+    cx.run_until_parked();
+}
+
+/// Monaco closes the message once the mouse leaves
+/// `Range(line - 3, 1, mouseLine + 3, 1)`: on the last row only the first
+/// column is inside (`messageController.ts`).
+#[gpui::test]
+fn the_message_closes_past_the_first_column_of_the_last_row(cx: &mut TestAppContext) {
+    use gpui_monaco::text::PointUtf16;
+    let text = (0..20).map(|_| "abcdefgh").collect::<Vec<_>>().join("\n");
+    for (column, visible) in [(0, true), (4, false)] {
+        let (editor, cx) = setup(&text, cx);
+        draw(cx);
+        editor.update(cx, |e, cx| e.show_message("Hi", PointUtf16::new(9, 0), cx));
+        draw(cx);
+        move_mouse_to(&editor, cx, PointUtf16::new(9, 0));
+        move_mouse_to(&editor, cx, PointUtf16::new(11, 4));
+        assert!(editor.read_with(cx, |e, _| e.is_message_visible()));
+        move_mouse_to(&editor, cx, PointUtf16::new(12, column));
+        assert_eq!(
+            editor.read_with(cx, |e, _| e.is_message_visible()),
+            visible,
+            "column {column}"
+        );
+    }
+}

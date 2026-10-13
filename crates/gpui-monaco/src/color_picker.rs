@@ -709,6 +709,10 @@ pub(crate) struct ColorPickerState {
     task: Option<Task<()>>,
     /// Set while the picker edits the text, so the edit doesn't close it.
     pub(crate) editing: bool,
+    /// The text version right after the picker's last edit: the model
+    /// reports it after the picker is done editing, and it mustn't close
+    /// the picker either (Monaco's `editorUpdatedByColorPicker`).
+    edit_version: Option<text::Version>,
     /// Set while the picker selects the color it found, so the selection
     /// change doesn't close it.
     selecting: bool,
@@ -793,6 +797,7 @@ impl CodeEditor {
         self.color_picker.editing = true;
         self.execute_edits_from("colorpicker", edits, None, cx);
         self.color_picker.editing = false;
+        self.color_picker.edit_version = Some(self.model().read(cx).buffer().version());
         self.push_undo_stop(cx);
         let [range] = tracked;
         range
@@ -986,6 +991,28 @@ impl CodeEditor {
             && !self.color_picker.selecting
             && !self.color_picker.editing
         {
+            self.hide_standalone_color_picker(cx);
+        }
+    }
+
+    /// Monaco's pickers' `onDidChangeModelContent`: a text change the
+    /// picker didn't make (typing here, an edit in another editor on the
+    /// model, the host replacing the text, undo) hides the hover holding a
+    /// picker and the standalone picker, and refocuses the editor, so
+    /// neither writes over a range that no longer holds the color.
+    pub(crate) fn color_picker_after_edit(
+        &mut self,
+        version: &text::Version,
+        cx: &mut Context<Self>,
+    ) {
+        if self.color_picker.editing || self.color_picker.edit_version.as_ref() == Some(version) {
+            return;
+        }
+        if self.hover_color_picker(cx).is_some() {
+            self.hide_hover(cx);
+            self.refocus = true;
+        }
+        if self.color_picker.standalone.is_some() {
             self.hide_standalone_color_picker(cx);
         }
     }

@@ -95,6 +95,38 @@ fn hover_picker_rewrites_the_color(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "a { color: #00ff00; }");
 }
 
+/// Monaco's pickers' `onDidChangeModelContent`: an edit the picker didn't
+/// make (from elsewhere on the model, like another editor or the host, or
+/// through the editor's API) hides the hover holding the picker and the standalone picker, so
+/// neither writes over a range that moved.
+#[gpui::test]
+fn edits_from_elsewhere_hide_the_pickers(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a { color: #ff0000; }", cx);
+    put_cursor(&editor, 0, 13, cx);
+    cx.dispatch_action(ShowHover::default());
+    assert!(state(&editor, cx).is_some());
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.edit([(0..0, "xx")], cx).unwrap());
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_hover_visible()));
+    assert_eq!(state(&editor, cx), None);
+    assert_eq!(text(&editor, cx), "xxa { color: #ff0000; }");
+
+    settle(cx);
+    put_cursor(&editor, 0, 15, cx);
+    cx.dispatch_action(ShowOrFocusStandaloneColorPicker);
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    // Through the editor's API, after the cursor, so it doesn't move it.
+    editor.update(cx, |e, cx| {
+        let end = PointUtf16::new(0, 23);
+        e.execute_edits(vec![(end..end, " ".into())], None, cx)
+    });
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_standalone_color_picker_visible()));
+    assert_eq!(text(&editor, cx), "xxa { color: #ff0000; } ");
+}
+
 #[gpui::test]
 fn hover_without_color_has_no_picker(cx: &mut TestAppContext) {
     let (editor, cx) = setup("a { color: red; }", cx);

@@ -100,6 +100,91 @@ fn providers_decide_how_to_paste(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "hihi");
 }
 
+/// Monaco `PostEditWidget.showSelector`: picking the active edit again
+/// only hides the list; the options button stays.
+#[gpui::test]
+fn re_picking_the_active_edit_keeps_the_options_button(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, Shout);
+    });
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    cx.dispatch_action(ChangePasteType);
+    paint(cx);
+    let rows = editor.read_with(cx, |e, cx| e.quick_access_rows_for_tests(cx));
+    assert_eq!(rows, vec!["> Shout ✓", "Insert Plain Text"]);
+    cx.simulate_keystrokes("enter");
+    paint(cx);
+    assert_eq!(text(&editor, cx), "HI");
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    // It still offers the edits.
+    cx.dispatch_action(ChangePasteType);
+    paint(cx);
+    cx.simulate_keystrokes("down enter");
+    paint(cx);
+    assert_eq!(text(&editor, cx), "hi");
+}
+
+/// Its edits fail to resolve.
+struct Broken;
+
+impl DocumentPasteEditProvider for Broken {
+    fn paste_mime_types(&self) -> Vec<SharedString> {
+        vec!["text/plain".into()]
+    }
+
+    fn provide_document_paste_edits(
+        &self,
+        _: &ProviderContext,
+        _: &[std::ops::Range<PointUtf16>],
+        _: &DataTransfer,
+        _: DocumentPasteTriggerKind,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Vec<DocumentDropOrPasteEdit>>> {
+        Task::ready(Ok(vec![DocumentDropOrPasteEdit {
+            title: "Broken".into(),
+            kind: Some("text.broken".into()),
+            insert_text: EditInsertText::Text("unresolved".into()),
+            ..Default::default()
+        }]))
+    }
+
+    fn resolve_document_paste_edit(
+        &self,
+        _: &DocumentDropOrPasteEdit,
+        _: &mut App,
+    ) -> Option<Task<anyhow::Result<DocumentDropOrPasteEdit>>> {
+        Some(Task::ready(Err(anyhow::anyhow!("no"))))
+    }
+}
+
+/// Monaco `PostEditWidgetManager.applyEditAndShowIfNeeded`'s
+/// `handleError`: a failed resolve applies nothing and shows the options
+/// button instead, offering the other edits.
+#[gpui::test]
+fn a_failed_resolve_applies_nothing_and_shows_the_options(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    cx.update(|_, cx| {
+        register_document_paste_edit_provider(cx, LanguageSelector::All, Broken);
+    });
+    cx.simulate_input("x");
+    cx.write_to_clipboard(ClipboardItem::new_string("hi".into()));
+    cx.dispatch_action(Paste);
+    paint(cx);
+    assert_eq!(text(&editor, cx), "x");
+    assert!(editor.read_with(cx, |e, _| e.is_post_edit_widget_visible()));
+    cx.dispatch_action(ChangePasteType);
+    paint(cx);
+    let rows = editor.read_with(cx, |e, cx| e.quick_access_rows_for_tests(cx));
+    assert_eq!(rows, vec!["> Broken ✓", "Insert Plain Text"]);
+    cx.simulate_keystrokes("down enter");
+    paint(cx);
+    // Nothing was applied, so nothing is undone first.
+    assert_eq!(text(&editor, cx), "xhi");
+}
+
 #[gpui::test]
 fn paste_as_text(cx: &mut TestAppContext) {
     let (editor, cx) = setup("", cx);

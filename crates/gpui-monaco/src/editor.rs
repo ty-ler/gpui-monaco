@@ -2987,6 +2987,7 @@ impl CodeEditor {
                 // Monaco cancels the rename box when the text changes, and
                 // asks for inlay hints again.
                 self.cancel_rename(false, cx);
+                self.color_picker_after_edit(version, cx);
                 self.inlay_hints_after_edit(cx);
                 self.semantic_tokens_after_edit(changes, cx);
                 self.inline_completions_after_edit(*kind, cx);
@@ -6234,7 +6235,7 @@ impl CodeEditor {
         {
             let mouse = self.emit_mouse(event.position, None, event.modifiers, 0, window, cx);
             if let Some(position) = mouse.target.position {
-                self.message_mouse_move(position.row, cx);
+                self.message_mouse_move(position, cx);
             }
             cx.emit(CodeEditorEvent::MouseMove(mouse));
             self.color_picker_mouse_move(event.position, cx);
