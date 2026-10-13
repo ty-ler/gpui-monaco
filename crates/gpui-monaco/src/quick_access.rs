@@ -48,6 +48,13 @@ const ROW_HEIGHT: f32 = 22.;
 /// a provider's.
 const QUICK_INPUT_ARIA_LABEL: &str = "Type to narrow down results.";
 
+/// Monaco `cannotRunGotoSymbolWithoutSymbolProvider`.
+const NO_SYMBOL_INFORMATION: &str = "The active text editor does not provide symbol information.";
+
+/// Monaco's quick input shows its progress bar when it has been busy this
+/// long (`QuickInput.update`'s `busyDelay`).
+const BUSY_DELAY: std::time::Duration = std::time::Duration::from_millis(800);
+
 /// Monaco `gotoLine.ariaLabel`.
 const GOTO_LINE_ARIA_LABEL: &str =
     "Go to line. Type a line number, optionally followed by colon and column number.";
@@ -152,6 +159,19 @@ pub(crate) struct QuickAccessState {
     /// The document's symbols, fetched once per session.
     symbols: Option<Vec<DocumentSymbol>>,
     _symbols_task: Option<Task<()>>,
+    /// When the symbols started loading (Monaco's `picker.busy` while
+    /// `doGetSymbolPicks` awaits them), until they arrive.
+    symbols_busy_since: Option<web_time::Instant>,
+    /// Go to Symbol is the provider (the input starts with `@`).
+    in_symbol_provider: bool,
+    /// The query (after `@`) of Go to Symbol's first population, which
+    /// activates the symbol around the cursor (Monaco's
+    /// `positionToEnclose`); dropped once the symbols are listed or the
+    /// query changes.
+    symbol_enclose: Option<String>,
+    /// Go to Symbol found no symbol provider and waits for one (Monaco
+    /// `waitForLanguageSymbolRegistry`).
+    waiting_for_symbol_provider: bool,
     /// The keys bound to each action, looked up when it opened.
     action_keys: HashMap<SharedString, crate::keybinding_label::KeyLabel>,
     /// A [`CodeEditor::show_quick_pick`] list instead of the providers.
@@ -194,6 +214,53 @@ pub struct QuickInput {
     item_activation_none: bool,
     colors: crate::theme::EditorColors,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Monaco's infinite progress bar animation (`progressbar.css`): a bit 2%
+/// of the bar wide moves across it in 4s (`translateX` from 0% to 4900% of
+/// its width), growing to 3 times its width halfway; after 10s it moves
+/// in 100 steps (`infinite-long-running`). Its left and width, as
+/// fractions of the bar, `elapsed` after it showed.
+fn progress_bit(elapsed: std::time::Duration) -> (f32, f32) {
+    const PERIOD: f32 = 4.;
+    const BIT: f32 = 0.02;
+    let mut t = elapsed.as_secs_f32() % PERIOD / PERIOD;
+    if elapsed >= std::time::Duration::from_secs(10) {
+        t = (t * 100.).floor() / 100.;
+    }
+    // `translateX` in bit widths, and `scaleX` (about its center).
+    let (translate, scale) = if t < 0.5 {
+        (50. * t, 1. + 4. * t)
+    } else {
+        (25. + 48. * (t - 0.5), 3. - 4. * (t - 0.5))
+    };
+    let center = BIT * (translate + 0.5);
+    (center - BIT * scale / 2., BIT * scale)
+}
+
+/// Monaco's quick input progress bar (`.quick-input-progress`): 2px under
+/// the input box, its bit in `progressBar.background`.
+fn progress_bar(elapsed: std::time::Duration, color: Hsla) -> gpui::AnyElement {
+    let (left, width) = progress_bit(elapsed);
+    AriaNode::new(Role::ProgressIndicator, "")
+        .apply(div().id("quick-input-progress"))
+        .debug_selector(|| "quick-input-progress".into())
+        .absolute()
+        .left_0()
+        .right_0()
+        .bottom_0()
+        .h(px(2.))
+        .overflow_hidden()
+        .child(
+            div()
+                .absolute()
+                .top_0()
+                .h_full()
+                .left(gpui::relative(left))
+                .w(gpui::relative(width))
+                .bg(color),
+        )
+        .into_any_element()
 }
 
 /// Monaco's quick input list rows from the providers' rows: a separator
@@ -278,6 +345,17 @@ impl QuickInput {
             cx.subscribe(&input, |this, _, event: &CodeEditorEvent, cx| {
                 if matches!(event, CodeEditorEvent::Blurred) {
                     this.close(false, cx);
+                }
+            }),
+            // Monaco `waitForLanguageSymbolRegistry`: Go to Symbol without a
+            // provider lists the symbols once one is registered.
+            crate::providers::observe_provider_registry(cx, |this: &mut Self, cx| {
+                let waits = this
+                    .editor
+                    .upgrade()
+                    .is_some_and(|editor| editor.read(cx).quick_access_waits_for_symbols());
+                if waits {
+                    this.refresh(cx);
                 }
             }),
         ];
@@ -800,6 +878,15 @@ impl Render for QuickInput {
             self.list_height = list_height;
             self.scroll_top = self.scroll_top.clamp(px(0.), self.max_scroll_top());
         }
+        // Monaco's `busy` progress bar, shown after `BUSY_DELAY`.
+        let busy_since = self
+            .editor
+            .upgrade()
+            .and_then(|editor| editor.read(cx).quick_access_busy_since());
+        let progress = busy_since.and_then(|since| {
+            window.request_animation_frame();
+            since.elapsed().checked_sub(BUSY_DELAY)
+        });
         let row = px(ROW_HEIGHT);
         // Only the rows in view (Monaco's virtualized list).
         let first = (self.scroll_top / row).floor().max(0.) as usize;
@@ -871,66 +958,73 @@ impl Render for QuickInput {
                 )
             })
             .child(
-                div().p(px(6.)).child(
-                    div()
-                        .h(px(INPUT_HEIGHT))
-                        .px(px(4.))
-                        .flex()
-                        .items_center()
-                        .bg(colors.input_background)
-                        // VS Code's input box: `input.border`, and the
-                        // `focusBorder` outline while it has focus.
-                        .border_1()
-                        .border_color(if input_focused {
-                            colors.focus_border
-                        } else {
-                            colors.input_border.unwrap_or_else(gpui::transparent_black)
-                        })
-                        // The editor element fills its parent, so the
-                        // parent needs a height: an auto one is 0 and the
-                        // text isn't painted.
-                        .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
-                        // Monaco's "Toggle Zero-Based Offset" button, shown
-                        // in `::` mode.
-                        .when(self.value(cx).trim_start().starts_with("::"), |this| {
-                            let checked = goto_offset_zero_based(cx);
-                            this.child(
-                                AriaNode::new(Role::CheckBox, "Toggle Zero-Based Offset")
-                                    .checked(checked)
-                                    .apply(div().id("quick-zero-based-offset"))
-                                    .debug_selector(|| "quick-zero-based-offset".into())
-                                    // Monaco's `.monaco-custom-toggle`: a
-                                    // 16px icon, 1px padding and border.
-                                    .flex_none()
-                                    .p(px(1.))
-                                    .rounded(px(3.))
-                                    .border_1()
-                                    .cursor_pointer()
-                                    .when(checked, |this| {
-                                        this.bg(colors.input_option_active_background)
-                                            .border_color(colors.input_option_active_border)
-                                            .text_color(colors.input_option_active_foreground)
-                                    })
-                                    .when(!checked, |this| {
-                                        this.border_color(gpui::transparent_black())
-                                    })
-                                    .tooltip(crate::tooltip::tooltip(
-                                        "Toggle Zero-Based Offset",
-                                        &colors,
-                                    ))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            let zero_based = !goto_offset_zero_based(cx);
-                                            set_goto_offset_zero_based(zero_based, cx);
-                                            this.refresh(cx);
-                                        }),
-                                    )
-                                    .child(codicon(Codicon::IndexZero)),
-                            )
-                        }),
-                ),
+                div()
+                    .p(px(6.))
+                    .relative()
+                    .children(
+                        progress
+                            .map(|elapsed| progress_bar(elapsed, colors.progress_bar_background)),
+                    )
+                    .child(
+                        div()
+                            .h(px(INPUT_HEIGHT))
+                            .px(px(4.))
+                            .flex()
+                            .items_center()
+                            .bg(colors.input_background)
+                            // VS Code's input box: `input.border`, and the
+                            // `focusBorder` outline while it has focus.
+                            .border_1()
+                            .border_color(if input_focused {
+                                colors.focus_border
+                            } else {
+                                colors.input_border.unwrap_or_else(gpui::transparent_black)
+                            })
+                            // The editor element fills its parent, so the
+                            // parent needs a height: an auto one is 0 and the
+                            // text isn't painted.
+                            .child(div().flex_1().min_w_0().h_full().child(self.input.clone()))
+                            // Monaco's "Toggle Zero-Based Offset" button, shown
+                            // in `::` mode.
+                            .when(self.value(cx).trim_start().starts_with("::"), |this| {
+                                let checked = goto_offset_zero_based(cx);
+                                this.child(
+                                    AriaNode::new(Role::CheckBox, "Toggle Zero-Based Offset")
+                                        .checked(checked)
+                                        .apply(div().id("quick-zero-based-offset"))
+                                        .debug_selector(|| "quick-zero-based-offset".into())
+                                        // Monaco's `.monaco-custom-toggle`: a
+                                        // 16px icon, 1px padding and border.
+                                        .flex_none()
+                                        .p(px(1.))
+                                        .rounded(px(3.))
+                                        .border_1()
+                                        .cursor_pointer()
+                                        .when(checked, |this| {
+                                            this.bg(colors.input_option_active_background)
+                                                .border_color(colors.input_option_active_border)
+                                                .text_color(colors.input_option_active_foreground)
+                                        })
+                                        .when(!checked, |this| {
+                                            this.border_color(gpui::transparent_black())
+                                        })
+                                        .tooltip(crate::tooltip::tooltip(
+                                            "Toggle Zero-Based Offset",
+                                            &colors,
+                                        ))
+                                        .on_mouse_down(
+                                            MouseButton::Left,
+                                            cx.listener(|this, _, _, cx| {
+                                                cx.stop_propagation();
+                                                let zero_based = !goto_offset_zero_based(cx);
+                                                set_goto_offset_zero_based(zero_based, cx);
+                                                this.refresh(cx);
+                                            }),
+                                        )
+                                        .child(codicon(Codicon::IndexZero)),
+                                )
+                            }),
+                    ),
             )
             .child(
                 div().pb(px(4.)).child(
@@ -1069,6 +1163,10 @@ impl CodeEditor {
             decorations: Vec::new(),
             symbols: None,
             _symbols_task: None,
+            symbols_busy_since: None,
+            in_symbol_provider: false,
+            symbol_enclose: None,
+            waiting_for_symbol_provider: false,
             action_keys: self.action_keybindings(window, cx),
             pick,
             go_to_match,
@@ -1256,6 +1354,18 @@ impl CodeEditor {
             return (rows, active);
         }
         self.goto_line_numbers(trimmed.starts_with(':'), cx);
+        // Monaco runs a provider anew when it takes over, and Go to
+        // Symbol's first population then activates the symbol around the
+        // cursor.
+        let symbol_rest = trimmed.strip_prefix('@');
+        if let Some(quick) = self.quick.as_mut() {
+            if let Some(rest) = symbol_rest
+                && !quick.in_symbol_provider
+            {
+                quick.symbol_enclose = Some(rest.trim().to_string());
+            }
+            quick.in_symbol_provider = symbol_rest.is_some();
+        }
         if let Some(rest) = trimmed.strip_prefix("::") {
             (vec![QuickRow::Item(self.goto_offset_item(rest, cx))], None)
         } else if let Some(rest) = trimmed.strip_prefix(':') {
@@ -1402,9 +1512,10 @@ impl CodeEditor {
     /// Monaco's `::offset` mode: character offsets from 1, or from 0 with
     /// [`goto_offset_zero_based`].
     fn goto_offset_item(&self, query: &str, cx: &gpui::App) -> QuickItem {
-        let rope = self.model().read(cx).buffer().rope().clone();
-        let length = rope.len_utf16().0 as i64;
-        let tab_size = self.model().read(cx).options().tab_size;
+        let model = self.model().read(cx);
+        // Monaco `getValueLength`: a CRLF line break counts as two.
+        let length = model.value_length() as i64;
+        let tab_size = model.options().tab_size;
         let zero_based = goto_offset_zero_based(cx);
         let Some(mut offset) = crate::find::parse_int(query) else {
             return QuickItem::message(
@@ -1428,9 +1539,8 @@ impl CodeEditor {
         if reverse {
             offset += length;
         }
-        let offset =
-            rope.offset_utf16_to_offset(text::OffsetUtf16(offset.clamp(0, length) as usize));
-        let point = rope.offset_to_point_utf16(offset);
+        // Monaco `getPositionAt`, which counts line breaks the same way.
+        let point = model.get_position_at(offset.clamp(0, length) as usize);
         let text = self.snapshot.line(point.row);
         let column = visible_column(&text, point.column, tab_size) + 1;
         let mut item = QuickItem::message(
@@ -1453,13 +1563,45 @@ impl CodeEditor {
         query: &str,
         cx: &mut Context<Self>,
     ) -> (Vec<QuickRow>, Option<usize>) {
-        let symbols = match self.quick.as_ref().and_then(|q| q.symbols.clone()) {
+        // Monaco's `query.original`: the text after `@`, trimmed.
+        let original = query.trim();
+        let Some(quick) = self.quick.as_mut() else {
+            return (Vec::new(), None);
+        };
+        // Only the first population, with the query it opened with, looks
+        // for the symbol around the cursor.
+        if quick.symbol_enclose.as_deref() != Some(original) {
+            quick.symbol_enclose = None;
+        }
+        let symbols = match quick.symbols.clone() {
             Some(symbols) => symbols,
             None => {
+                if !self.has_symbol_information(cx) {
+                    // Monaco `doProvideWithoutEditorSymbols`: a label, and a
+                    // wait for a provider.
+                    if let Some(quick) = self.quick.as_mut() {
+                        quick.waiting_for_symbol_provider = true;
+                    }
+                    return (
+                        vec![QuickRow::Item(QuickItem::message(
+                            NO_SYMBOL_INFORMATION,
+                            QuickAction::None,
+                        ))],
+                        None,
+                    );
+                }
+                if let Some(quick) = self.quick.as_mut()
+                    && std::mem::take(&mut quick.waiting_for_symbol_provider)
+                {
+                    // A provider came: Monaco runs `doProvideWithEditorSymbols`
+                    // with the cursor's position again.
+                    quick.symbol_enclose = Some(original.to_string());
+                }
                 self.fetch_quick_symbols(cx);
                 return (Vec::new(), None);
             }
         };
+        let enclose = quick.symbol_enclose.take().is_some() && original.is_empty();
         let by_category = query.starts_with(':');
         let query = query.trim_start_matches(':').trim();
         // With several words, the first matches the name and the rest the
@@ -1477,6 +1619,8 @@ impl CodeEditor {
         flat.sort_by_key(|(_, s)| (s.range.start, std::cmp::Reverse(s.range.end)));
         let mut items: Vec<(i32, usize, SymbolKind, QuickItem)> = Vec::new();
         for (ix, (container, symbol)) in flat.iter().enumerate() {
+            // Monaco `trim(symbol.name)`: spaces off both ends.
+            let name = symbol.name.trim_matches(' ');
             let mut score = 0;
             let mut highlights = Vec::new();
             let mut description_highlights = Vec::new();
@@ -1486,16 +1630,16 @@ impl CodeEditor {
                 // container.
                 let whole = container_query
                     .is_some()
-                    .then(|| score_fuzzy2_single(&symbol.name, query))
+                    .then(|| score_fuzzy2_single(name, query))
                     .flatten();
                 let skip_container = whole.is_some();
                 let Some((symbol_score, matches)) =
-                    whole.or_else(|| score_fuzzy2(&symbol.name, symbol_query))
+                    whole.or_else(|| score_fuzzy2(name, symbol_query))
                 else {
                     continue;
                 };
                 score = symbol_score;
-                highlights = utf16_matches_to_bytes(&symbol.name, &matches);
+                highlights = utf16_matches_to_bytes(name, &matches);
                 if let Some(container_query) = container_query.as_deref()
                     && !skip_container
                 {
@@ -1514,7 +1658,7 @@ impl CodeEditor {
                 ix,
                 symbol.kind,
                 QuickItem {
-                    label: symbol.name.clone(),
+                    label: name.to_string().into(),
                     highlights,
                     description: container.clone().map(Into::into),
                     // Monaco: no highlights on a deprecated symbol.
@@ -1583,8 +1727,9 @@ impl CodeEditor {
             ));
             rows.extend(items.iter().map(|i| QuickRow::Item(i.3.clone())));
         }
-        // With no query, the innermost symbol around the cursor is active.
-        let active = query.is_empty().then(|| {
+        // The first population, with no query: the innermost symbol around
+        // the cursor is active.
+        let active = enclose.then(|| {
             let cursor = self.cursors.primary().position;
             rows.iter().rposition(|row| {
                 matches!(row, QuickRow::Item(QuickItem { action: QuickAction::GoTo { highlight, .. }, .. })
@@ -1608,6 +1753,7 @@ impl CodeEditor {
             let Ok(Some(widget)) = this.update(cx, |this, _| {
                 let quick = this.quick.as_mut()?;
                 quick.symbols = Some(symbols);
+                quick.symbols_busy_since = None;
                 quick.widget.as_ref().map(|(widget, _)| widget.clone())
             }) else {
                 return;
@@ -1617,7 +1763,45 @@ impl CodeEditor {
         });
         if let Some(quick) = self.quick.as_mut() {
             quick._symbols_task = Some(fetch);
+            quick.symbols_busy_since = Some(web_time::Instant::now());
         }
+    }
+
+    /// Whether Go to Symbol has symbols to ask for (Monaco
+    /// `documentSymbolProvider.has(model)`): a provider, or the `tags.scm`
+    /// outline that stands in for one.
+    fn has_symbol_information(&self, cx: &gpui::App) -> bool {
+        !crate::providers::document_symbol_providers(cx, self.provider_target(cx)).is_empty()
+            || self
+                .model()
+                .read(cx)
+                .language()
+                .and_then(|l| l.grammar.as_ref())
+                .is_some_and(|g| g.tags_query().is_some())
+    }
+
+    /// Since when Go to Symbol has been loading symbols (Monaco's
+    /// `picker.busy`), while it's the provider.
+    fn quick_access_busy_since(&self) -> Option<web_time::Instant> {
+        let quick = self.quick.as_ref()?;
+        quick
+            .in_symbol_provider
+            .then_some(quick.symbols_busy_since)
+            .flatten()
+    }
+
+    /// Whether quick access is busy (Monaco `picker.busy`), for tests.
+    #[doc(hidden)]
+    pub fn quick_access_busy_for_tests(&self) -> bool {
+        self.quick_access_busy_since().is_some()
+    }
+
+    /// Go to Symbol waits for a symbol provider (Monaco
+    /// `waitForLanguageSymbolRegistry`).
+    fn quick_access_waits_for_symbols(&self) -> bool {
+        self.quick
+            .as_ref()
+            .is_some_and(|q| q.in_symbol_provider && q.waiting_for_symbol_provider)
     }
 
     /// The quick access list as labels (separators in brackets), for tests.
@@ -2058,6 +2242,26 @@ fn char_ranges_to_bytes(text: &str, ranges: &[Range<usize>]) -> Vec<Range<usize>
 #[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
+
+    /// Monaco's `@keyframes progress`: `translateX(0%) scaleX(1)`, then
+    /// `translateX(2500%) scaleX(3)` halfway, then `translateX(4900%)
+    /// scaleX(1)`, over 4s; `steps(100)` after 10s.
+    #[test]
+    fn progress_bit_follows_monaco_keyframes() {
+        let at = |ms| {
+            let (left, width) = progress_bit(std::time::Duration::from_millis(ms));
+            ((left * 1e4).round() / 1e4, (width * 1e4).round() / 1e4)
+        };
+        assert_eq!(at(0), (0., 0.02));
+        // Halfway: 25 bit widths along, 3 wide about its center.
+        assert_eq!(at(2000), (0.48, 0.06));
+        // At the end: at 98%, against the bar's right edge.
+        assert_eq!(at(3999), (0.9798, 0.02));
+        assert_eq!(at(4000), (0., 0.02));
+        // Long running: in steps of 40ms.
+        assert_eq!(at(10_039), at(10_000));
+        assert_ne!(at(10_040), at(10_000));
+    }
 
     fn words(word: &str, target: &str) -> Option<Vec<Range<usize>>> {
         let word: Vec<char> = word.chars().map(lower).collect();

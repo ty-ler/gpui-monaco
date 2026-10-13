@@ -771,6 +771,9 @@ editor_colors! { r;
     quick_input_foreground: Hsla = r.color("quickInput.foreground");
     /// Its title bar (`quickInputTitle.background`).
     quick_input_title_background: Hsla = r.color("quickInputTitle.background");
+    /// Its progress bar while a provider is busy
+    /// (`progressBar.background`).
+    progress_bar_background: Hsla = r.color("progressBar.background");
     /// Its focused row (`quickInputList.focusBackground`; `None` in high
     /// contrast, which outlines it with `list.focusOutline`).
     quick_input_list_focus_background: Option<Hsla> = r.visible("quickInputList.focusBackground");
