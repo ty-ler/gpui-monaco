@@ -852,3 +852,200 @@ fn the_zero_based_offset_toggle_is_an_icon_toggle(cx: &mut TestAppContext) {
     assert_eq!(toggle.size.width, gpui::px(20.));
     assert_eq!(toggle.size.height, gpui::px(20.));
 }
+
+/// Monaco `gotoLineQuickAccess.ts` `parsePosition`: Go to Offset counts
+/// with `getValueLength` and `getPositionAt`, a CRLF line break being two
+/// characters.
+#[gpui::test]
+fn go_to_offset_counts_crlf_as_two_characters(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab\r\ncd\r\nef", cx);
+    cx.simulate_keystrokes("ctrl-g");
+    cx.simulate_input(":");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["> Type a character position to go to (from 1 to 10)."]
+    );
+    // The fifth character is `c`, after `a`, `b`, `\r` and `\n`.
+    cx.simulate_input("5");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["> Press 'Enter' to go to line 2 at column 1."]
+    );
+    // Counting back from the end: `-2` is `f`.
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("-2");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["> Press 'Enter' to go to line 3 at column 2."]
+    );
+    cx.simulate_keystrokes("backspace backspace");
+    cx.simulate_input("9");
+    cx.simulate_keystrokes("enter");
+    cx.run_until_parked();
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(2, 0));
+}
+
+/// Monaco `doProvideWithEditorSymbols`: only the first population, with an
+/// empty query, activates the symbol around the cursor; once the query
+/// changed, the first item is active, and `@:` is a query.
+#[gpui::test]
+fn go_to_symbol_activates_the_enclosing_symbol_only_at_first(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(RUST, cx);
+    // Inside `len`.
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                6, 8,
+            ))],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    assert_eq!(active_index(&editor, cx), Some(2));
+    cx.simulate_input("x");
+    cx.simulate_keystrokes("backspace");
+    assert_eq!(
+        rows(&editor, cx),
+        vec![
+            "[symbols (5)]",
+            "> Point",
+            "Point",
+            "len (Point)",
+            "scale (Point)",
+            "main"
+        ]
+    );
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    assert_eq!(active_index(&editor, cx), Some(2));
+    cx.simulate_input(":");
+    cx.run_until_parked();
+    assert_eq!(active_index(&editor, cx), Some(0));
+}
+
+/// A provider whose first symbol's name has spaces around it, and that
+/// answers after `delay`.
+struct SpacedSymbols {
+    delay: std::time::Duration,
+}
+
+impl gpui_monaco::providers::DocumentSymbolProvider for SpacedSymbols {
+    fn provide_document_symbols(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        cx: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<Vec<gpui_monaco::providers::DocumentSymbol>>> {
+        use gpui_monaco::providers::{DocumentSymbol, SymbolKind};
+        let at = |row| PointUtf16::new(row, 0)..PointUtf16::new(row, 3);
+        let timer = cx.background_executor().timer(self.delay);
+        cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(vec![
+                DocumentSymbol {
+                    name: "  one ".into(),
+                    kind: SymbolKind::Function,
+                    range: at(0),
+                    selection_range: at(0),
+                    ..Default::default()
+                },
+                DocumentSymbol {
+                    name: "two".into(),
+                    kind: SymbolKind::Function,
+                    range: at(1),
+                    selection_range: at(1),
+                    ..Default::default()
+                },
+            ])
+        })
+    }
+}
+
+fn setup_plain_text<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(gpui_monaco::init);
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+/// Monaco `doProvideWithoutEditorSymbols`: without a symbol provider, `@`
+/// says so and waits for one; then it lists the symbols, names trimmed
+/// (`trim(symbol.name)`), with the one around the cursor active. (The Go
+/// to Symbol action needs a provider: Monaco's `hasDocumentSymbolProvider`
+/// precondition.)
+#[gpui::test]
+fn go_to_symbol_without_a_provider_waits_for_one(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_plain_text("one\ntwo\n", cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                1, 1,
+            ))],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("f1");
+    cx.simulate_keystrokes("backspace");
+    cx.simulate_input("@");
+    assert_eq!(
+        rows(&editor, cx),
+        vec!["> The active text editor does not provide symbol information."]
+    );
+    cx.update(|_, cx| {
+        gpui_monaco::providers::register_document_symbol_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            SpacedSymbols {
+                delay: std::time::Duration::ZERO,
+            },
+        );
+    });
+    cx.run_until_parked();
+    assert_eq!(rows(&editor, cx), vec!["[symbols (2)]", "one", "> two"]);
+    cx.simulate_input("on");
+    assert_eq!(rows(&editor, cx), vec!["[symbols (1)]", "> one"]);
+}
+
+/// Monaco's `picker.busy` while the symbols load: the quick input's
+/// progress bar shows after 800ms, 2px high, until they arrive.
+#[gpui::test]
+fn go_to_symbol_is_busy_while_symbols_load(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::providers::register_document_symbol_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            SpacedSymbols {
+                delay: std::time::Duration::from_secs(5),
+            },
+        );
+    });
+    let (editor, cx) = setup_plain_text("one\ntwo\n", cx);
+    cx.simulate_keystrokes("cmd-shift-o");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.quick_access_busy_for_tests()));
+    draw(cx);
+    assert!(cx.debug_bounds("quick-input-progress").is_none());
+    // The delay is in real time.
+    std::thread::sleep(std::time::Duration::from_millis(850));
+    draw(cx);
+    let bar = cx.debug_bounds("quick-input-progress").expect("the bar");
+    assert_eq!(bar.size.height, gpui::px(2.));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_secs(5));
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.quick_access_busy_for_tests()));
+    draw(cx);
+    assert!(cx.debug_bounds("quick-input-progress").is_none());
+    assert_eq!(rows(&editor, cx), vec!["[symbols (2)]", "> one", "two"]);
+}

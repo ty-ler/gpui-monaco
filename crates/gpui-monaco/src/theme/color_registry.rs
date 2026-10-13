@@ -450,6 +450,7 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     ("quickInput.background", [R("editorWidget.background"), R("editorWidget.background"), R("editorWidget.background"), R("editorWidget.background")]),
     ("quickInput.foreground", [R("editorWidget.foreground"), R("editorWidget.foreground"), R("editorWidget.foreground"), R("editorWidget.foreground")]),
     ("quickInputTitle.background", [H(0xffffff1b), H(0x0000000f), H(0x000000ff), H(0xffffffff)]),
+    ("progressBar.background", [H(0x0e70c0ff), H(0x0e70c0ff), R("contrastBorder"), R("contrastBorder")]),
     ("pickerGroup.foreground", [H(0x3794ffff), H(0x0066bfff), H(0xffffffff), H(0x0f4a85ff)]),
     ("pickerGroup.border", [H(0x3f3f46ff), H(0xcccedbff), H(0xffffffff), H(0x0f4a85ff)]),
     ("quickInput.list.focusBackground", [N, N, N, N]),
