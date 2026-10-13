@@ -16,7 +16,9 @@ These were checked against our actions, options and modules. The Monaco source c
 
 > **Third audit (2026-10-12):** [`MONACO_AUDIT_3.md`](MONACO_AUDIT_3.md) lists 204 remaining gaps (22 P1) in editing, rendering, widgets, navigation, the diff editors, options and languages, the API, and input and accessibility. Its issues (#323–#357) are all fixed.
 
-> **Fourth audit (2026-10-12):** [`MONACO_AUDIT_4.md`](MONACO_AUDIT_4.md) lists 135 remaining gaps (4 P1, 35 P2, 96 P3) found after the third audit's fixes, tracked in #400–#431.
+> **Fourth audit (2026-10-12):** [`MONACO_AUDIT_4.md`](MONACO_AUDIT_4.md) lists 135 remaining gaps (4 P1, 35 P2, 96 P3) found after the third audit's fixes. Its issues (#400–#431) are all fixed.
+
+> **Fifth audit (2026-10-12):** [`MONACO_AUDIT_5.md`](MONACO_AUDIT_5.md) lists 88 remaining gaps (4 P1, 23 P2, 61 P3) found after the fourth audit's fixes, in editing and IME, rendering, widgets, folding and navigation, the diff editors, languages and fonts, the API and the LSP bridge, and input and accessibility.
 
 **Legend:**
 
