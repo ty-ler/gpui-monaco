@@ -601,24 +601,18 @@ impl CodeEditor {
     }
 
     /// Monaco's `WordContextKey` (`atEndOfWord`), kept only with
-    /// `tab_completion` on: the cursor ends a word.
-    fn at_end_of_word(&self, _cx: &App) -> bool {
+    /// `tab_completion` on: a word (by the language's `wordPattern`) ends at
+    /// the selection's start, and the selection is on one line.
+    fn at_end_of_word(&self, cx: &App) -> bool {
         if self.options.tab_completion != crate::options::TabCompletion::On {
             return false;
         }
         let selection = self.cursors.primary().selection();
-        if !selection.is_empty() {
+        let (start, end) = (selection.start(), selection.end());
+        let Some(word) = self.model().read(cx).word_at_position(start) else {
             return false;
-        }
-        let position = selection.head;
-        let line = self.snapshot.rope().line(position.row);
-        let units: Vec<u16> = line.encode_utf16().collect();
-        let column = position.column as usize;
-        let is_word = |unit: Option<&u16>| {
-            unit.and_then(|u| char::from_u32(*u as u32))
-                .is_some_and(|c| c.is_alphanumeric() || c == '_')
         };
-        column > 0 && is_word(units.get(column - 1)) && !is_word(units.get(column))
+        word.range.end == start && start.row == end.row
     }
 }
 

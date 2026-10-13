@@ -91,6 +91,8 @@ pub struct SyntaxSnapshot {
     /// The longest injected extent, bounding how far before a range an
     /// intersecting layer can start.
     max_extent: usize,
+    /// The distinct languages of the injected layers that aren't hidden.
+    injected_languages: Arc<[Arc<Language>]>,
 }
 
 impl std::fmt::Debug for SyntaxSnapshot {
@@ -197,6 +199,7 @@ impl SyntaxSnapshot {
             version: text.version(),
             by_start: Arc::new([]),
             max_extent: 0,
+            injected_languages: Arc::new([]),
         };
         snapshot.build(language, text, &[], &[], registry);
         snapshot
@@ -326,6 +329,7 @@ impl SyntaxSnapshot {
             version: text.version(),
             by_start: Arc::new([]),
             max_extent: 0,
+            injected_languages: Arc::new([]),
         };
         snapshot.build(root.language.clone(), text, &old_layers, &edited, registry);
         snapshot
@@ -425,6 +429,13 @@ impl SyntaxSnapshot {
         by_start.sort_unstable_by_key(|(extent, _)| extent.start);
         self.max_extent = by_start.iter().map(|(e, _)| e.len()).max().unwrap_or(0);
         self.by_start = by_start.into();
+        let mut injected: Vec<Arc<Language>> = Vec::new();
+        for layer in self.layers.iter().skip(1) {
+            if !layer.language.hidden && !injected.iter().any(|l| l.id == layer.language.id) {
+                injected.push(layer.language.clone());
+            }
+        }
+        self.injected_languages = injected.into();
     }
 
     /// The buffer version these trees were parsed from.
@@ -436,6 +447,12 @@ impl SyntaxSnapshot {
     /// increasing depth.
     pub fn layers(&self) -> &[SyntaxLayer] {
         &self.layers
+    }
+
+    /// The distinct languages of the injected layers (depth above 0) that
+    /// aren't hidden, computed once per parse.
+    pub fn injected_languages(&self) -> &[Arc<Language>] {
+        &self.injected_languages
     }
 
     /// The root layer, or `None` if the language has no grammar or parsing failed.

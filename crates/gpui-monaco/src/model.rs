@@ -1405,6 +1405,31 @@ impl TextModel {
         if rope.line_len_utf16(row) >= self.tokenization_line_limit() {
             return single(model_language);
         }
+        // Without embedded languages anywhere, the line is the model's
+        // language: skip mapping offsets back to the syntax state's text
+        // (an inverted patch, built on every keystroke otherwise).
+        let monarch = syntax.state.downcast_ref::<syntax::MonarchHighlightState>();
+        let highlighter = syntax::MonarchHighlighter::downcast(&*syntax.highlighter);
+        if monarch.is_some()
+            && let Some(highlighter) = highlighter
+            && !highlighter.tokenizer().uses_embedded_languages()
+            && model_language
+                .as_ref()
+                .is_some_and(|l| *l.id == *highlighter.tokenizer().language_id())
+        {
+            return single(model_language);
+        }
+        // Likewise when every embedded layer is the model's own language
+        // (Rust in Rust macros).
+        if monarch.is_none()
+            && syntax.state.syntax().is_none_or(|tree| {
+                tree.injected_languages()
+                    .iter()
+                    .all(|language| model_language.as_ref().is_some_and(|l| l.id == language.id))
+            })
+        {
+            return single(model_language);
+        }
         let line_start = rope.point_to_offset(text::Point::new(row, 0));
         let line = rope.line(row);
         // Offsets in the text the syntax state was computed for.
@@ -1414,10 +1439,9 @@ impl TextModel {
             Some(patch) => patch.transform_offset(offset, text::Bias::Left),
             None => offset,
         };
-        if let Some(monarch) = syntax.state.downcast_ref::<syntax::MonarchHighlightState>() {
+        if let Some(monarch) = monarch {
             // A Monarch grammar's embedded languages (`nextEmbedded`).
-            let registry = syntax::MonarchHighlighter::downcast(&*syntax.highlighter)
-                .and_then(|highlighter| highlighter.registry());
+            let registry = highlighter.and_then(|highlighter| highlighter.registry());
             let old_rope = syntax.text.rope();
             return language_runs(&line, line_start, |offset| {
                 let point = old_rope.offset_to_point(old(offset));
