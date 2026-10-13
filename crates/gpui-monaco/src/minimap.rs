@@ -679,17 +679,19 @@ pub(crate) fn prepaint(
     };
     let canvas = |color: Hsla| color.opacity(CANVAS_OPACITY);
     let char_width = f64::from(font_scale);
-    // View line content, UTF-16, cached per line.
-    let mut contents: std::collections::HashMap<u32, Vec<u16>> = Default::default();
-    let mut content_of = |line: u32| -> Vec<u16> {
+    // View line content, UTF-16, cached per line: only as much as can show
+    // (`x_offset_for_position` stops at the canvas's width, and each code
+    // unit is at least `char_width` wide), with the content's full length.
+    let shown_units = if char_width > 0. && inner_width.is_finite() {
+        (inner_width / char_width).ceil().max(0.) as u32 + 1
+    } else {
+        u32::MAX
+    };
+    let mut contents: std::collections::HashMap<u32, (Vec<u16>, u32)> = Default::default();
+    let mut content_of = |line: u32| -> (Vec<u16>, u32) {
         contents
             .entry(line)
-            .or_insert_with(|| {
-                view_lines
-                    .line_content(view_line_of(line) - 1)
-                    .encode_utf16()
-                    .collect()
-            })
+            .or_insert_with(|| view_lines.line_content_prefix(view_line_of(line) - 1, shown_units))
             .clone()
     };
     // 1-based (line, column) ranges in minimap lines.
@@ -721,12 +723,12 @@ pub(crate) fn prepaint(
         if y + minimap_line_height < 0. || y > inner_height {
             return;
         }
-        let content = content_of(line);
+        let (content, content_len) = content_of(line);
         let start_column = if range.0.0 == line { range.0.1 } else { 1 };
         let end_column = if range.1.0 == line {
             range.1.1
         } else {
-            content.len() as u32 + 1
+            content_len + 1
         };
         let x1 = x_offset_for_position(&content, start_column, tab_size, char_width, inner_width);
         let x2 = x_offset_for_position(&content, end_column, tab_size, char_width, inner_width);

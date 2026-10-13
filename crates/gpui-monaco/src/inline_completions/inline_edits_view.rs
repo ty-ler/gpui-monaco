@@ -2584,7 +2584,7 @@ impl CodeEditor {
             Collapsed => {
                 // Monaco puts the marker at the first replacement's start,
                 // past what it keeps.
-                let line_text = |row: u32| rope.line(row);
+                let line_text: &text::Rope = &rope;
                 let start = diff
                     .edits
                     .first()
@@ -2594,7 +2594,7 @@ impl CodeEditor {
                                 range: range.clone(),
                                 text: text.clone(),
                             },
-                            &line_text,
+                            line_text,
                         )
                         .range
                         .start

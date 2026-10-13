@@ -86,7 +86,11 @@ impl Brackets {
     /// Whether `text` matches at `i` in `line`, honoring word boundaries for
     /// brackets made of letters (Monaco `prepareBracketForRegExp`).
     fn matches_at(line: &[u16], i: usize, text: &[u16]) -> bool {
-        if !line[i..].starts_with(text) {
+        // The first unit alone rules out almost every position, without a
+        // `memcmp` call.
+        if text.first().is_some_and(|first| line.get(i) != Some(first))
+            || !line[i..].starts_with(text)
+        {
             return false;
         }
         let wordy = text.iter().all(|&c| is_word_unit(c) || c == b' ' as u16);
