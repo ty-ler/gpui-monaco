@@ -16,7 +16,7 @@ use text::{Patch, PointUtf16, Rope, Version};
 
 use super::injected_text::{LineInjectedText, ModelLineProjectionData, PositionAffinity};
 use super::line_breaks::{MeasureChar, WrapClassifier, WrappingIndent, create_line_breaks};
-use super::prefix_sum::PrefixSum;
+use super::rows::{Projection, Rows};
 
 /// How [`ViewLines`] soft-wraps model rows.
 #[derive(Clone, Debug, PartialEq)]
@@ -110,16 +110,16 @@ pub struct ViewLines {
     rope: Rope,
     version: Version,
     wrap: Option<WrapSettings>,
-    /// Each row's projection (Monaco `ModelLineProjectionData`); `None`
-    /// when it shows as is, on one view line.
-    projections: Vec<Option<Arc<ModelLineProjectionData>>>,
+    /// Each row's projection (Monaco `ModelLineProjectionData`; `None`
+    /// when it shows as is, on one view line) and how many view lines it
+    /// shows (0 when hidden), in shared chunks so clones are cheap.
+    rows: Rows,
     /// The rows with injected text, sorted, and their text by column
     /// (Monaco `LineInjectedText`). Few rows have any, so edits shift
     /// them cheaply.
     injected: Vec<(u32, Arc<[LineInjectedText]>)>,
     /// Sorted, disjoint hidden model row ranges.
     hidden: Vec<Range<u32>>,
-    counts: PrefixSum,
     /// Unique to this mapping: a new one with every change.
     generation: u64,
 }
@@ -129,6 +129,28 @@ static NEXT_GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::Atomic
 
 fn next_generation() -> u64 {
     NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// How many view lines a row with `projection` shows, unless hidden.
+fn line_count_of(projection: &Projection) -> u32 {
+    projection.as_ref().map_or(1, |p| p.output_line_count())
+}
+
+/// How many view lines model `row` with `projection` shows, given the
+/// `hidden` row ranges (sorted and disjoint).
+fn row_count(hidden: &[Range<u32>], row: u32, projection: &Projection) -> u32 {
+    if is_hidden(hidden, row) {
+        0
+    } else {
+        line_count_of(projection)
+    }
+}
+
+/// True if `row` is in one of the `hidden` row ranges (sorted and
+/// disjoint).
+fn is_hidden(hidden: &[Range<u32>], row: u32) -> bool {
+    let at = hidden.partition_point(|range| range.end <= row);
+    hidden.get(at).is_some_and(|range| range.start <= row)
 }
 
 /// The projection of `line` with `injected` text, wrapped as `wrap` says
@@ -157,18 +179,15 @@ impl ViewLines {
     /// or anything hidden.
     pub fn new(rope: Rope, version: Version) -> Self {
         let rows = rope.line_count() as usize;
-        let mut this = Self {
-            projections: vec![None; rows],
+        Self {
+            rows: Rows::plain(rows),
             injected: Vec::new(),
             rope,
             version,
             wrap: None,
             hidden: Vec::new(),
-            counts: PrefixSum::default(),
             generation: next_generation(),
-        };
-        this.rebuild_counts();
-        this
+        }
     }
 
     /// The text version this mapping is for.
@@ -214,7 +233,7 @@ impl ViewLines {
 
     /// Model `row`'s projection; `None` when it shows as is.
     pub fn projection(&self, row: u32) -> Option<&ModelLineProjectionData> {
-        self.projections.get(row as usize)?.as_deref()
+        self.rows.get(row as usize)?.as_deref()
     }
 
     /// Model `row`'s projection with `injected` text instead of its own.
@@ -233,35 +252,28 @@ impl ViewLines {
         }
     }
 
-    /// How many view lines model `row` shows, unless hidden.
-    fn row_line_count(&self, row: usize) -> u32 {
-        self.projections[row]
-            .as_ref()
-            .map_or(1, |p| p.output_line_count())
-    }
-
     /// How many view lines model `rows` show once shown, hidden or not
     /// (wrapped rows count each part).
     pub fn unhidden_line_count(&self, rows: Range<u32>) -> u32 {
-        let end = (rows.end as usize).min(self.projections.len());
-        (rows.start as usize..end)
-            .map(|row| self.row_line_count(row))
+        self.rows
+            .projections(rows.start as usize..rows.end as usize)
+            .map(line_count_of)
             .sum()
+    }
+
+    /// Counts the view lines of `rows` again from their projections and
+    /// the hidden rows.
+    fn recount(&mut self, rows: Range<u32>) {
+        let hidden = &self.hidden;
+        self.rows
+            .recount(rows.start as usize..rows.end as usize, |row, projection| {
+                row_count(hidden, row as u32, projection)
+            });
     }
 
     fn rebuild_counts(&mut self) {
         self.generation = next_generation();
-        let mut counts: Vec<u32> = (0..self.projections.len())
-            .map(|row| self.row_line_count(row))
-            .collect();
-        for range in &self.hidden {
-            for row in range.clone() {
-                if let Some(count) = counts.get_mut(row as usize) {
-                    *count = 0;
-                }
-            }
-        }
-        self.counts = PrefixSum::new(counts);
+        self.recount(0..self.rows.len() as u32);
     }
 
     /// Changes the wrap settings, rewrapping every row if they differ.
@@ -270,7 +282,7 @@ impl ViewLines {
             return;
         }
         self.wrap = wrap;
-        self.projections = match &self.wrap {
+        let projections = match &self.wrap {
             None => {
                 let mut projections = vec![None; self.rope.line_count() as usize];
                 for (row, injected) in &self.injected {
@@ -293,7 +305,14 @@ impl ViewLines {
                 projections
             }
         };
-        self.rebuild_counts();
+        let hidden = &self.hidden;
+        self.rows = Rows::from_iter(projections.into_iter().enumerate().map(
+            |(row, projection)| {
+                let count = row_count(hidden, row as u32, &projection);
+                (projection, count)
+            },
+        ));
+        self.generation = next_generation();
     }
 
     /// Changes which characters wrapping may break around (the wrap
@@ -311,8 +330,12 @@ impl ViewLines {
     pub fn set_hidden(&mut self, hidden: Vec<Range<u32>>) {
         let merged = normalize_hidden(hidden);
         if merged != self.hidden {
-            self.hidden = merged;
-            self.rebuild_counts();
+            // Only rows hidden before or now change.
+            let old = std::mem::replace(&mut self.hidden, merged.clone());
+            for range in old.into_iter().chain(merged) {
+                self.recount(range);
+            }
+            self.generation = next_generation();
         }
     }
 
@@ -324,10 +347,10 @@ impl ViewLines {
         &mut self,
         rows: impl IntoIterator<Item = (u32, Option<Arc<[LineInjectedText]>>)>,
     ) -> bool {
-        let mut changed = false;
+        let mut changed = Vec::new();
         for (row, text) in rows {
             let ix = row as usize;
-            if ix >= self.projections.len() {
+            if ix >= self.rows.len() {
                 continue;
             }
             let text = text.filter(|text| !text.is_empty());
@@ -342,19 +365,15 @@ impl ViewLines {
                 }
             }
             let projection = self.compute_row(row, self.injected_text(row));
-            self.projections[ix] = projection;
-            if !self.is_row_hidden(row) {
-                let count = self.row_line_count(ix);
-                if self.counts.value(ix) != count {
-                    self.counts.set(ix, count);
-                }
-            }
-            changed = true;
+            let count = row_count(&self.hidden, row, &projection);
+            changed.push((ix, projection, count));
         }
-        if changed {
-            self.generation = next_generation();
+        if changed.is_empty() {
+            return false;
         }
-        changed
+        self.rows.set_many(changed);
+        self.generation = next_generation();
+        true
     }
 
     /// Catches up with `rope` at `version`, given the edits since our version.
@@ -381,13 +400,17 @@ impl ViewLines {
         }
         // Apply back to front so earlier indices stay valid.
         for (old_rows, new_rows) in spans.iter().rev() {
-            let replacement: Vec<Option<Arc<ModelLineProjectionData>>> = new_rows
+            // Counted as shown; hidden rows are counted below.
+            let replacement: Vec<(Projection, u32)> = new_rows
                 .clone()
-                .map(|row| self.compute_row(row, &[]))
+                .map(|row| {
+                    let projection = self.compute_row(row, &[]);
+                    let count = line_count_of(&projection);
+                    (projection, count)
+                })
                 .collect();
-            let start = old_rows.start as usize;
-            let end = (old_rows.end as usize).min(self.projections.len());
-            self.projections.splice(start..end, replacement);
+            self.rows
+                .splice(old_rows.start as usize..old_rows.end as usize, replacement);
         }
         // Injected text moves with its row, and edited rows lose theirs.
         if !self.injected.is_empty() {
@@ -423,21 +446,15 @@ impl ViewLines {
                 hidden.push((range.start as i64 + delta) as u32..(range.end as i64 + delta) as u32);
             }
         }
-        let unchanged_rows = hidden.len() == self.hidden.len()
-            && spans.iter().all(|(old, new)| old.len() == new.len());
+        // Kept hidden ranges moved with their rows, which keep their 0
+        // counts; rows of dropped ones show again.
+        let kept_hidden = hidden.len() == self.hidden.len();
         self.hidden = hidden;
-        debug_assert_eq!(self.projections.len(), self.rope.line_count() as usize);
-        if unchanged_rows {
-            // Typing within lines: update just the edited rows' counts.
+        debug_assert_eq!(self.rows.len(), self.rope.line_count() as usize);
+        if kept_hidden {
+            // Update just the edited rows' counts.
             for (_, rows) in &spans {
-                for row in rows.clone() {
-                    let count = if self.hidden.iter().any(|hidden| hidden.contains(&row)) {
-                        0
-                    } else {
-                        self.row_line_count(row as usize)
-                    };
-                    self.counts.set(row as usize, count);
-                }
+                self.recount(rows.clone());
             }
         } else {
             self.rebuild_counts();
@@ -446,18 +463,19 @@ impl ViewLines {
 
     /// Number of view lines.
     pub fn line_count(&self) -> u32 {
-        self.counts.total() as u32
+        self.rows.total() as u32
     }
 
     /// True if model `row` is hidden by a fold. Rows past the end are not
     /// hidden.
     pub fn is_row_hidden(&self, row: u32) -> bool {
-        self.counts.len() > row as usize && self.counts.value(row as usize) == 0
+        // Hidden rows are the ones counting no view lines.
+        self.rows.len() > row as usize && is_hidden(&self.hidden, row)
     }
 
     /// The view line at `index` (clamped).
     pub fn view_line(&self, index: u32) -> ViewLine {
-        let (row, segment) = self.counts.find(index as u64);
+        let (row, segment) = self.rows.find(index as u64);
         ViewLine {
             row: row as u32,
             segment,
@@ -467,7 +485,15 @@ impl ViewLines {
     /// Index of the first view line of `row`, or of the next visible row if
     /// `row` is hidden.
     pub fn first_view_line_of_row(&self, row: u32) -> u32 {
-        self.counts.prefix(row as usize) as u32
+        self.rows.prefix(row as usize) as u32
+    }
+
+    /// The view lines showing model `row` (`row` less than the row count):
+    /// empty, at the next visible row's first, when it's hidden. Its end is
+    /// `first_view_line_of_row(row + 1)`.
+    pub(crate) fn view_lines_of_row(&self, row: u32) -> Range<u32> {
+        let (first, count) = self.rows.prefix_and_count(row as usize);
+        first as u32..first as u32 + count
     }
 
     /// `line`'s row's projection and its segment (clamped to the last).
@@ -539,12 +565,13 @@ impl ViewLines {
                 row -= 1;
             }
             let first = self.first_view_line_of_row(row);
-            let count = self.counts.value(row as usize).max(1);
+            let count = self.rows.count(row as usize).max(1);
             let line = first + count - 1;
             return (line, self.line_max_column(line));
         }
-        let first = self.first_view_line_of_row(row);
-        match self.projection(row) {
+        let (first, _, projection) = self.rows.row(row as usize);
+        let first = first as u32;
+        match projection.as_deref() {
             None => (first, point.column),
             Some(projection) => {
                 let output = projection.translate_to_output_position(point.column, affinity);
@@ -913,6 +940,66 @@ mod tests {
             }
             for row in 0..buffer.rope().line_count() {
                 assert_eq!(lines.is_row_hidden(row), fresh.is_row_hidden(row));
+            }
+        }
+    }
+
+    #[test]
+    fn edits_on_a_shared_mapping_copy_only_the_edited_rows() {
+        // A view (the minimap's tiles) keeping the mapping shares it; an edit
+        // then copies only the chunk of rows it touches, not the document.
+        let text = "word word word word\n".repeat(50_000);
+        let mut buffer = Buffer::new(&text);
+        let mut lines = ViewLines::new(buffer.rope().clone(), buffer.version());
+        lines.set_wrap(wrap(10));
+        lines.set_hidden(vec![100..200, 40_000..40_010]);
+        for (offset, text) in [(25_000 * 20, "x"), (30_000 * 20 + 3, "\n")] {
+            let kept = lines.clone();
+            buffer.edit([(offset..offset, text)]).unwrap();
+            let patch = buffer.edits_since(lines.version());
+            lines.apply_edits(buffer.rope().clone(), buffer.version(), &patch);
+            let (shared, chunks) = lines.rows.shared_chunks(&kept.rows);
+            assert!(chunks > 40);
+            assert!(shared + 2 >= chunks, "{shared} of {chunks} chunks shared");
+            assert_eq!(kept.line_count() + 1, lines.line_count());
+        }
+    }
+
+    #[test]
+    fn incremental_edits_across_chunks_match_full_rebuild() {
+        let text: String = (0..5000)
+            .map(|row| format!("{} {}\n", "ab".repeat(row % 9), row))
+            .collect();
+        let mut buffer = Buffer::new(&text);
+        let mut lines = ViewLines::new(buffer.rope().clone(), buffer.version());
+        lines.set_wrap(wrap(8));
+        lines.set_hidden(vec![10..20, 1500..2600, 4000..4001]);
+        let edits: [(Range<usize>, &str); 6] = [
+            (100..100, "\n\n\n"),
+            (5000..40_000, ""),
+            (200..200, &"line of text\n".repeat(3000)),
+            (0..1, "q"),
+            (60_000..60_000, "\n"),
+            (0..30_000, "x"),
+        ];
+        for (range, text) in edits {
+            let range = range.start.min(buffer.len())..range.end.min(buffer.len());
+            buffer.edit([(range, text)]).unwrap();
+            let patch = buffer.edits_since(lines.version());
+            lines.apply_edits(buffer.rope().clone(), buffer.version(), &patch);
+            let mut fresh = ViewLines::new(buffer.rope().clone(), buffer.version());
+            fresh.set_wrap(wrap(8));
+            fresh.set_hidden(lines.hidden().to_vec());
+            assert_eq!(lines.line_count(), fresh.line_count());
+            for line in 0..lines.line_count() {
+                assert_eq!(lines.view_line(line), fresh.view_line(line));
+            }
+            for row in 0..buffer.rope().line_count() {
+                assert_eq!(lines.is_row_hidden(row), fresh.is_row_hidden(row));
+                assert_eq!(
+                    lines.first_view_line_of_row(row),
+                    fresh.first_view_line_of_row(row)
+                );
             }
         }
     }

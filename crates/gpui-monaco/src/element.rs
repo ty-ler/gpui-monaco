@@ -3706,9 +3706,8 @@ fn prepaint_editor(
                         return None;
                     }
                     if !zone.after_column && !view_lines.is_row_hidden(row) {
-                        let first = view_lines.first_view_line_of_row(row);
-                        let next = view_lines.first_view_line_of_row(row + 1);
-                        return Some(next.max(first + 1) as i64 - 1);
+                        let lines = view_lines.view_lines_of_row(row);
+                        return Some(lines.end.max(lines.start + 1) as i64 - 1);
                     }
                     let column = column.unwrap_or_else(|| rope.line_len_utf16(row));
                     let point = PointUtf16::new(row, column);
