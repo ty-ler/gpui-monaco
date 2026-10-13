@@ -818,3 +818,158 @@ fn delete_inside_word_only_word(cx: &mut TestAppContext) {
     trigger(&editor, cx, "deleteInsideWord", "{}");
     assert_eq!(text(&editor, cx), "foobaz");
 }
+
+/// Monaco `getConfiguredWordAtPosition`: a word is any run of characters
+/// that aren't whitespace or word separators, letters or not, so Cmd/Ctrl+D
+/// selects (and then adds) an emoji or a symbol run.
+#[gpui::test]
+fn cmd_d_selects_words_without_letters_or_digits(cx: &mut TestAppContext) {
+    let (editor, vcx) = setup(&["a 😀 b 😀"], cx);
+    set(&editor, vcx, &[(1, 3, 1, 3)]);
+    vcx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, vcx), vec![(1, 3, 1, 5)]);
+    vcx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, vcx), vec![(1, 3, 1, 5), (1, 8, 1, 10)]);
+
+    let (editor, vcx) = setup(&["a -- b --"], cx);
+    update_options(&editor, vcx, |o| {
+        o.word_separators = o.word_separators.replace('-', "").into();
+    });
+    set(&editor, vcx, &[(1, 4, 1, 4)]);
+    vcx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, vcx), vec![(1, 3, 1, 5)]);
+    vcx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, vcx), vec![(1, 3, 1, 5), (1, 8, 1, 10)]);
+}
+
+/// Monaco `getSelectionSearchString` seeds find with the same words:
+/// Cmd/Ctrl+F on a run of arrows searches for it.
+#[gpui::test]
+fn find_seeds_words_without_letters_or_digits(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["a →→ b"], cx);
+    set(&editor, cx, &[(1, 4, 1, 4)]);
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_options().query.clone()),
+        "→→"
+    );
+}
+
+/// Monaco `SEARCH_STRING_MAX_LENGTH` counts UTF-16 units: a selection of
+/// 200,000 CJK characters (600,000 bytes) still seeds the search string.
+#[gpui::test]
+fn find_seed_limit_counts_utf16_units(cx: &mut TestAppContext) {
+    let line = "中".repeat(200_000);
+    let (editor, cx) = setup(&[&line], cx);
+    set(&editor, cx, &[(1, 1, 1, 200_001)]);
+    cx.simulate_keystrokes("secondary-f");
+    cx.run_until_parked();
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.find_options().query.chars().count()),
+        200_000
+    );
+}
+
+/// Monaco `_beginSessionIfNeeded` ends a Cmd/Ctrl+D session on
+/// `onDidBlurEditorText`; `_endSession` drops the word session's whole
+/// word and match case overrides.
+#[gpui::test]
+fn blurring_the_text_ends_the_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo Foo foo"], cx);
+    draw(cx);
+    set(&editor, cx, &[(1, 2, 1, 2)]);
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(find_toggles(&editor, cx), [true, true, false]);
+    // Focus leaves the editor.
+    cx.update(|window, cx| window.blur(cx));
+    draw(cx);
+    assert_eq!(find_toggles(&editor, cx), [false, false, false]);
+    // Back in the text, a selection starts a session with the selected
+    // text's matching (find's own toggles: whole word and match case off).
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    set(&editor, cx, &[(1, 1, 1, 4)]);
+    cx.simulate_keystrokes("secondary-d");
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4), (1, 5, 1, 8)]);
+}
+
+/// Draws the window, active, which delivers its focus changes.
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Monaco: "switching focus transfers matching rules between selection and
+/// Find sessions": back in the text (with `selectedTextMatchMode` not
+/// `findOptions`), the find widget's session ends and the selection's
+/// matching applies again.
+#[gpui::test]
+fn focusing_the_text_ends_a_find_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        &["foo", "FOO", "fooqux", "foobar", "bar", "BAR", "barista"],
+        cx,
+    );
+    match_mode(&editor, cx, SelectedTextMatchMode::CaseSensitive);
+    draw(cx);
+    find_focused(&editor, cx, "bar", false);
+    draw(cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.find_options().clone();
+        options.whole_word = true;
+        e.set_find_options(options, cx);
+    });
+    set(&editor, cx, &[(3, 1, 3, 4)]);
+    cx.simulate_keystrokes(if cfg!(target_os = "macos") {
+        "cmd-k cmd-d"
+    } else {
+        "ctrl-k ctrl-d"
+    });
+    assert_eq!(get(&editor, cx), vec![(5, 1, 5, 4)]);
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    editor.update(cx, |e, cx| e.move_selection_to_next_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(7, 1, 7, 4)]);
+}
+
+/// Monaco: only Add Selection to Next Find Match grows every empty cursor
+/// to its word; the others begin a session whose first result is the
+/// primary cursor's word (`currentMatch`), which move puts in place of
+/// the last selection and add appends.
+#[gpui::test]
+fn move_and_add_previous_use_only_the_primary_word(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&["foo", "bar", "foo"], cx);
+    set(&editor, cx, &[(1, 2, 1, 2), (2, 2, 2, 2)]);
+    editor.update(cx, |e, cx| e.move_selection_to_next_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4)]);
+
+    set(&editor, cx, &[(1, 2, 1, 2), (2, 2, 2, 2)]);
+    editor.update(cx, |e, cx| e.move_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(1, 1, 1, 4)]);
+
+    set(&editor, cx, &[(3, 2, 3, 2), (2, 2, 2, 2)]);
+    editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
+    assert_eq!(get(&editor, cx), vec![(3, 1, 3, 4), (2, 2, 2, 2)]);
+    editor.update(cx, |e, cx| e.add_selection_to_previous_find_match(cx));
+    assert_eq!(
+        get(&editor, cx),
+        vec![(3, 1, 3, 4), (2, 2, 2, 2), (1, 1, 1, 4)]
+    );
+}
+
+/// Monaco passes `MAX_SAFE_SMALL_INTEGER` to `findMatches` for Select All
+/// Occurrences: only `multiCursorLimit` caps the cursors.
+#[gpui::test]
+fn select_all_occurrences_is_not_capped_by_the_find_limit(cx: &mut TestAppContext) {
+    let line = vec!["x"; 30_000].join(" ");
+    let (editor, cx) = setup(&[&line], cx);
+    update_options(&editor, cx, |o| o.multi_cursor_limit = 50_000);
+    set(&editor, cx, &[(1, 1, 1, 1)]);
+    editor.update(cx, |e, cx| e.select_all_occurrences(cx));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 30_000);
+}

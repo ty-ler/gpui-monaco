@@ -1006,6 +1006,11 @@ impl CodeEditor {
                 this.widget_focused = true;
                 this.update_bracket_highlights(cx);
                 this.restart_blink(cx);
+                // Monaco's Cmd/Ctrl+D session ends on `onDidFocusEditorText`
+                // unless `selectedTextMatchMode` is `findOptions`.
+                if !this.uses_find_options() {
+                    this.end_multi_cursor_session(cx);
+                }
                 cx.emit(CodeEditorEvent::Focused);
                 cx.notify();
             }),
@@ -1025,6 +1030,8 @@ impl CodeEditor {
                 this.minimap_drag = None;
                 this.dnd_cancel(cx);
                 this.message_blurred(cx);
+                // Monaco's Cmd/Ctrl+D session ends on `onDidBlurEditorText`.
+                this.end_multi_cursor_session(cx);
                 cx.emit(CodeEditorEvent::Blurred);
                 cx.notify();
             }),
