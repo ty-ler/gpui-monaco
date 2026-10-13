@@ -12,13 +12,18 @@
 //! `_getShouldAutoClose` part of `src/vs/editor/common/cursorCommon.ts`.
 //!
 //! Monaco reads token types from its tokenizer; here they come from
-//! [`LanguageContext::token_type_at`]. Embedded languages (a different
-//! language configuration for part of a line) are not supported: the whole
-//! text uses one configuration.
+//! [`LanguageContext::token_type_at`]. Embedded languages (another
+//! language's configuration for part of a line, as JavaScript in an HTML
+//! `<script>`) come from [`LanguageContext::language_runs`]: like Monaco,
+//! onEnter rules, the indentation rules of Enter and of typing, and
+//! electric characters use the language at the cursor, scoped to its part
+//! of the line, while auto-closing and surrounding pairs are the
+//! context's own language's (Monaco's `CursorConfiguration`).
 
 use std::ops::Range;
+use std::sync::Arc;
 
-use syntax::{IndentAction, LanguageConfiguration, NotIn, Pattern};
+use syntax::{IndentAction, Language, LanguageConfiguration, NotIn, Pattern};
 
 use super::typing::ShiftCommand;
 use super::{
@@ -70,6 +75,22 @@ pub struct LanguageContext<'a> {
     /// Monaco `maxTokenizationLineLength`: longer lines are one plain
     /// token, so they're processed without asking for token types.
     pub max_tokenization_line_length: u32,
+    /// The languages of a row's characters, as runs covering the line in
+    /// order (Monaco's line tokens grouped by language), with `None` for
+    /// [`Self::config`]'s language. When `None`, or for an empty result,
+    /// the whole text is in [`Self::config`]'s language.
+    pub language_runs: Option<&'a dyn Fn(u32) -> Vec<LanguageScope>>,
+}
+
+/// A run of a line's characters in one language (Monaco
+/// `ScopedLineTokens`).
+#[derive(Clone)]
+pub struct LanguageScope {
+    /// The run's UTF-16 columns.
+    pub columns: Range<u32>,
+    /// Its embedded language, or `None` for the context's own language
+    /// ([`LanguageContext::config`]).
+    pub language: Option<Arc<Language>>,
 }
 
 impl<'a> LanguageContext<'a> {
@@ -84,7 +105,14 @@ impl<'a> LanguageContext<'a> {
             token_type_at,
             token_type_if_inserting: None,
             max_tokenization_line_length: u32::MAX,
+            language_runs: None,
         }
+    }
+
+    /// Sets [`Self::language_runs`].
+    pub fn with_language_runs(mut self, runs: &'a dyn Fn(u32) -> Vec<LanguageScope>) -> Self {
+        self.language_runs = Some(runs);
+        self
     }
 
     /// Sets [`Self::max_tokenization_line_length`].
@@ -179,6 +207,9 @@ fn first_char(s: &str) -> Option<char> {
 /// `ResolvedLanguageConfiguration` and `CursorConfiguration` do.
 pub(crate) struct LanguageSupport<'a> {
     pub ctx: &'a LanguageContext<'a>,
+    /// The embedded language this is the support of, `None` for
+    /// [`LanguageContext::config`]'s.
+    embedded: Option<Arc<Language>>,
     pub auto_closing_pairs: Vec<AutoClosingPair>,
     /// `(open, close)`.
     pub surrounding_pairs: Vec<(String, String)>,
@@ -209,9 +240,94 @@ fn is_word_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
 
+/// `Pattern::new(source, flags)`, compiled once per thread: the bracket
+/// patterns of a [`LanguageSupport`] are built for every keystroke, and
+/// compiling them dominated typing.
+fn cached_pattern(source: String, flags: &'static str) -> Pattern {
+    thread_local! {
+        static PATTERNS: std::cell::RefCell<std::collections::HashMap<(String, &'static str), Pattern>> =
+            Default::default();
+    }
+    PATTERNS.with(|patterns| {
+        let mut patterns = patterns.borrow_mut();
+        if let Some(pattern) = patterns.get(&(source.clone(), flags)) {
+            return pattern.clone();
+        }
+        // The patterns come from language configurations; bound the cache
+        // anyway.
+        if patterns.len() >= 1024 {
+            patterns.clear();
+        }
+        let pattern = Pattern::new(source.clone(), flags);
+        patterns.insert((source, flags), pattern.clone());
+        pattern
+    })
+}
+
+/// Monaco `LanguageBracketsConfiguration.getBracketRegExp`: the opening
+/// brackets of `brackets` and `colorizedBracketPairs`, then their closing
+/// brackets, each once.
+fn bracket_regex(config: &LanguageConfiguration) -> Option<Pattern> {
+    let kinds = crate::view::bracket_pairs::language_bracket_kinds(config);
+    let mut openings: Vec<&str> = Vec::new();
+    let mut closings: Vec<&str> = Vec::new();
+    for kind in &kinds {
+        if !openings.contains(&kind.open.as_str()) {
+            openings.push(&kind.open);
+        }
+        if !closings.contains(&kind.close.as_str()) {
+            closings.push(&kind.close);
+        }
+    }
+    let pieces: Vec<String> = openings
+        .into_iter()
+        .chain(closings)
+        .map(|piece| {
+            // Monaco `prepareBracketForRegExp`.
+            let wordy = piece.chars().all(|c| is_word_char(c) || c == ' ');
+            let escaped = escape_regex(piece);
+            if wordy {
+                format!("\\b{escaped}\\b")
+            } else {
+                escaped
+            }
+        })
+        .collect();
+    (!pieces.is_empty()).then(|| cached_pattern(format!("({})", pieces.join(")|(")), "i"))
+}
+
+/// Whether two scopes' languages are the same (`None` being the context's
+/// own).
+fn same_language(a: &Option<Arc<Language>>, b: &Option<Arc<Language>>) -> bool {
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => a.id == b.id,
+        _ => false,
+    }
+}
+
+/// The scope of `scopes` holding the character at UTF-16 `column` (Monaco
+/// `createScopedLineTokens(lineTokens, column)`, which takes the last one
+/// at the line's end).
+fn scope_in(scopes: &[LanguageScope], column: u32) -> Option<&LanguageScope> {
+    scopes
+        .iter()
+        .find(|s| s.columns.start <= column && column < s.columns.end)
+        .or(scopes.last())
+}
+
 impl<'a> LanguageSupport<'a> {
     pub fn new(ctx: &'a LanguageContext<'a>) -> Self {
-        let config = ctx.config;
+        Self::for_language(ctx, None)
+    }
+
+    /// The support of an embedded language of `ctx`'s text, or of `ctx`'s
+    /// own language with `None`.
+    fn for_language(ctx: &'a LanguageContext<'a>, embedded: Option<Arc<Language>>) -> Self {
+        let embedded_language = embedded.clone();
+        let config = embedded_language
+            .as_ref()
+            .map_or(ctx.config, |language| &language.config);
         // Monaco `CharacterPairSupport`: `autoClosingPairs` when set (even
         // empty), else the brackets.
         let mut auto_closing_pairs: Vec<AutoClosingPair> = match &config.auto_closing_pairs {
@@ -247,18 +363,20 @@ impl<'a> LanguageSupport<'a> {
                 .map(|p| (p.open.clone(), p.close.clone()))
                 .collect(),
         };
-        let has_on_enter = !config.brackets().is_empty()
+        // Monaco `ResolvedLanguageConfiguration`: onEnter support when any of
+        // these is set, even to an empty list, and `OnEnterSupport`'s default
+        // brackets only when `brackets` isn't.
+        let has_on_enter = config.brackets.is_some()
             || config.indentation_rules.is_some()
-            || !config.on_enter_rules().is_empty();
+            || config.on_enter_rules.is_some();
         let on_enter_brackets = has_on_enter.then(|| {
-            let brackets: Vec<(String, String)> = if config.brackets().is_empty() {
-                vec![
+            let brackets: Vec<(String, String)> = match &config.brackets {
+                Some(brackets) => brackets.clone(),
+                None => vec![
                     ("(".into(), ")".into()),
                     ("{".into(), "}".into()),
                     ("[".into(), "]".into()),
-                ]
-            } else {
-                config.brackets().to_vec()
+                ],
             };
             brackets
                 .iter()
@@ -274,33 +392,17 @@ impl<'a> LanguageSupport<'a> {
                         close_src.push_str("\\b");
                     }
                     close_src.insert_str(0, "^\\s*");
-                    let open_re = Pattern::new(open_src, "");
-                    let close_re = Pattern::new(close_src, "");
+                    let open_re = cached_pattern(open_src, "");
+                    let close_re = cached_pattern(close_src, "");
                     (open_re.regex().is_some() && close_re.regex().is_some())
                         .then_some((open_re, close_re))
                 })
                 .collect()
         });
-        let bracket_pieces: Vec<String> = config
-            .brackets()
-            .iter()
-            .filter(|(open, close)| !open.is_empty() && !close.is_empty())
-            .flat_map(|(open, close)| [open, close])
-            .map(|piece| {
-                // Monaco `prepareBracketForRegExp`.
-                let wordy = piece.chars().all(|c| is_word_char(c) || c == ' ');
-                let escaped = escape_regex(piece);
-                if wordy {
-                    format!("\\b{escaped}\\b")
-                } else {
-                    escaped
-                }
-            })
-            .collect();
-        let bracket_regex = (!bracket_pieces.is_empty())
-            .then(|| Pattern::new(format!("({})", bracket_pieces.join(")|(")), "i"));
+        let bracket_regex = bracket_regex(config);
         Self {
             ctx,
+            embedded,
             auto_closing_pairs,
             surrounding_pairs,
             auto_close_before_quotes: config
@@ -321,8 +423,68 @@ impl<'a> LanguageSupport<'a> {
         }
     }
 
-    pub fn config(&self) -> &'a LanguageConfiguration {
-        self.ctx.config
+    pub fn config(&self) -> &LanguageConfiguration {
+        self.embedded
+            .as_ref()
+            .map_or(self.ctx.config, |language| &language.config)
+    }
+
+    // --- embedded languages
+
+    /// The languages of `row`'s characters (see
+    /// [`LanguageContext::language_runs`]), one scope without them.
+    pub(crate) fn line_scopes(&self, model: &dyn CursorModel, row: u32) -> Vec<LanguageScope> {
+        let scopes = match self.ctx.language_runs {
+            Some(runs) => runs(row),
+            None => Vec::new(),
+        };
+        if scopes.is_empty() {
+            return vec![LanguageScope {
+                columns: 0..model.line_max_column(row),
+                language: None,
+            }];
+        }
+        scopes
+    }
+
+    /// The scope of `row` holding the character at UTF-16 `column` (the
+    /// last one at the line's end; Monaco `createScopedLineTokens`).
+    pub(crate) fn scope_at(&self, model: &dyn CursorModel, row: u32, column: u32) -> LanguageScope {
+        let scopes = self.line_scopes(model, row);
+        scope_in(&scopes, column)
+            .cloned()
+            .expect("line_scopes is never empty")
+    }
+
+    /// The language of the character at `column` of `row` (Monaco
+    /// `getLanguageIdAtPosition`), `None` for the context's own; cheap
+    /// without [`LanguageContext::language_runs`].
+    fn language_at(&self, model: &dyn CursorModel, row: u32, column: u32) -> Option<Arc<Language>> {
+        self.ctx.language_runs?;
+        self.scope_at(model, row, column).language
+    }
+
+    /// The support of `scope`'s language, or `None` when it's this one's
+    /// (Monaco `getLanguageConfiguration(scopedLineTokens.languageId)`).
+    pub(crate) fn support_for(&self, scope: &LanguageScope) -> Option<LanguageSupport<'a>> {
+        (!same_language(&self.embedded, &scope.language))
+            .then(|| LanguageSupport::for_language(self.ctx, scope.language.clone()))
+    }
+
+    /// Monaco `isLanguageDifferentFromLineStart`: whether the language at
+    /// `position` starts after the line does and differs from the line's
+    /// first one.
+    pub(crate) fn is_language_different_from_line_start(
+        &self,
+        model: &dyn CursorModel,
+        position: Position,
+    ) -> bool {
+        if self.ctx.language_runs.is_none() {
+            return false;
+        }
+        let scopes = self.line_scopes(model, position.row);
+        let scope = scope_in(&scopes, position.column).expect("line_scopes is never empty");
+        scope.columns.start != 0 && !same_language(&scopes[0].language, &scope.language)
     }
 
     // --- AutoClosingPairs lookups (keys are single characters)
@@ -461,9 +623,14 @@ impl<'a> LanguageSupport<'a> {
         let units = line_units(model, row);
         let to = (to as usize).min(units.len());
         let from = (from as usize).min(to);
-        let Some(regex) = self.bracket_regex.as_ref().and_then(|p| p.regex()) else {
+        if self.bracket_regex.is_none() && self.ctx.language_runs.is_none() {
             return String::from_utf16_lossy(&units[from..to]);
-        };
+        }
+        // The brackets of the language the text starts in (Monaco
+        // `tokens.getLanguageId(0)`), looked up at the first string,
+        // comment or regex.
+        let mut looked_up = false;
+        let mut other_regex: Option<Option<Pattern>> = None;
         let mut result = String::new();
         let mut start = from;
         while start < to {
@@ -474,7 +641,21 @@ impl<'a> LanguageSupport<'a> {
             }
             let text = String::from_utf16_lossy(&units[start..end]);
             if token.ignores_brackets() {
-                result.push_str(&regex.replace_all(&text, ""));
+                if !looked_up {
+                    looked_up = true;
+                    let language = self.language_at(model, row, from as u32);
+                    other_regex = (!same_language(&self.embedded, &language)).then(|| {
+                        bracket_regex(language.as_ref().map_or(self.ctx.config, |l| &l.config))
+                    });
+                }
+                let pattern = match &other_regex {
+                    Some(other) => other.as_ref(),
+                    None => self.bracket_regex.as_ref(),
+                };
+                match pattern.and_then(|p| p.regex()) {
+                    Some(regex) => result.push_str(&regex.replace_all(&text, "")),
+                    None => result.push_str(&text),
+                }
             } else {
                 result.push_str(&text);
             }
@@ -754,6 +935,22 @@ impl<'a> VirtualModel<'a> {
         }
     }
 
+    /// The language at the start of 1-based `line_number` (Monaco
+    /// `getLanguageIdAtPosition(lineNumber, 0)`, a line past the end being
+    /// clamped to the end of the last one).
+    fn language_at_line_start(&self, line_number: u32) -> Option<Arc<Language>> {
+        self.lang.ctx.language_runs?;
+        let line_count = self.model.line_count();
+        if line_number > line_count {
+            let row = line_count - 1;
+            return self
+                .lang
+                .language_at(self.model, row, self.model.line_max_column(row));
+        }
+        self.lang
+            .language_at(self.model, self.mapped(line_number) - 1, 0)
+    }
+
     fn should_increase(&self, line_number: u32) -> bool {
         self.lang.should_increase(&self.processed(line_number))
     }
@@ -781,12 +978,24 @@ pub(crate) struct InheritIndent {
 }
 
 /// Monaco `getPrecedingValidLine`: the nearest line above that is neither
-/// blank nor matches `unIndentedLinePattern`, or `None`.
+/// blank nor matches `unIndentedLinePattern`, or `None`. Lines that start
+/// in another language end the search (an embedded language's boundary),
+/// at the last line skipped, if any.
 fn preceding_valid_line(vm: &VirtualModel, line_number: u32) -> Option<u32> {
-    (1..line_number).rev().find(|&last| {
+    let language = vm.language_at_line_start(line_number);
+    let mut result = None;
+    for last in (1..line_number).rev() {
+        if !same_language(&vm.language_at_line_start(last), &language) {
+            return result;
+        }
         let text = vm.line(last);
-        !(vm.should_ignore(last) || is_blank(&text))
-    })
+        if vm.should_ignore(last) || is_blank(&text) {
+            result = Some(last);
+            continue;
+        }
+        return Some(last);
+    }
+    None
 }
 
 /// Monaco `getInheritIndentForLine` (1-based `line_number`).
@@ -869,32 +1078,82 @@ fn inherit_indent_for_line(
 }
 
 /// The processed text before `range` on its first line and after it on its
-/// last line (Monaco `IndentationContextProcessor`).
+/// last line (Monaco `IndentationContextProcessor`), within the language at
+/// each end: the text before starts where the language at `range.start`
+/// does when the line starts in another one, and the text after ends where
+/// the language at its start does.
 fn processed_around(
     lang: &LanguageSupport,
     model: &dyn CursorModel,
     range: &Range<Position>,
 ) -> (String, String) {
-    let before = lang.processed(model, range.start.row, 0, range.start.column);
+    let start = range.start;
+    let from = if lang.is_language_different_from_line_start(model, start) {
+        lang.scope_at(model, start.row, start.column).columns.start
+    } else {
+        0
+    };
+    let before = lang.processed(model, start.row, from, start.column);
     let after_position = range.end;
-    let after = lang.processed(model, after_position.row, after_position.column, u32::MAX);
+    let to = if lang.ctx.language_runs.is_some() {
+        lang.scope_at(model, after_position.row, after_position.column)
+            .columns
+            .end
+    } else {
+        u32::MAX
+    };
+    let after = lang.processed(model, after_position.row, after_position.column, to);
     (before, after)
 }
 
-/// Monaco `getEnterAction`.
+/// The processed text of the line before `position`'s, as far as the
+/// language at `position` continues on it (Monaco
+/// `_getProcessedPreviousLineTokens`): empty unless that language starts
+/// `position`'s line and ends the line before.
+fn processed_previous_line(
+    lang: &LanguageSupport,
+    model: &dyn CursorModel,
+    position: Position,
+) -> String {
+    if position.row == 0 {
+        return String::new();
+    }
+    let previous = position.row - 1;
+    if lang.ctx.language_runs.is_none() {
+        return lang.processed_line(model, previous);
+    }
+    let scope = lang.scope_at(model, position.row, position.column);
+    if scope.columns.start != 0 {
+        return String::new();
+    }
+    let previous_scope = lang.scope_at(model, previous, model.line_max_column(previous));
+    if !same_language(&scope.language, &previous_scope.language) {
+        return String::new();
+    }
+    lang.processed(
+        model,
+        previous,
+        previous_scope.columns.start,
+        previous_scope.columns.end,
+    )
+}
+
+/// Monaco `getEnterAction`, with the onEnter rules of the language at
+/// `range.start`.
 pub(crate) fn enter_action(
     auto_indent: AutoIndent,
     lang: &LanguageSupport,
     model: &dyn CursorModel,
     range: &Range<Position>,
 ) -> Option<CompleteEnterAction> {
-    let previous_line_text = if range.start.row == 0 {
-        String::new()
-    } else {
-        lang.processed_line(model, range.start.row - 1)
-    };
+    let embedded = lang
+        .ctx
+        .language_runs
+        .and_then(|_| lang.support_for(&lang.scope_at(model, range.start.row, range.start.column)));
+    let scoped = embedded.as_ref().unwrap_or(lang);
+    let previous_line_text = processed_previous_line(lang, model, range.start);
     let (before, after) = processed_around(lang, model, range);
-    let result = lang.on_enter(auto_indent, &previous_line_text, &before, &after)?;
+    let result = scoped.on_enter(auto_indent, &previous_line_text, &before, &after)?;
     let indent_action = result.indent_action;
     // `\t` stands for one indent; `appendText` and `removeText` adjust it.
     let append_text = match result.append_text.filter(|t| !t.is_empty()) {
@@ -926,11 +1185,25 @@ pub(crate) fn indent_for_enter(
     model: &dyn CursorModel,
     range: &Range<Position>,
 ) -> Option<(String, String)> {
-    if config.auto_indent < AutoIndent::Full || !lang.has_indentation_rules() {
+    if config.auto_indent < AutoIndent::Full {
+        return None;
+    }
+    // The indentation rules of the language at the cursor; the inherited
+    // indentation still uses the model's language's, as in Monaco.
+    let embedded = lang
+        .ctx
+        .language_runs
+        .and_then(|_| lang.support_for(&lang.scope_at(model, range.start.row, range.start.column)));
+    let scoped = embedded.as_ref().unwrap_or(lang);
+    if !scoped.has_indentation_rules() {
         return None;
     }
     let (before, after) = processed_around(lang, model, range);
     let before_enter_indent = leading_whitespace(&before);
+    // On a line that mixes languages, keep the line's indentation.
+    let current_line_indent = lang
+        .is_language_different_from_line_start(model, range.start)
+        .then(|| leading_whitespace(&model.line_content(range.start.row)));
     let vm = VirtualModel {
         model,
         lang,
@@ -938,19 +1211,22 @@ pub(crate) fn indent_for_enter(
         replaced_processed: true,
         line_map: None,
     };
+    let before_enter = current_line_indent
+        .clone()
+        .unwrap_or_else(|| before_enter_indent.clone());
     let Some(after_enter_action) =
         inherit_indent_for_line(config.auto_indent, &vm, range.start.row + 2, true)
     else {
-        return Some((before_enter_indent.clone(), before_enter_indent));
+        return Some((before_enter.clone(), before_enter));
     };
-    let mut after_enter_indent = after_enter_action.indentation;
+    let mut after_enter_indent = current_line_indent.unwrap_or(after_enter_action.indentation);
     if after_enter_action.action == Some(IndentAction::Indent) {
         after_enter_indent = shift_indent(config, &after_enter_indent);
     }
-    if lang.should_decrease(&after) {
+    if scoped.should_decrease(&after) {
         after_enter_indent = unshift_indent(config, &after_enter_indent);
     }
-    Some((before_enter_indent, after_enter_indent))
+    Some((before_enter, after_enter_indent))
 }
 
 /// Monaco `getIndentActionForType`: the indentation the line should get
@@ -962,7 +1238,21 @@ pub(crate) fn indent_action_for_type(
     range: &Range<Position>,
     ch: &str,
 ) -> Option<String> {
-    if config.auto_indent < AutoIndent::Full || !lang.has_indentation_rules() {
+    if config.auto_indent < AutoIndent::Full {
+        return None;
+    }
+    // The indentation rules don't work on a line that mixes languages.
+    if lang.is_language_different_from_line_start(model, range.start) {
+        return None;
+    }
+    // The indentation rules of the language at the cursor; the inherited
+    // indentation still uses the model's language's, as in Monaco.
+    let embedded = lang
+        .ctx
+        .language_runs
+        .and_then(|_| lang.support_for(&lang.scope_at(model, range.start.row, range.start.column)));
+    let scoped = embedded.as_ref().unwrap_or(lang);
+    if !scoped.has_indentation_rules() {
         return None;
     }
     let (before, after) = processed_around(lang, model, range);
@@ -972,8 +1262,8 @@ pub(crate) fn indent_action_for_type(
 
     // If the text already matched decreaseIndentPattern, the user may have
     // adjusted the indentation on purpose; leave it.
-    if !lang.should_decrease(&text_around_range)
-        && lang.should_decrease(&text_around_range_with_character)
+    if !scoped.should_decrease(&text_around_range)
+        && scoped.should_decrease(&text_around_range_with_character)
     {
         // After typing `ch` the line matches decreaseIndentPattern.
         let r = inherit_indent_for_line(config.auto_indent, &vm, range.start.row + 1, false)?;
@@ -986,8 +1276,8 @@ pub(crate) fn indent_action_for_type(
 
     if range.start == range.end && range.start.row > 0 {
         let previous_line = model.line_content(range.start.row - 1);
-        if lang.should_indent_next_line(&previous_line)
-            && lang.should_increase(&text_around_range_with_character)
+        if scoped.should_indent_next_line(&previous_line)
+            && scoped.should_increase(&text_around_range_with_character)
         {
             let inherited =
                 inherit_indent_for_line(config.auto_indent, &vm, range.start.row + 1, false);
@@ -1054,16 +1344,35 @@ pub(crate) fn is_electric_character(lang: &LanguageSupport, ch: &str) -> bool {
         .any(|(_, close)| last_char(close).is_some_and(|c| c.to_string() == ch))
 }
 
-/// Monaco `BracketElectricCharacterSupport.onElectricCharacter`: the closing
-/// bracket typing `ch` at `position` completes, if it should be lined up
-/// with its opening bracket (it is the first thing on the line).
+/// The support of the language at `position` (Monaco
+/// `createScopedLineTokens(lineTokens, column - 1).languageId`), with the
+/// UTF-16 column its part of the line starts at.
+pub(crate) fn scoped_support<'a>(
+    lang: &LanguageSupport<'a>,
+    model: &dyn CursorModel,
+    position: Position,
+) -> (Option<LanguageSupport<'a>>, u32) {
+    if lang.ctx.language_runs.is_none() {
+        return (None, 0);
+    }
+    let scope = lang.scope_at(model, position.row, position.column);
+    (lang.support_for(&scope), scope.columns.start)
+}
+
+/// Monaco `CursorConfiguration.onElectricCharacter` and
+/// `BracketElectricCharacterSupport.onElectricCharacter`: the closing
+/// bracket typing `ch` at `position` completes, by the brackets of the
+/// language there, if it should be lined up with its opening bracket (it is
+/// the first thing on the line).
 pub(crate) fn on_electric_character(
     lang: &LanguageSupport,
     model: &dyn CursorModel,
     ch: &str,
     position: Position,
 ) -> Option<String> {
-    let brackets: Vec<(String, String)> = lang
+    let (embedded, scope_start) = scoped_support(lang, model, position);
+    let scoped = embedded.as_ref().unwrap_or(lang);
+    let brackets: Vec<(String, String)> = scoped
         .config()
         .brackets()
         .iter()
@@ -1079,11 +1388,16 @@ pub(crate) fn on_electric_character(
     {
         return None;
     }
+    // The language's part of the line before `position`, and `ch`.
     let line = model.line_content(position.row);
-    let text: Vec<u16> = format!("{}{ch}", strings::utf16_prefix(&line, position.column))
-        .to_lowercase()
-        .encode_utf16()
-        .collect();
+    let scope_start = scope_start.min(position.column);
+    let text: Vec<u16> = format!(
+        "{}{ch}",
+        strings::utf16_slice(&line, scope_start, position.column)
+    )
+    .to_lowercase()
+    .encode_utf16()
+    .collect();
     // Monaco `BracketsUtils.findPrevBracketInRange`: the last bracket.
     let pieces: Vec<(Vec<u16>, bool)> = brackets
         .iter()
@@ -1104,7 +1418,13 @@ pub(crate) fn on_electric_character(
     if is_open {
         return None;
     }
-    let text_before_bracket = String::from_utf16_lossy(&text[..start]);
+    // The whole line's text before the bracket (Monaco
+    // `getActualLineContentBefore`).
+    let text_before_bracket = format!(
+        "{}{}",
+        strings::utf16_prefix(&line, scope_start),
+        String::from_utf16_lossy(&text[..start])
+    );
     if !is_blank(&text_before_bracket) {
         // There is other text on the line before the bracket.
         return None;

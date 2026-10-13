@@ -15,7 +15,7 @@ Models without a language, or with one that isn't registered, are plain text: `m
 
 - the brackets `()`, `[]` and `{}`, which auto-close and are matched, and which Enter splits onto an indented middle line;
 - surrounding pairs for the brackets, `<>` and the three quotes, so typing `"` over a selection wraps it (but doesn't auto-close);
-- no bracket pair colorization, and off-side indentation folding.
+- no bracket pair colorization (only unmatched brackets are marked, as unexpected), and off-side indentation folding.
 
 A model without a language has the id `plaintext` too, as Monaco's `getLanguageId()`: `language_id()` is `plaintext`, so providers registered for `plaintext` and `editorLangId == plaintext` apply to it. Provider selectors also see its `resource()`, `inmemory://model/N` without a uri, so a `{ scheme: "inmemory" }` filter matches models without one.
 
@@ -64,9 +64,10 @@ Grammars and highlight queries come from the official tree-sitter crates. Editin
 
 The `language-configuration.json` keys behave as they do in VS Code:
 
-- `brackets`: bracket matching and bracket-based indentation.
+- `brackets`: bracket matching and bracket-based indentation. An empty list counts as set: Enter then has no bracket rules, where without `brackets` it splits `()`, `[]` and `{}`.
+- `colorizedBracketPairs`: which pairs bracket pair colorization colors; without it, every pair of `brackets` but `<>`. These pairs and `brackets` all pair for bracket pair guides, `bracket_pairs_in_range` and matching, and a closed pair that isn't colorized doesn't nest the colors inside it. Unmatched brackets are marked as unexpected either way.
 - `autoClosingPairs`, `autoCloseBefore` and `surroundingPairs`: auto-closing and auto-surround. Without `autoClosingPairs` the brackets auto-close; an empty list closes nothing. The deprecated `__electricCharacterSupport.docComment` auto-closes too, as in Monaco.
-- `indentationRules` and `onEnterRules`: auto-indent on Enter, typing and paste.
+- `indentationRules` and `onEnterRules`: auto-indent on Enter, typing and paste. Brackets (of `brackets` and `colorizedBracketPairs`) in strings and comments are ignored. In an embedded language, as JavaScript in an HTML `<script>`, Enter, typing and electric characters follow the rules of the language at the cursor, applied to its part of the line, as in Monaco; typing doesn't re-indent a line that mixes languages. Auto-closing and surrounding pairs are the model's language's.
 - `wordPattern`: word movement, double-click, and completion words, ranges and quick suggestions.
 - `folding.markers`: region markers, added to syntax folding ranges too.
 - `comments`: which tokens count as comments, for auto-close and quick suggestions.

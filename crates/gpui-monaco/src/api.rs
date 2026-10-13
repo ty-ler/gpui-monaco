@@ -544,11 +544,8 @@ impl TextModel {
         let Some(language) = self.language() else {
             return Vec::new();
         };
-        let config = &language.config;
-        let pairs = config
-            .colorized_bracket_pairs
-            .clone()
-            .unwrap_or_else(|| config.brackets().to_vec());
+        // Every bracket pair, colorized or not (Monaco's bracket pair tree).
+        let pairs = crate::view::bracket_pairs::language_bracket_kinds(&language.config);
         let rope = self.buffer().rope();
         let skip = self.string_and_comment_ranges(0..rope.len());
         let (_, pairs) =

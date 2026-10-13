@@ -34,7 +34,7 @@ use super::edit::{
 use super::language::{
     AutoClosingPair, LanguageContext, LanguageSupport, enter_action, good_indent_for_line,
     indent_action_for_type, indent_for_enter, indentation_at_position, is_electric_character,
-    is_quote, on_electric_character, unshift_indent,
+    is_quote, on_electric_character, scoped_support, unshift_indent,
 };
 use super::typing::{
     delete_left, delete_word_part_with, delete_word_with, enter_text, line_break, shift, tab,
@@ -1111,7 +1111,9 @@ fn electric_char(
     }
     let position = selection.head;
     let close = on_electric_character(lang, model, ch, position)?;
-    let brackets = Brackets::configured(lang.config())?;
+    // Matched by the brackets of the language at the cursor.
+    let (embedded, _) = scoped_support(lang, model, position);
+    let brackets = Brackets::configured(embedded.as_ref().unwrap_or(lang).config())?;
     let line = model.line_content(position.row);
     let line_with_ch: Vec<u16> = strings::utf16(&format!("{line}{ch}"));
     let close_units = strings::utf16(&close);

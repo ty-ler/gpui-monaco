@@ -203,3 +203,27 @@ fn match_open_bracket() {
     assert_eq!(electric("\t}", "\t", 2), None);
     assert_eq!(electric("\t\t", "}", 3), Some("}".to_string()));
 }
+
+/// Monaco `IndentationLineProcessor.getProcessedTokens` removes
+/// `bracketsNew.getBracketRegExp()`, which covers `brackets` and
+/// `colorizedBracketPairs`, from strings, comments and regexes (#481).
+#[test]
+fn processed_lines_drop_brackets_and_colorized_pairs_in_strings() {
+    let config = LanguageConfiguration {
+        brackets: Some(brackets(&[("{", "}")])),
+        colorized_bracket_pairs: Some(brackets(&[("(", ")")])),
+        ..Default::default()
+    };
+    // `"({"` is a string, at columns 4 to 7.
+    let token_type = |p: Position| {
+        if (5..=8).contains(&p.column) {
+            StandardTokenType::String
+        } else {
+            StandardTokenType::Other
+        }
+    };
+    let ctx = LanguageContext::new(&config, &token_type);
+    let support = LanguageSupport::new(&ctx);
+    let model = text::Rope::from(r#"x = "({"; ("#);
+    assert_eq!(support.processed_line(&model, 0), r#"x = ""; ("#);
+}

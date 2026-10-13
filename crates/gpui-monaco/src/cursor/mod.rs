@@ -67,7 +67,7 @@ pub(crate) use edit::{
 pub use edit::{EditOperation, EditOperationType};
 pub(crate) use edit::{execute_edits_forcing, selections_from_markers};
 pub use in_place_replace::in_place_replace;
-pub use language::{LanguageContext, StandardTokenType};
+pub use language::{LanguageContext, LanguageScope, StandardTokenType};
 pub use language_typing::{
     delete_left_with_language, delete_word_part_with_language, delete_word_with_language,
     line_break_insert, line_break_with_language, outdent_with_language, snippet_auto_closed_pairs,

@@ -239,3 +239,33 @@ fn issue_141816() {
         }
     });
 }
+
+/// Monaco `ResolvedLanguageConfiguration` has onEnter support when
+/// `brackets`, `indentationRules` or `onEnterRules` is set, even to an empty
+/// list, and `OnEnterSupport` falls back to `()`, `{}` and `[]` only without
+/// `brackets` (#481).
+#[test]
+fn explicitly_empty_brackets_and_on_enter_rules_are_set() {
+    let indent = |config: LanguageConfiguration, before: &str| {
+        let ctx = LanguageContext::untokenized(&config);
+        LanguageSupport::new(&ctx)
+            .on_enter(AutoIndent::Full, "", before, "")
+            .map(|r| r.indent_action)
+    };
+    // `onEnterRules: []` alone gives the default bracket rules.
+    let config = LanguageConfiguration {
+        on_enter_rules: Some(Vec::new()),
+        ..Default::default()
+    };
+    assert_eq!(indent(config, "foo {"), Some(IndentAction::Indent));
+    // `brackets: []` has no bracket rules, even with indentation rules.
+    let config = LanguageConfiguration {
+        brackets: Some(Vec::new()),
+        indentation_rules: Some(super::language_configs::rules(
+            Pattern::new("^$x", ""),
+            Pattern::new("^$x", ""),
+        )),
+        ..Default::default()
+    };
+    assert_eq!(indent(config, "f("), None);
+}

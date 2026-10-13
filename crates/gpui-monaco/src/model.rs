@@ -1475,7 +1475,6 @@ impl TextModel {
             return single(model_language);
         }
         let line_start = rope.point_to_offset(text::Point::new(row, 0));
-        let line = rope.line(row);
         // Offsets in the text the syntax state was computed for.
         let inverse = (syntax.text.version() != self.buffer.version())
             .then(|| self.buffer.edits_since(syntax.text.version()).invert());
@@ -1487,7 +1486,7 @@ impl TextModel {
             // A Monarch grammar's embedded languages (`nextEmbedded`).
             let registry = highlighter.and_then(|highlighter| highlighter.registry());
             let old_rope = syntax.text.rope();
-            return language_runs(&line, line_start, |offset| {
+            return language_runs(&rope.line(row), line_start, |offset| {
                 let point = old_rope.offset_to_point(old(offset));
                 monarch
                     .language_at(point.row as usize, point.column as usize)
@@ -1519,7 +1518,7 @@ impl TextModel {
             .iter()
             .map(|layer| self.current_language(&layer.language))
             .collect();
-        language_runs(&line, line_start, |offset| {
+        language_runs(&rope.line(row), line_start, |offset| {
             let offset = old(offset);
             layers
                 .iter()
@@ -1534,6 +1533,39 @@ impl TextModel {
                 .map(|(_, language)| language.clone())
                 .or_else(|| model_language.clone())
         })
+    }
+
+    /// [`TextModel::line_language_runs`] for the cursor logic
+    /// ([`crate::cursor::LanguageContext::language_runs`]): UTF-16 columns,
+    /// and `None` for the model's language.
+    pub(crate) fn language_scopes(&self, row: u32) -> Vec<crate::cursor::LanguageScope> {
+        let model_id = self.language().map(|language| language.id.clone());
+        let runs = self.line_language_runs(row);
+        if let [run] = runs.as_slice()
+            && run.language.as_ref().map(|l| &l.id) == model_id.as_ref()
+        {
+            // The common case: the line is in the model's language.
+            return vec![crate::cursor::LanguageScope {
+                columns: 0..self.buffer.rope().line_len_utf16(row),
+                language: None,
+            }];
+        }
+        let line = self.buffer.rope().line(row);
+        let mut utf16 = 0;
+        let mut byte = 0;
+        runs.into_iter()
+            .map(|run| {
+                let start = utf16;
+                utf16 += crate::cursor::strings::utf16_len(&line[byte..run.columns.end]);
+                byte = run.columns.end;
+                crate::cursor::LanguageScope {
+                    columns: start..utf16,
+                    language: run
+                        .language
+                        .filter(|language| Some(&language.id) != model_id.as_ref()),
+                }
+            })
+            .collect()
     }
 
     /// Monaco's standard token type of the character at byte `offset`.
