@@ -9,8 +9,9 @@
 //!
 //! Deviations from Monaco:
 //! - The root's color defaults to none (the editor foreground) instead of
-//!   `#000000`; Monaco's standalone themes add an `editor.foreground` `''`
-//!   rule, which has the same effect.
+//!   `#000000`, for VS Code themes. `Theme::define` gives a theme without
+//!   `inherit` a `#000000` `''` rule first (an `editor.foreground` one
+//!   otherwise), so standalone themes resolve as Monaco's do.
 //! - Token backgrounds are not kept: Monaco's editor doesn't draw them.
 
 use std::collections::HashMap;

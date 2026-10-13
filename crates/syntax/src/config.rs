@@ -354,7 +354,11 @@ pub struct Pattern {
     /// The pattern source, as written in JavaScript.
     pub source: String,
     /// JavaScript regex flags. `i`, `m` and `s` are honored; `g`, `y`, `d`,
-    /// `u` and `v` change nothing here (matching is always Unicode-aware).
+    /// `u` and `v` change nothing here.
+    ///
+    /// The source keeps JavaScript's meaning, as Monarch rules do: `\d`
+    /// and `\w` are ASCII, `\s` is JavaScript's whitespace set, and `.`
+    /// matches anything but `\n`, `\r`, U+2028 and U+2029 (without `s`).
     pub flags: String,
     regex: Option<fancy_regex::Regex>,
     error: Option<String>,
@@ -367,22 +371,32 @@ impl Pattern {
     pub fn new(source: impl Into<String>, flags: impl Into<String>) -> Self {
         let source = source.into();
         let flags = flags.into();
-        let mut prefix = String::new();
         let mut error = None;
         for flag in flags.chars() {
-            match flag {
-                'i' | 'm' | 's' => {
-                    prefix.push_str("(?");
-                    prefix.push(flag);
-                    prefix.push(')');
-                }
-                'g' | 'y' | 'd' | 'u' | 'v' => {}
-                _ => error = Some(format!("unsupported regex flag `{flag}`")),
+            if !matches!(flag, 'i' | 'm' | 's' | 'g' | 'y' | 'd' | 'u' | 'v') {
+                error = Some(format!("unsupported regex flag `{flag}`"));
             }
         }
-        let regex = match error {
+        let translated = match error {
             Some(_) => None,
-            None => match fancy_regex::Regex::new(&format!("{prefix}{}", translate_js(&source))) {
+            None => {
+                let multiline = if flags.contains('m') { "(?m)" } else { "" };
+                match crate::monarch::js_regex::translate_with(
+                    &source,
+                    flags.contains('i'),
+                    flags.contains('s'),
+                ) {
+                    Ok(translated) => Some(format!("{multiline}{translated}")),
+                    Err(err) => {
+                        error = Some(err);
+                        None
+                    }
+                }
+            }
+        };
+        let regex = match translated {
+            None => None,
+            Some(translated) => match fancy_regex::Regex::new(&translated) {
                 Ok(regex) => Some(regex),
                 Err(err) => {
                     let mut message = err.to_string();
@@ -422,73 +436,6 @@ impl Pattern {
             .as_ref()
             .is_some_and(|regex| regex.is_match(text).unwrap_or(false))
     }
-}
-
-/// Whether `chars` continues with a class escape such as `\d`.
-fn is_class_escape_next(chars: &std::iter::Peekable<std::str::Chars>) -> bool {
-    let mut ahead = chars.clone();
-    ahead.next() == Some('\\') && matches!(ahead.next(), Some('w' | 'W' | 'd' | 'D' | 's' | 'S'))
-}
-
-/// Rewrites JavaScript regex syntax that means something else (or nothing)
-/// to `fancy-regex`: `[^]` (any character) and `[]` (nothing), and, inside
-/// character classes, a literal `[`, hyphens next to class escapes, and the
-/// `&&`, `--` and `~~` that Rust reads as set operations.
-fn translate_js(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut chars = source.chars().peekable();
-    let mut in_class = false;
-    while let Some(c) = chars.next() {
-        match c {
-            '\\' => {
-                out.push(c);
-                let Some(next) = chars.next() else {
-                    continue;
-                };
-                out.push(next);
-                // JavaScript (Annex B) reads `-` after a class escape, as in
-                // `[\w-.]`, as a literal hyphen; Rust rejects the range.
-                let class_escape = matches!(next, 'w' | 'W' | 'd' | 'D' | 's' | 'S');
-                if in_class && class_escape && chars.peek() == Some(&'-') {
-                    chars.next();
-                    out.push_str(r"\-");
-                }
-            }
-            '-' if in_class && is_class_escape_next(&chars) => out.push_str(r"\-"),
-            '[' if !in_class => {
-                let rest: String = chars.clone().take(2).collect();
-                if rest.starts_with("^]") {
-                    out.push_str(r"[\s\S]");
-                    chars.nth(1);
-                } else if rest.starts_with(']') {
-                    out.push_str(r"[^\s\S]");
-                    chars.next();
-                } else {
-                    in_class = true;
-                    out.push(c);
-                    // Keep a negation; `[^]` and `[]` were handled above.
-                    if chars.peek() == Some(&'^') {
-                        out.push('^');
-                        chars.next();
-                    }
-                }
-            }
-            '[' => out.push_str(r"\["),
-            ']' if in_class => {
-                in_class = false;
-                out.push(c);
-            }
-            '&' | '-' | '~' if in_class && chars.peek() == Some(&c) => {
-                chars.next();
-                out.push('\\');
-                out.push(c);
-                out.push('\\');
-                out.push(c);
-            }
-            _ => out.push(c),
-        }
-    }
-    out
 }
 
 impl<'de> Deserialize<'de> for Pattern {
@@ -698,6 +645,43 @@ mod tests {
         // Unsupported syntax reports why.
         let bad = Pattern::new("(?<=a+", "");
         assert!(bad.regex().is_none() && bad.error().is_some());
+    }
+
+    /// Monaco's patterns are JavaScript `RegExp`s: without `u`, `\w` and
+    /// `\d` are ASCII and `.` stops at `\r`, U+2028 and U+2029.
+    #[test]
+    fn javascript_classes() {
+        let find = |source: &str, flags: &str, text: &str| {
+            let pattern = Pattern::new(source, flags);
+            let regex = pattern
+                .regex()
+                .unwrap_or_else(|| panic!("{:?}", pattern.error()));
+            regex.find(text).unwrap().map(|m| m.as_str().to_string())
+        };
+        assert_eq!(find(r"\w+", "", "naïve").as_deref(), Some("na"));
+        assert_eq!(find(r"\w+", "u", "naïve").as_deref(), Some("na"));
+        assert_eq!(find(r"\d+", "", "٣12").as_deref(), Some("12"));
+        assert_eq!(find(r"\s", "", "a\u{85}b"), None);
+        assert_eq!(find(r"\s", "", "a\u{feff}b").as_deref(), Some("\u{feff}"));
+        assert_eq!(find(r"a.+", "", "ab\rc").as_deref(), Some("ab"));
+        assert_eq!(find(r"a.+", "", "ab\u{2028}c").as_deref(), Some("ab"));
+        // `s` makes `.` match line terminators, `m` anchors at lines.
+        assert_eq!(find(r"a.+", "s", "ab\rc").as_deref(), Some("ab\rc"));
+        assert_eq!(find(r"^b", "m", "a\nb").as_deref(), Some("b"));
+        assert_eq!(find(r"^b", "", "a\nb"), None);
+        // `i` still folds case, and JavaScript escapes are understood.
+        assert_eq!(find(r"AB", "i", "xaby").as_deref(), Some("ab"));
+        assert_eq!(find(r"\x41B", "", "AB").as_deref(), Some("AB"));
+    }
+
+    #[test]
+    fn javascript_errors() {
+        // Syntax JavaScript rejects reports why and never matches.
+        for source in ["a\\", "[a", r"\u{110000}"] {
+            let bad = Pattern::new(source, "");
+            assert!(bad.regex().is_none() && bad.error().is_some(), "{source}");
+            assert!(!bad.is_match("a"));
+        }
     }
 
     #[test]

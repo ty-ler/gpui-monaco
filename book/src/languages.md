@@ -77,8 +77,8 @@ Every key is optional (`None` in `LanguageConfiguration`), so a configuration ca
 
 Patterns use the `fancy-regex` crate, so VS Code's lookaheads and backreferences work.
 
-- **JavaScript syntax:** syntax that Rust regexes read differently is translated: `[^]`, `[]`, a `[` inside a class, and hyphens next to `\w`-style escapes.
-- **Flags:** `i`, `m` and `s` are honored.
+- **JavaScript syntax:** patterns are translated as Monarch rules are, so they keep JavaScript's meaning: `\d` and `\w` are ASCII (`\w+` finds `na` in `naïve`), `\s` is JavaScript's whitespace set, `.` matches anything but `\n`, `\r`, U+2028 and U+2029, and `[^]`, `[]`, a `[` inside a class, hyphens next to `\w`-style escapes and escapes such as `\uXXXX` and `\cX` mean what they do in JavaScript.
+- **Flags:** `i`, `m` and `s` are honored (`s` lets `.` match line terminators).
 - **Errors:** a pattern that still doesn't compile never matches. `Pattern::error()` says why, and `config.patterns()` lists every regex so you can check yours in a test.
 
 ## Adding a language
@@ -106,7 +106,7 @@ A model created with `with_uri` and no language gets one from the uri when it's 
 1. an exact file name (`with_file_names`), ignoring case;
 2. the longest matching `with_filename_patterns` glob, matched against the whole path when it contains a `/`;
 3. the longest matching extension, so `.d.ts` beats `.ts`;
-4. the first line's `with_first_line` regex, e.g. `^#!.*\bnode`.
+4. the first line's `with_first_line` regex, e.g. `^#!.*\bnode`: a JavaScript regex anchored at the line start, as Monaco adds a `^` when it's missing.
 
 Among equal matches, the language registered last wins. `with_mimetypes` sets MIME types for `language_for_mime_type`; a registration without any gets `text/x-<id>`, as in Monaco, and when two languages claim a MIME type the one registered last wins. Models (`with_language`, `set_language`) and `colorize` take a MIME type wherever they take a language id. The bundled languages use VS Code's associations.
 
