@@ -320,9 +320,10 @@ pub(crate) fn find_scroll_widget_state(
 }
 
 /// Whether a keystroke stops at a focused sticky line. Monaco focuses its
-/// DOM node, so typing and the text's own keys (which need
-/// `editorTextFocus`) don't reach the text; its keys (Up, Down, Enter,
-/// Escape), function keys and shortcuts with Ctrl, Alt or Cmd go on.
+/// DOM node, so typing doesn't reach the text; its keys (Up, Down, Enter,
+/// Escape), function keys and shortcuts with Ctrl, Alt or Cmd go on to the
+/// bindings, where the text's own (which need `textInputFocus`, off while
+/// a sticky line is focused) don't apply.
 pub(crate) fn sticky_swallows(keystroke: &gpui::Keystroke) -> bool {
     let modifiers = &keystroke.modifiers;
     if modifiers.control || modifiers.alt || modifiers.platform || modifiers.function {

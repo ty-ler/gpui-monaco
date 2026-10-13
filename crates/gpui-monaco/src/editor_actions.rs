@@ -1238,9 +1238,35 @@ impl CodeEditor {
         else {
             return false;
         };
-        window.focus(&self.focus_handle, cx);
-        window.dispatch_action(action, cx);
+        self.dispatch_to_editor(action, true, window, cx);
         true
+    }
+
+    /// Dispatches `action` as if its key were pressed, focusing the editor
+    /// first if `focus`. While one of the editor's widgets (the find input,
+    /// a focused hover, …) has the focus rather than its text, it goes to
+    /// the editor itself and the focus stays: Monaco runs a command on the
+    /// editor it resolved (with widget focus, `getFocusedCodeEditor`),
+    /// while dispatching to the focused element would run it in the
+    /// widget's input.
+    fn dispatch_to_editor(
+        &self,
+        action: Box<dyn gpui::Action>,
+        focus: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.focus_handle.is_focused(window) && self.focus_handle.contains_focused(window, cx) {
+            let focus_handle = self.focus_handle.clone();
+            window.defer(cx, move |window, cx| {
+                focus_handle.dispatch_action(action.as_ref(), window, cx)
+            });
+            return;
+        }
+        if focus {
+            window.focus(&self.focus_handle, cx);
+        }
+        window.dispatch_action(action, cx);
     }
 
     /// Runs the host action `id` ([`CodeEditor::add_action`] or
@@ -1368,7 +1394,7 @@ impl CodeEditor {
                 .and_then(|args| cx.build_action(name, Some(args)).ok())
                 .map_or_else(|| cx.build_action(name, None), Ok)
             {
-                window.dispatch_action(action, cx);
+                self.dispatch_to_editor(action, false, window, cx);
                 return true;
             }
         }
@@ -1386,7 +1412,7 @@ impl CodeEditor {
         }
         match cx.build_action(id, None) {
             Ok(action) => {
-                window.dispatch_action(action, cx);
+                self.dispatch_to_editor(action, false, window, cx);
                 true
             }
             Err(_) => false,

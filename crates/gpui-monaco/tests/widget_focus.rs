@@ -379,3 +379,140 @@ fn editing_keys_in_the_accessible_diff_viewer_leave_the_text(cx: &mut TestAppCon
     press("backspace delete secondary-x tab a", cx);
     assert_eq!(text(&editor, cx), "a\nx\nc");
 }
+
+// ----- #472: host actions and keybinding rules from a widget's input -----
+
+/// What the find input holds (the find widget's search string).
+fn find_query(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
+    cx.run_until_parked();
+    editor.read_with(cx, |e, _| e.find_options().query.clone())
+}
+
+/// Opens the find widget with the document's `abc` selected, and types
+/// `abc` into its input.
+fn find_abc(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) {
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::new(p(0, 0), p(0, 3))], cx)
+    });
+    press("secondary-f", cx);
+    cx.simulate_keystrokes("secondary-a");
+    cx.simulate_input("abc");
+    draw(cx);
+    assert_eq!(find_query(editor, cx), "abc");
+    assert!(widget_focused(editor, cx));
+}
+
+/// A host action that replaces the text of the editor it runs on.
+fn ran_action(id: &'static str) -> gpui_monaco::EditorActionDescriptor {
+    gpui_monaco::EditorActionDescriptor::new(id, "Ran", |editor, _, cx| {
+        editor.model().update(cx, |m, cx| m.set_value("ran", cx))
+    })
+}
+
+/// §H.1: Monaco's keybindings run on the editor with widget focus
+/// (`getFocusedCodeEditor`), as its find input is a plain `<input>`: an
+/// `addEditorAction` key pressed in the find input acts on the editor, and
+/// the find input keeps its text and the focus.
+#[gpui::test]
+fn host_actions_from_the_find_input_run_on_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc def\n", cx);
+    let _action = cx.update(|_, cx| {
+        gpui_monaco::add_editor_action(cx, ran_action("test.ran").keybinding("ctrl-alt-u"))
+    });
+    find_abc(&editor, cx);
+    press("ctrl-alt-u", cx);
+    assert_eq!(text(&editor, cx), "ran");
+    assert_eq!(find_query(&editor, cx), "abc");
+    assert!(widget_focused(&editor, cx));
+}
+
+/// §H.1: a keybinding rule's command runs on the editor too, and the
+/// focus stays in the find input.
+#[gpui::test]
+fn keybinding_rules_from_the_find_input_run_on_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc def\n", cx);
+    let _rule = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rule(
+            cx,
+            gpui_monaco::KeybindingRule::new("ctrl-shift-u", "editor.action.transformToUppercase"),
+        )
+        .unwrap()
+    });
+    find_abc(&editor, cx);
+    press("ctrl-shift-u", cx);
+    assert_eq!(text(&editor, cx), "ABC def\n");
+    assert_eq!(find_query(&editor, cx), "abc");
+    assert!(widget_focused(&editor, cx));
+}
+
+/// §H.1: the find input has Monaco's `editorFocus` but not
+/// `editorTextFocus`, so a rule for the text doesn't apply in it.
+#[gpui::test]
+fn editor_text_focus_rules_skip_the_find_input(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc def\n", cx);
+    let _rules = cx.update(|_, cx| {
+        gpui_monaco::add_keybinding_rules(
+            cx,
+            vec![
+                gpui_monaco::KeybindingRule::new(
+                    "ctrl-shift-u",
+                    "editor.action.transformToUppercase",
+                )
+                .when("CodeEditor && editorTextFocus"),
+                gpui_monaco::KeybindingRule::new(
+                    "ctrl-shift-y",
+                    "editor.action.transformToUppercase",
+                )
+                .when("CodeEditor && editorFocus"),
+            ],
+        )
+        .unwrap()
+    });
+    find_abc(&editor, cx);
+    press("ctrl-shift-u", cx);
+    assert_eq!(text(&editor, cx), "abc def\n");
+    assert_eq!(find_query(&editor, cx), "abc");
+    press("ctrl-shift-y", cx);
+    assert_eq!(text(&editor, cx), "ABC def\n");
+    assert_eq!(find_query(&editor, cx), "abc");
+    // From the text, the `editorTextFocus` rule applies.
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::new(p(0, 4), p(0, 7))], cx)
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    draw(cx);
+    press("ctrl-shift-u", cx);
+    assert_eq!(text(&editor, cx), "ABC DEF\n");
+}
+
+/// §H.1: the quick input's box hands host actions to the editor too.
+#[gpui::test]
+fn host_actions_from_the_quick_input_run_on_the_editor(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("fn main() {}\n", cx);
+    let _action = cx.update(|_, cx| {
+        gpui_monaco::add_editor_action(cx, ran_action("test.ran").keybinding("ctrl-alt-u"))
+    });
+    press("f1", cx);
+    let input = editor
+        .read_with(cx, |e, cx| e.quick_access_input_for_tests(cx))
+        .expect("the quick input");
+    press("ctrl-alt-u", cx);
+    assert_eq!(text(&editor, cx), "ran");
+    assert_eq!(input.read_with(cx, |i, cx| i.model().read(cx).text()), ">");
+}
+
+/// §H.1: the text's keys still edit a widget's input (`textInputFocus`),
+/// while its editor has `editorFocus` without `editorTextFocus`.
+#[gpui::test]
+fn widget_inputs_keep_their_text_keys(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abc def\n", cx);
+    find_abc(&editor, cx);
+    press("backspace", cx);
+    assert_eq!(find_query(&editor, cx), "ab");
+    press("left delete", cx);
+    assert_eq!(find_query(&editor, cx), "a");
+    assert_eq!(text(&editor, cx), "abc def\n");
+    let keys = editor.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(keys.contains("editorFocus"));
+    assert!(!keys.contains("editorTextFocus"));
+}

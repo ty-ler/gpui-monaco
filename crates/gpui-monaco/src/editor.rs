@@ -788,8 +788,11 @@ pub struct CodeEditor {
     pub(crate) minimap_slider_hovered: bool,
     pub(crate) minimap_drag: Option<crate::minimap::MinimapDrag>,
     pub(crate) fold_task: Option<Task<()>>,
-    /// The editor has focus (Monaco `hasWidgetFocus`, for bracket matching).
+    /// The editor's text has focus (Monaco `hasTextFocus`).
     pub(crate) has_focus: bool,
+    /// The editor's text or one of its widgets has focus (Monaco
+    /// `hasWidgetFocus`, for bracket matching).
+    pub(crate) widget_focused: bool,
     /// Rows hidden by [`CodeEditor::set_hidden_areas`], besides folds, by
     /// source (Monaco keeps them per source).
     hidden_areas: Vec<(Option<gpui::SharedString>, Vec<Range<u32>>)>,
@@ -995,6 +998,7 @@ impl CodeEditor {
             cx.subscribe(&model, Self::on_model_event),
             cx.on_focus(&focus_handle, window, |this, _, cx| {
                 this.has_focus = true;
+                this.widget_focused = true;
                 this.update_bracket_highlights(cx);
                 this.restart_blink(cx);
                 cx.emit(CodeEditorEvent::Focused);
@@ -1021,6 +1025,8 @@ impl CodeEditor {
             }),
             // Monaco's widget focus: the text or a widget inside the editor.
             cx.on_focus_in(&focus_handle, window, |this, _, cx| {
+                this.widget_focused = true;
+                this.update_bracket_highlights(cx);
                 this.find_widget_focus_in(cx);
                 cx.emit(CodeEditorEvent::WidgetFocused);
             }),
@@ -1030,6 +1036,10 @@ impl CodeEditor {
             // the hover goes too (focusing it, Cmd/Ctrl+K Cmd/Ctrl+I, keeps
             // it).
             cx.on_focus_out(&focus_handle, window, |this, _, _, cx| {
+                // Monaco `BracketMatchingController` clears the brackets
+                // only now, not when a widget takes the focus.
+                this.widget_focused = false;
+                this.update_bracket_highlights(cx);
                 this.hide_hover(cx);
                 this.hide_suggest(cx);
                 this.hide_signature_help(cx);
@@ -1221,6 +1231,7 @@ impl CodeEditor {
             minimap_drag: None,
             fold_task: None,
             has_focus: false,
+            widget_focused: false,
             fold_requested: None,
             fold_epoch: 0,
             hidden_areas: Vec::new(),
@@ -7226,10 +7237,13 @@ impl Render for CodeEditor {
         let accessibility_off =
             self.options.accessibility_support == crate::options::AccessibilitySupport::Off;
         // Focus listeners can miss changes (e.g. before the window is
-        // active), so the frame keeps `has_focus` true to the window.
+        // active), so the frame keeps `has_focus` and `widget_focused` true
+        // to the window.
         let focused = self.focus_handle.is_focused(window);
-        if focused != self.has_focus {
+        let widget_focused = focused || self.focus_handle.contains_focused(window, cx);
+        if focused != self.has_focus || widget_focused != self.widget_focused {
             self.has_focus = focused;
+            self.widget_focused = widget_focused;
             self.update_bracket_highlights(cx);
         }
         let mut key_context = gpui::KeyContext::new_with_defaults();
@@ -7910,13 +7924,19 @@ impl Render for CodeEditor {
                 }
                 this.open_quick_access(">", window, cx)
             }))
+            // A widget's input passes the host's actions and keybinding
+            // rules on to the editor around it: Monaco's inputs are plain
+            // `<input>`s, and its keybindings run on the editor with widget
+            // focus (`getFocusedCodeEditor`).
             .on_action(cx.listener(|this, action: &RunAction, window, cx| {
-                if !this.run_action(&action.id, window, cx) {
+                if this.widget_input || !this.run_action(&action.id, window, cx) {
                     cx.propagate();
                 }
             }))
             .on_action(cx.listener(|this, action: &RunCommand, window, cx| {
-                if !this.run_command(&action.id, action.args.clone(), window, cx) {
+                if this.widget_input
+                    || !this.run_command(&action.id, action.args.clone(), window, cx)
+                {
                     cx.propagate();
                 }
             }))
