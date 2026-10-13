@@ -688,6 +688,12 @@ impl LspClient {
                 gpui_monaco::providers::refresh_semantic_tokens(cx);
                 Ok(Value::Null)
             }
+            // `vscode-languageclient` fires its code lens provider's
+            // `onDidChangeCodeLenses`.
+            lsp_types::request::CodeLensRefresh::METHOD => {
+                gpui_monaco::providers::refresh_code_lenses(cx);
+                Ok(Value::Null)
+            }
             RegisterCapability::METHOD
             | UnregisterCapability::METHOD
             | WorkDoneProgressCreate::METHOD => Ok(Value::Null),
@@ -819,6 +825,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "executeCommand": {},
             "inlayHint": { "refreshSupport": true },
             "semanticTokens": { "refreshSupport": true },
+            "codeLens": { "refreshSupport": true },
             "configuration": true,
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
@@ -897,6 +904,10 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
                 "resolveSupport": { "properties": ["edit"] },
             },
             "documentHighlight": {},
+            "codeLens": {},
+            "documentLink": { "tooltipSupport": true },
+            "colorProvider": {},
+            "linkedEditingRange": {},
             "formatting": {},
             "rangeFormatting": {},
             "onTypeFormatting": {},

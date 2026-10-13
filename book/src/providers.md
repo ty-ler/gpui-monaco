@@ -303,7 +303,7 @@ A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbo
 
 ## Code lens
 
-A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view. Lenses on the same line show together, separated by `|`, starting above the line's first non-whitespace character and scrolling sideways with the text. Until a line's lenses have a command, its zone stays empty; they fade in once resolved, and "no commands" shows only when resolving failed. When lenses are asked for again after an edit, a line that still has lenses keeps showing its old titles until the new ones resolve, without fading in again. A title's `$(name)` draws a codicon, and a command's `tooltip` shows when hovering its lens (Monaco `Command.tooltip`). Their font, height and color follow the editor's font size, zoom and theme (`editorCodeLens.foreground`).
+A `CodeLensProvider` puts clickable commands above lines, such as "3 references" or "Run test". `provide_code_lenses` can return lenses without a `command`; `resolve_code_lens` then fills them in when they scroll into view, getting back the lens's `data` (whatever the provider put there, like a language server's lens). Lenses on the same line show together, separated by `|`, starting above the line's first non-whitespace character and scrolling sideways with the text. Until a line's lenses have a command, its zone stays empty; they fade in once resolved, and "no commands" shows only when resolving failed. When lenses are asked for again after an edit, a line that still has lenses keeps showing its old titles until the new ones resolve, without fading in again. A title's `$(name)` draws a codicon, and a command's `tooltip` shows when hovering its lens (Monaco `Command.tooltip`). Their font, height and color follow the editor's font size, zoom and theme (`editorCodeLens.foreground`).
 
 Clicking a lens runs its command through [`register_command`](editing.md) handlers. If no handler is registered, the editor emits `CodeEditorEvent::ExecuteCommand` for the host. "Show CodeLens Commands for Current Line" (Monaco's `codelens.showLensesInCurrentLine`) lists the cursor line's commands in the quick input instead. The `code_lens`, `code_lens_font_family` and `code_lens_font_size` options control them.
 
@@ -422,7 +422,8 @@ impl LinkProvider for Issues {
     fn provide_links(&self, context: &ProviderContext, cx: &mut App)
         -> Task<anyhow::Result<Vec<DocumentLink>>> { /* … */ }
 
-    // Optional: fill in `url` when the link is followed.
+    // Optional: fill in `url` when the link is followed (`link.data` is
+    // whatever `provide_links` put there).
     fn resolve_link(&self, link: &DocumentLink, cx: &mut App)
         -> Option<Task<anyhow::Result<DocumentLink>>> { None }
 }

@@ -1591,6 +1591,9 @@ pub struct CodeLens {
     pub command: Option<Command>,
     /// Identifies the lens to its provider (Monaco `id`).
     pub id: Option<SharedString>,
+    /// Data for [`CodeLensProvider::resolve_code_lens`], e.g. the language
+    /// server's lens (`monaco-languageclient`'s `ProtocolCodeLens.data`).
+    pub data: Option<serde_json::Value>,
 }
 
 /// Supplies code lenses (Monaco `CodeLensProvider`): clickable commands
@@ -2234,6 +2237,9 @@ pub struct DocumentLink {
     pub url: Option<SharedString>,
     /// The hover label instead of "Follow link".
     pub tooltip: Option<SharedString>,
+    /// Data for [`LinkProvider::resolve_link`], e.g. the language server's
+    /// link (`monaco-languageclient`'s `ProtocolDocumentLink.data`).
+    pub data: Option<serde_json::Value>,
 }
 
 /// Finds links in a document (Monaco `LinkProvider`). The editor also

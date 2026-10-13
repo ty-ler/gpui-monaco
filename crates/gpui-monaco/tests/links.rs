@@ -134,6 +134,7 @@ impl LinkProvider for Issues {
                 range: PointUtf16::new(0, ix as u32)..PointUtf16::new(0, ix as u32 + 3),
                 url: None,
                 tooltip: Some("Open issue".into()),
+                data: None,
             })
             .collect();
         Task::ready(Ok(links))
@@ -297,6 +298,7 @@ fn fixed(row: u32, start: u32, end: u32, url: &str) -> Fixed {
         range: PointUtf16::new(row, start)..PointUtf16::new(row, end),
         url: Some(url.to_string().into()),
         tooltip: None,
+        data: None,
     }])
 }
 
@@ -434,11 +436,13 @@ fn execute_link_provider_merges_like_the_editor(cx: &mut TestAppContext) {
                     range: PointUtf16::new(0, 0)..PointUtf16::new(0, 1),
                     url: Some("https://x".into()),
                     tooltip: None,
+                    data: None,
                 },
                 DocumentLink {
                     range: PointUtf16::new(0, 23)..PointUtf16::new(0, 26),
                     url: Some("https://worse/12".into()),
                     tooltip: None,
+                    data: None,
                 },
             ]),
         );

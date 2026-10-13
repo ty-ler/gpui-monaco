@@ -25,6 +25,7 @@ impl LinkProvider for Link {
             range: PointUtf16::new(0, self.1)..PointUtf16::new(0, self.1 + 1),
             url: Some(self.0.into()),
             tooltip: None,
+            data: None,
         }]))
     }
 }

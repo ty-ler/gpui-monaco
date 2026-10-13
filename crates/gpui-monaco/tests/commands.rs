@@ -1449,6 +1449,7 @@ fn api_commands_ask_providers(cx: &mut TestAppContext) {
                 range: p(0, 0)..p(0, 2),
                 url: None,
                 tooltip: None,
+                data: None,
             }]))
         }
 
