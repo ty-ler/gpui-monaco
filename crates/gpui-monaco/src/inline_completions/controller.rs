@@ -41,7 +41,7 @@ use gpui::{
 use text::PointUtf16;
 
 use super::ghost_text::{
-    GhostLinePiece, GhostText, GhostTextMode, GhostTextViewData, TextReplacement,
+    GhostLinePiece, GhostText, GhostTextMode, GhostTextViewData, LineSource, TextReplacement,
     compute_ghost_text, compute_ghost_text_view_data, remove_common_prefix_and_suffix,
     secondary_edits, single_text_edit_augments, single_text_remove_common_prefix,
 };
@@ -493,7 +493,7 @@ fn is_visible(
     edit: &TextReplacement,
     original_start: PointUtf16,
     cursor: PointUtf16,
-    line_text: &dyn Fn(u32) -> String,
+    line_text: &dyn LineSource,
 ) -> bool {
     if edit.range.start != original_start {
         return false;
@@ -505,17 +505,14 @@ fn is_visible(
     if m.range.start == m.range.end && m.text.is_empty() {
         return false;
     }
-    let line = line_text(m.range.start.row);
-    let units: Vec<u16> = line.encode_utf16().collect();
-    let start = (m.range.start.column as usize).min(units.len());
-    let end = (m.range.end.column as usize).min(units.len());
-    let original = String::from_utf16_lossy(&units[start..end]);
+    let original = String::from_utf16_lossy(
+        &line_text.line_units(m.range.start.row, m.range.start.column..m.range.end.column),
+    );
     let filter = m.text.replace("\r\n", "\n");
     let index = cursor.column.saturating_sub(m.range.start.column) as usize;
     let (mut filter_before, mut filter_after) = utf16_split(&filter, index);
     let (mut original_before, mut original_after) = utf16_split(&original, index);
-    let indentation = line.encode_utf16().count() as u32
-        - line.trim_start_matches([' ', '\t']).encode_utf16().count() as u32;
+    let indentation = line_text.leading_whitespace_len(m.range.start.row) as u32;
     if m.range.start.column <= indentation {
         original_before = original_before.trim_start().to_string();
         if original_before.is_empty() {
@@ -1245,14 +1242,14 @@ impl CodeEditor {
         // Monaco `createStateWithAppliedResults`: the preserved item's kind
         // wins; else completions win when one is visible at the cursor, else
         // only inline edits are kept.
-        let line_text = |row: u32| rope.line(row);
+        let line_text: &text::Rope = &rope;
         let prefer_completions = match &preserved {
             Some(item) => item.edit.is_none(),
             None => items.iter().any(|item| {
                 item.edit.is_none()
                     && self.item_shows_at(item, position, cx)
                     && self.current_edit(item, cx).is_some_and(|edit| {
-                        is_visible(&edit, item.original_start, position, &line_text)
+                        is_visible(&edit, item.original_start, position, line_text)
                     })
             }),
         };
@@ -1348,11 +1345,11 @@ impl CodeEditor {
             }
             None => {
                 let rope = self.model().read(cx).buffer().rope().clone();
-                let line_text = |row: u32| rope.line(row);
+                let line_text: &text::Rope = &rope;
                 self.current_edit(item, cx).is_some_and(|edit| {
                     edit.range.start <= position
                         && position <= edit.range.end
-                        && is_visible(&edit, item.original_start, position, &line_text)
+                        && is_visible(&edit, item.original_start, position, line_text)
                 })
             }
         }
@@ -1369,7 +1366,7 @@ impl CodeEditor {
         let rope = self.model().read(cx).buffer().rope().clone();
         let line = rope.line_len_utf16(position.row);
         let word_start = self.word_start_at(position, cx);
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         lists.iter().flat_map(|list| &list.list.items).any(|item| {
             if item.is_snippet || item.is_inline_edit {
                 return true;
@@ -1381,7 +1378,7 @@ impl CodeEditor {
                 range: range.clone(),
                 text: item.insert_text.clone(),
             };
-            is_visible(&edit, range.start, position, &line_text)
+            is_visible(&edit, range.start, position, line_text)
         })
     }
 
@@ -1429,13 +1426,13 @@ impl CodeEditor {
     fn completion_visible(&self, cx: &gpui::App) -> bool {
         let cursor = self.cursors.primary().position;
         let rope = self.model().read(cx).buffer().rope().clone();
-        let line_text = |row: u32| rope.line(row);
+        let line_text: &text::Rope = &rope;
         self.inline.items.iter().any(|item| {
             item.edit.is_none()
                 && self.item_shows_at(item, cursor, cx)
                 && self
                     .current_edit(item, cx)
-                    .is_some_and(|edit| is_visible(&edit, item.original_start, cursor, &line_text))
+                    .is_some_and(|edit| is_visible(&edit, item.original_start, cursor, line_text))
         })
     }
 
@@ -2122,7 +2119,7 @@ impl CodeEditor {
             return None;
         }
         let cursor = self.cursors.primary().position;
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         let mut seen = HashSet::new();
         let visible: Vec<(usize, TextReplacement)> = self
             .inline
@@ -2132,7 +2129,7 @@ impl CodeEditor {
             .filter(|(_, item)| item.edit.is_none() && self.item_shows_at(item, cursor, cx))
             .filter_map(|(ix, item)| {
                 let edit = self.current_edit(item, cx)?;
-                is_visible(&edit, item.original_start, cursor, &line_text).then_some((ix, edit))
+                is_visible(&edit, item.original_start, cursor, line_text).then_some((ix, edit))
             })
             .filter(|(_, edit)| seen.insert((edit.text.clone(), edit.range.start)))
             .collect();
@@ -2152,7 +2149,7 @@ impl CodeEditor {
         let edit = &visible[selected].1;
         let ghost = compute_ghost_text(
             edit,
-            &line_text,
+            line_text,
             Self::ghost_mode(self.options.inline_suggest.mode),
             Some(cursor),
             0,
@@ -2184,9 +2181,9 @@ impl CodeEditor {
             return None;
         }
         let (range, text) = self.selected_suggestion_edit()?;
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         let suggest_edit =
-            single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+            single_text_remove_common_prefix(&TextReplacement { range, text }, line_text);
         let augmentation = self.inline_suggest_augmentation(&suggest_edit, cx);
         if !self.options.suggest.preview && augmentation.is_none() {
             return None;
@@ -2195,7 +2192,7 @@ impl CodeEditor {
         let length = edit.text.encode_utf16().count();
         let ghost = compute_ghost_text(
             &edit,
-            &line_text,
+            line_text,
             Self::ghost_mode(self.options.suggest.preview_mode),
             Some(self.cursors.primary().position),
             length,
@@ -2419,14 +2416,14 @@ impl CodeEditor {
             .iter()
             .map(|cursor| cursor.position)
             .collect();
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         secondary_edits(self.snapshot.rope(), &positions, primary)
             .into_iter()
             .zip(&positions[positions.len().min(1)..])
             .filter_map(|(edit, &position)| {
                 let edit = edit?;
                 let ghost =
-                    compute_ghost_text(&edit, &line_text, mode, Some(position), preview_length)?;
+                    compute_ghost_text(&edit, line_text, mode, Some(position), preview_length)?;
                 Some((edit, ghost))
             })
             .collect()
@@ -3007,10 +3004,10 @@ impl CodeEditor {
                 .map(|(edit, _)| edit),
         );
         let cursors = {
-            let line_text = |row: u32| self.snapshot.line(row);
+            let line_text: &text::Rope = &self.snapshot;
             let minimal: Vec<TextReplacement> = edits
                 .iter()
-                .map(|edit| remove_common_prefix_and_suffix(edit, &line_text))
+                .map(|edit| remove_common_prefix_and_suffix(edit, line_text))
                 .collect();
             end_positions_after_applying(&minimal)
         };
@@ -3320,7 +3317,7 @@ impl CodeEditor {
         suggest_edit: &TextReplacement,
         cx: &gpui::App,
     ) -> Option<(usize, TextReplacement)> {
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         self.inline
             .suggest_items
             .iter()
@@ -3335,7 +3332,7 @@ impl CodeEditor {
                         range: edit.range.start..edit.range.end.min(suggest_edit.range.end),
                         text: edit.text.clone(),
                     };
-                    let trimmed = single_text_remove_common_prefix(&restricted, &line_text);
+                    let trimmed = single_text_remove_common_prefix(&restricted, line_text);
                     TextReplacement {
                         range: trimmed.range.start..edit.range.end,
                         text: trimmed.text,
@@ -3356,8 +3353,8 @@ impl CodeEditor {
         // Monaco `selectedInlineCompletion`, shown or not (the suggest
         // widget hides it).
         let (visible, selected, _) = self.inline_state_unchecked(cx)?;
-        let line_text = |row: u32| self.snapshot.line(row);
-        let to_preselect = single_text_remove_common_prefix(&visible[selected].1, &line_text);
+        let line_text: &text::Rope = &self.snapshot;
+        let to_preselect = single_text_remove_common_prefix(&visible[selected].1, line_text);
         let count = self.suggest.session.as_ref()?.model.filtered().len();
         let mut best: Option<(usize, usize)> = None;
         for index in 0..count {
@@ -3365,7 +3362,7 @@ impl CodeEditor {
                 continue;
             };
             let edit =
-                single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+                single_text_remove_common_prefix(&TextReplacement { range, text }, line_text);
             let length = edit.text.encode_utf16().count();
             // Monaco `findFirstMax`: the first of the longest.
             if length > 0
@@ -3387,9 +3384,9 @@ impl CodeEditor {
         text: String,
         cx: &mut Context<Self>,
     ) {
-        let line_text = |row: u32| self.snapshot.line(row);
+        let line_text: &text::Rope = &self.snapshot;
         let item_edit =
-            single_text_remove_common_prefix(&TextReplacement { range, text }, &line_text);
+            single_text_remove_common_prefix(&TextReplacement { range, text }, line_text);
         let Some((ix, _)) = self.inline_suggest_augmentation(&item_edit, cx) else {
             return;
         };

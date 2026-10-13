@@ -475,6 +475,38 @@ impl Rope {
         self.chunks_in_range(self.line_range(row)).collect()
     }
 
+    /// The UTF-16 code units of `row` (excluding the newline) in `columns`,
+    /// like slicing the line's code units: both ends are clamped to the
+    /// line's length, an end before the start reads nothing, and a column
+    /// inside a surrogate pair splits it. Only the text around `columns` is
+    /// read, so this is cheap on a long line. Rows past the end are empty.
+    pub fn line_units_utf16(&self, row: u32, columns: Range<u32>) -> Vec<u16> {
+        // `locate` clamps to the row's end and to the start of a char, so
+        // read from the char holding `columns.start` through the one holding
+        // `columns.end` (one unit further reaches past a split surrogate
+        // pair), then cut the requested units out of that.
+        let start = self.locate(PointUtf16::new(row, columns.start));
+        if start.point_utf16.row != row {
+            return Vec::new();
+        }
+        let end = self.point_utf16_to_offset(PointUtf16::new(
+            row,
+            columns.end.max(columns.start).saturating_add(1),
+        ));
+        let mut units: Vec<u16> = self
+            .chunks_in_range(start.offset..end)
+            .flat_map(str::encode_utf16)
+            .collect();
+        let base = start.point_utf16.column;
+        let from = (columns.start.saturating_sub(base) as usize).min(units.len());
+        let to = (columns.end.saturating_sub(base) as usize)
+            .min(units.len())
+            .max(from);
+        units.truncate(to);
+        units.drain(..from);
+        units
+    }
+
     /// Summary of the text in `range`.
     pub fn text_summary_for_range(&self, range: Range<usize>) -> TextSummary {
         let mut summary = TextSummary::default();
@@ -711,6 +743,33 @@ mod tests {
         );
         assert_eq!(rope.clip_offset(7, Bias::Left), 6);
         assert_eq!(rope.clip_offset(7, Bias::Right), 8);
+    }
+
+    #[test]
+    fn line_units_utf16_slices_the_line() {
+        let long = format!("{}é𝄞x", "ab".repeat(400));
+        let text = format!("a𝄞b\n\n{long}");
+        let rope = Rope::from(text.as_str());
+        let columns = [0, 1, 2, 3, 4, 5, 799, 800, 801, 802, 803, 804, 805, 2000];
+        for row in 0..4 {
+            let line: Vec<u16> = text
+                .split('\n')
+                .nth(row as usize)
+                .unwrap_or("")
+                .encode_utf16()
+                .collect();
+            for &start in &columns {
+                for &end in &columns {
+                    let from = (start as usize).min(line.len());
+                    let to = (end as usize).min(line.len()).max(from);
+                    assert_eq!(
+                        rope.line_units_utf16(row, start..end),
+                        line[from..to],
+                        "row {row}, {start}..{end}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

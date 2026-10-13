@@ -8,10 +8,9 @@
 
 use std::ops::Range;
 
-use text::{PointUtf16, Rope};
+use text::{Point, PointUtf16, Rope};
 
 use crate::options::RenderWhitespace;
-use crate::view::folding::indent_level;
 
 /// The indentation context for guides.
 #[derive(Clone, Copy, Debug)]
@@ -27,7 +26,22 @@ pub struct GuideContext {
 
 /// Monaco `computeIndentLevel` for `row`, `None` for a blank line.
 fn indent_of(rope: &Rope, row: u32, ctx: GuideContext) -> Option<u32> {
-    indent_level(&rope.line(row), ctx.tab_size)
+    // `indent_level(&rope.line(row))`, reading only the leading whitespace
+    // (and the char after it), not the whole line.
+    if row > rope.max_point().row {
+        return None;
+    }
+    let start = rope.point_to_offset(Point::new(row, 0));
+    let mut indent = 0;
+    for ch in rope.chars_at(start) {
+        match ch {
+            ' ' => indent += 1,
+            '\t' => indent = indent - indent % ctx.tab_size + ctx.tab_size,
+            '\n' => return None,
+            _ => return Some(indent),
+        }
+    }
+    None
 }
 
 /// Monaco `_getIndentLevelForWhitespaceLine`.

@@ -676,6 +676,24 @@ impl ViewLines {
         projection.injected_text(segment, point.column)
     }
 
+    /// The first `max_units` UTF-16 code units of [`Self::line_content`],
+    /// and its full length in code units. A view line that is a whole model
+    /// row (no wrapping or injected text) reads only those units, so this is
+    /// cheap on a long line.
+    pub fn line_content_prefix(&self, line: u32, max_units: u32) -> (Vec<u16>, u32) {
+        let view_line = self.view_line(line);
+        if self.projected(view_line).is_none() {
+            return (
+                self.rope.line_units_utf16(view_line.row, 0..max_units),
+                self.rope.line_len_utf16(view_line.row),
+            );
+        }
+        let mut units: Vec<u16> = self.line_content(line).encode_utf16().collect();
+        let len = units.len() as u32;
+        units.truncate(max_units as usize);
+        (units, len)
+    }
+
     /// View line content (Monaco `getViewLineContent`), with continuation
     /// indentation as spaces and the injected text it shows.
     pub fn line_content(&self, line: u32) -> String {

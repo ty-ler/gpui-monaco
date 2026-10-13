@@ -42,9 +42,10 @@
 //!   strings.
 //! - **Equality:** the structs derive `PartialEq`, which is structural.
 //!   Monaco's `GhostTextPart.equals` ignores `preview`; ours does not.
-//! - **Text access:** instead of an `ITextModel`, callers pass a line
-//!   accessor (`&dyn Fn(u32) -> String`, line content without EOL). Columns
-//!   past the end of a line are clamped when reading (as Monaco's
+//! - **Text access:** instead of an `ITextModel`, callers pass a
+//!   [`LineSource`]: a line accessor (`Fn(u32) -> String`, line content
+//!   without EOL) or a [`text::Rope`], which reads only the columns needed.
+//!   Columns past the end of a line are clamped when reading (as Monaco's
 //!   `getValueInRange` validates its range).
 //! - **Lone surrogates:** the diff runs on UTF-16 code units, as in Monaco.
 //!   If a change boundary splits a surrogate pair, the resulting part text is
@@ -61,6 +62,60 @@ use std::cell::RefCell;
 use std::ops::Range;
 
 use text::PointUtf16;
+
+// ---------------------------------------------------------------------------
+// Text access
+// ---------------------------------------------------------------------------
+
+/// Read access to the current text: rows are 0-based, columns UTF-16 code
+/// units, line content excludes the EOL. Any `Fn(u32) -> String` returning a
+/// line's content is one; [`text::Rope`] is one that reads only the columns
+/// asked for, so ghost text costs nothing extra on a long line.
+pub(crate) trait LineSource {
+    /// The content of `row`.
+    fn line(&self, row: u32) -> String;
+
+    /// The code units of `row` in `columns`. Both ends are clamped to the
+    /// line's length; an end before the start reads nothing.
+    fn line_units(&self, row: u32, columns: Range<u32>) -> Vec<u16> {
+        let line: Vec<u16> = self.line(row).encode_utf16().collect();
+        let start = (columns.start as usize).min(line.len());
+        let end = (columns.end as usize).min(line.len()).max(start);
+        line[start..end].to_vec()
+    }
+
+    /// Length of `row`'s leading run of spaces and tabs (Monaco's
+    /// `getLeadingWhitespace(...).length`).
+    fn leading_whitespace_len(&self, row: u32) -> usize {
+        let line: Vec<u16> = self.line(row).encode_utf16().collect();
+        leading_whitespace_len(&line)
+    }
+}
+
+impl<F: Fn(u32) -> String> LineSource for F {
+    fn line(&self, row: u32) -> String {
+        self(row)
+    }
+}
+
+impl LineSource for text::Rope {
+    fn line(&self, row: u32) -> String {
+        text::Rope::line(self, row)
+    }
+
+    fn line_units(&self, row: u32, columns: Range<u32>) -> Vec<u16> {
+        self.line_units_utf16(row, columns)
+    }
+
+    fn leading_whitespace_len(&self, row: u32) -> usize {
+        if row > self.max_point().row {
+            return 0;
+        }
+        self.chars_at(self.point_to_offset(text::Point::new(row, 0)))
+            .take_while(|&c| c == ' ' || c == '\t')
+            .count()
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Ghost text model (ghostText.ts)
@@ -376,10 +431,10 @@ pub(crate) struct TextReplacement {
 
 /// Removes the common prefix of the replaced text and `edit.text`, moving the
 /// range start past it. `edit.text` is normalized from `\r\n` to `\n` first.
-/// `line_text(row)` returns a line's content without its EOL.
+/// `line_text` reads the current text.
 pub(crate) fn single_text_remove_common_prefix(
     edit: &TextReplacement,
-    line_text: &dyn Fn(u32) -> String,
+    line_text: &dyn LineSource,
 ) -> TextReplacement {
     let normalized: Vec<u16> = edit.text.replace("\r\n", "\n").encode_utf16().collect();
     let value_to_replace = value_in_range(line_text, &edit.range);
@@ -405,7 +460,7 @@ pub(crate) fn single_text_edit_augments(edit: &TextReplacement, base: &TextRepla
 /// `removeTextReplacementCommonSuffixPrefix` uses.)
 pub(crate) fn remove_common_prefix_and_suffix(
     edit: &TextReplacement,
-    line_text: &dyn Fn(u32) -> String,
+    line_text: &dyn LineSource,
 ) -> TextReplacement {
     let edit = single_text_remove_common_prefix(edit, line_text);
     let original = value_in_range(line_text, &edit.range);
@@ -438,7 +493,7 @@ pub(crate) fn secondary_edits(
     if positions.len() <= 1 {
         return Vec::new();
     }
-    let line_text = |row: u32| rope.line(row);
+    let line_text: &text::Rope = rope;
     let offset = |point: PointUtf16| {
         rope.offset_to_offset_utf16(
             rope.point_utf16_to_offset(rope.clip_point_utf16(point, text::Bias::Left)),
@@ -452,7 +507,7 @@ pub(crate) fn secondary_edits(
         )
     };
     let len = rope.len_utf16().0;
-    let primary = remove_common_prefix_and_suffix(primary, &line_text);
+    let primary = remove_common_prefix_and_suffix(primary, line_text);
     let primary_offset = offset(positions[0]);
     let replace = offset(primary.range.start)..offset(primary.range.end);
     let delta = replace.start as isize - primary_offset as isize;
@@ -507,8 +562,8 @@ pub(crate) enum GhostTextMode {
 /// violates `mode`, or is too large to diff).
 ///
 /// - `edit`: the suggested replacement, in the current text's coordinates.
-/// - `line_text`: returns the content (without EOL) of a 0-based row of the
-///   current text. Called only for rows within `edit.range`.
+/// - `line_text`: reads the current text. Only rows within `edit.range`
+///   are read.
 /// - `mode`: see [`GhostTextMode`].
 /// - `cursor`: the cursor position; only used by
 ///   [`GhostTextMode::SubwordSmart`].
@@ -521,7 +576,7 @@ pub(crate) enum GhostTextMode {
 /// nothing.
 pub(crate) fn compute_ghost_text(
     edit: &TextReplacement,
-    line_text: &dyn Fn(u32) -> String,
+    line_text: &dyn LineSource,
     mode: GhostTextMode,
     cursor: Option<PointUtf16>,
     preview_suffix_length: usize,
@@ -536,8 +591,7 @@ pub(crate) fn compute_ghost_text(
         return None;
     }
 
-    let source_line: Vec<u16> = line_text(range.start.row).encode_utf16().collect();
-    let source_indentation_length = leading_whitespace_len(&source_line);
+    let source_indentation_length = line_text.leading_whitespace_len(range.start.row);
 
     let suggestion_touches_indentation = range.start.column as usize <= source_indentation_length;
     if suggestion_touches_indentation {
@@ -550,11 +604,13 @@ pub(crate) fn compute_ghost_text(
         //                         ^^ suggestionAddedIndentationLength
         let suggestion_added_indentation_length = leading_whitespace_len(&text);
 
-        let replaced_indentation = js_substring(
-            &source_line,
-            range.start.column as usize,
-            source_indentation_length,
+        // `sourceLine.substring(start, indentation)`: the start is within
+        // the indentation, so the indices never swap.
+        let replaced_indentation = line_text.line_units(
+            range.start.row,
+            range.start.column..source_indentation_length as u32,
         );
+        let replaced_indentation = replaced_indentation.as_slice();
         let replaced_len = replaced_indentation.len() as u32;
 
         let new_start = if range.start.column + replaced_len <= range.end.column {
@@ -1388,39 +1444,26 @@ fn common_prefix_length(a: &[u16], b: &[u16]) -> usize {
     a.iter().zip(b).take_while(|(x, y)| x == y).count()
 }
 
-/// JS `String.prototype.substring`: clamps both indices and swaps them if
-/// reversed.
-fn js_substring(s: &[u16], start: usize, end: usize) -> &[u16] {
-    let (start, end) = (start.min(s.len()), end.min(s.len()));
-    let (start, end) = if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    };
-    &s[start..end]
-}
-
 /// The text in `range` as UTF-16, lines joined with `\n` (Monaco's
 /// `getValueInRange(range, EndOfLinePreference.LF)`). Columns are clamped to
 /// the line lengths.
-fn value_in_range(line_text: &dyn Fn(u32) -> String, range: &Range<PointUtf16>) -> Vec<u16> {
+fn value_in_range(line_text: &dyn LineSource, range: &Range<PointUtf16>) -> Vec<u16> {
     let mut result = Vec::new();
     for row in range.start.row..=range.end.row {
-        let line: Vec<u16> = line_text(row).encode_utf16().collect();
         let start = if row == range.start.row {
-            (range.start.column as usize).min(line.len())
+            range.start.column
         } else {
             0
         };
         let end = if row == range.end.row {
-            (range.end.column as usize).min(line.len())
+            range.end.column
         } else {
-            line.len()
+            u32::MAX
         };
         if row != range.start.row {
             result.push(u16::from(b'\n'));
         }
-        result.extend_from_slice(&line[start..end.max(start)]);
+        result.extend(line_text.line_units(row, start..end));
     }
     result
 }
@@ -1533,14 +1576,58 @@ mod tests {
             range,
             text: suggestion.to_string(),
         };
+        let rope = text::Rope::from(cleaned.as_str());
         let mut results = [GhostTextMode::Prefix, GhostTextMode::Subword].map(|mode| {
-            compute_ghost_text(&edit, &line_text, mode, None, 0).map(|g| g.render(&cleaned, true))
+            let ghost = compute_ghost_text(&edit, &line_text, mode, None, 0);
+            // A rope reads only the columns needed, with the same result.
+            assert_eq!(compute_ghost_text(&edit, &rope, mode, None, 0), ghost);
+            ghost.map(|g| g.render(&cleaned, true))
         });
         if results[0] == results[1] {
             Output::Same(results[0].take())
         } else {
             let [prefix, subword] = results;
             Output::Modes { prefix, subword }
+        }
+    }
+
+    /// A rope reads the same code units, ranges and indentation as a line
+    /// accessor over its lines, whatever the columns: past the line end,
+    /// reversed, splitting a surrogate pair, past the last row, or across
+    /// a line longer than a rope chunk.
+    #[test]
+    fn rope_line_source_matches_line_accessor() {
+        let long = format!("{}é𝄞x", "ab".repeat(400));
+        let text = format!("  \tfoo 𝄞bar\n\n{long}\n\t\t");
+        let lines: Vec<String> = text.split('\n').map(str::to_string).collect();
+        let line_text = |row: u32| lines.get(row as usize).cloned().unwrap_or_default();
+        let rope = text::Rope::from(text.as_str());
+        let columns = [
+            0, 1, 2, 3, 4, 7, 8, 9, 10, 13, 799, 800, 801, 802, 803, 804, 805, 2000,
+        ];
+        for row in 0..6 {
+            assert_eq!(
+                rope.leading_whitespace_len(row),
+                line_text.leading_whitespace_len(row),
+                "row {row}"
+            );
+            for &start in &columns {
+                for &end in &columns {
+                    assert_eq!(
+                        rope.line_units(row, start..end),
+                        line_text.line_units(row, start..end),
+                        "row {row}, {start}..{end}"
+                    );
+                    for end_row in row..6 {
+                        let range = PointUtf16::new(row, start)..PointUtf16::new(end_row, end);
+                        assert_eq!(
+                            value_in_range(&rope, &range),
+                            value_in_range(&line_text, &range),
+                            "{range:?}"
+                        );
+                    }
+                }
+            }
         }
     }
 

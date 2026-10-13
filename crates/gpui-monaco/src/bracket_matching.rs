@@ -40,7 +40,6 @@ impl CodeEditor {
         const BLOCK_ROWS: u32 = 64;
         let blocks: RefCell<HashMap<u32, Vec<Range<usize>>>> = Default::default();
         let skippable = |p: PointUtf16| {
-            let offset = rope.point_utf16_to_offset(p);
             let block = p.row / BLOCK_ROWS;
             let mut blocks = blocks.borrow_mut();
             let ranges = blocks.entry(block).or_insert_with(|| {
@@ -54,6 +53,12 @@ impl CodeEditor {
                 };
                 model.string_and_comment_ranges(start..end)
             });
+            if ranges.is_empty() {
+                // Nothing to skip (e.g. plain text): no need to find the
+                // offset, which is most of the cost on a long line.
+                return false;
+            }
+            let offset = rope.point_utf16_to_offset(p);
             let ix = ranges.partition_point(|r| r.end <= offset);
             ranges.get(ix).is_some_and(|r| r.start <= offset)
         };
