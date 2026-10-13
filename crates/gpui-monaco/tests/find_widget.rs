@@ -1306,3 +1306,35 @@ fn the_replace_toggle_and_close_button_positions(cx: &mut TestAppContext) {
     assert_eq!(close.top() - widget.top(), px(1. + 5.));
     assert_eq!(widget.right() - close.right(), px(1. + 4.));
 }
+
+/// Monaco `FindController.highlightFindOptions` with find open flashes the
+/// find input's toggles (`FindInput.highlightFindOptions`), as a
+/// Cmd/Ctrl+D session's steps do; the toggle commands only highlight while
+/// find is closed.
+#[gpui::test]
+fn cmd_d_with_find_open_flashes_the_find_input_toggles(cx: &mut TestAppContext) {
+    use gpui_monaco::actions::ToggleCaseSensitive;
+    let (editor, cx) = setup("foo bar foo foo", cx);
+    cx.simulate_keystrokes("secondary-f");
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    let flashing = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.find_options_flashing_for_tests(cx))
+    };
+    cx.dispatch_action(ToggleCaseSensitive);
+    cx.run_until_parked();
+    assert!(!flashing(cx));
+    editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection {
+                anchor: text::PointUtf16::new(0, 0),
+                head: text::PointUtf16::new(0, 3),
+            }],
+            cx,
+        )
+    });
+    cx.simulate_keystrokes("secondary-d");
+    cx.run_until_parked();
+    assert_eq!(selections(&editor, cx).len(), 2);
+    assert!(flashing(cx));
+}

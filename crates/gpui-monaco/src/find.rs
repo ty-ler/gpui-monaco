@@ -430,6 +430,14 @@ impl CodeEditor {
         self.find.widget.as_ref().map(|(widget, _)| widget)
     }
 
+    /// Whether the find input's toggles are flashing (Monaco
+    /// `FindInput.highlightFindOptions`), for tests.
+    #[doc(hidden)]
+    pub fn find_options_flashing_for_tests(&self, cx: &gpui::App) -> bool {
+        self.find_widget()
+            .is_some_and(|widget| widget.read(cx).options_flashing_for_tests())
+    }
+
     /// The find widget's layout in the last frame: (width, input width,
     /// reduced, narrow, collapsed), for tests.
     #[doc(hidden)]
@@ -782,15 +790,29 @@ impl CodeEditor {
         let mut options = self.find.options.clone();
         toggle(&mut options);
         self.change_find_options(options, false, cx);
-        self.highlight_find_options(cx);
+        // Monaco: only `if (!this._state.isRevealed)`; with find open the
+        // toggle itself shows the change.
+        if !self.find.visible {
+            self.highlight_find_options(cx);
+        }
     }
 
-    /// Monaco `FindController.highlightFindOptions`: while find is closed,
-    /// makes the options widget if needed and shows it for a moment. (With
-    /// find open, Monaco flashes the find input's toggles instead, which
-    /// isn't ported.)
+    /// Monaco `FindController.highlightFindOptions`: with find open, the
+    /// find input's toggles flash (`FindInput.highlightFindOptions`); while
+    /// it's closed, makes the options widget if needed and shows it for a
+    /// moment.
     pub(crate) fn highlight_find_options(&mut self, cx: &mut Context<Self>) {
         if self.find.visible {
+            if let Some((widget, _)) = &self.find.widget {
+                // Deferred: the multicursor commands run from the widget's
+                // own inputs, while it is being updated.
+                let widget = widget.downgrade();
+                cx.defer(move |cx| {
+                    widget
+                        .update(cx, |widget, cx| widget.highlight_find_options(cx))
+                        .ok();
+                });
+            }
             return;
         }
         self.ensure_find_options_widget(cx);
@@ -1825,20 +1847,28 @@ impl CodeEditor {
             if non_empty_only {
                 return None;
             }
+            // Monaco `getConfiguredWordAtPosition`: any run of characters
+            // that aren't whitespace or word separators.
             let config = self.cursor_config(cx);
-            cursor::word_at(&config, rope, selection.head)
-                .map(|word| {
-                    rope.text_for_range(
-                        rope.point_utf16_to_offset(word.start)
-                            ..rope.point_utf16_to_offset(word.end),
-                    )
-                })
-                .filter(|word| word.chars().any(|c| c.is_alphanumeric() || c == '_'))
+            cursor::word_at_position(&config, rope, selection.head).map(|word| {
+                rope.text_for_range(
+                    rope.point_utf16_to_offset(word.start)..rope.point_utf16_to_offset(word.end),
+                )
+            })
         } else {
-            let range = rope.point_utf16_to_offset(selection.start())
-                ..rope.point_utf16_to_offset(selection.end());
-            // Monaco `SEARCH_STRING_MAX_LENGTH`.
-            (range.len() < 524_288).then(|| rope.text_for_range(range))
+            // Monaco `SEARCH_STRING_MAX_LENGTH`, against
+            // `getValueLengthInRange` (UTF-16 units, the model's line
+            // breaks).
+            let length = self.model().read(cx).value_length_in_range(
+                selection.start()..selection.end(),
+                crate::EndOfLinePreference::TextDefined,
+            );
+            (length < 524_288).then(|| {
+                rope.text_for_range(
+                    rope.point_utf16_to_offset(selection.start())
+                        ..rope.point_utf16_to_offset(selection.end()),
+                )
+            })
         }
     }
 

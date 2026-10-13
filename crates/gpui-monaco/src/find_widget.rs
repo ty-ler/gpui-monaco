@@ -46,6 +46,8 @@ const COLLAPSED_WIDTH: f32 = 170.;
 /// The matches count's `min-width` (Monaco `MAX_MATCHES_COUNT_WIDTH`'s
 /// start).
 const MATCHES_COUNT_MIN_WIDTH: f32 = 69.;
+/// Monaco's `monaco-findInput-highlight-*` animation length.
+const OPTIONS_FLASH_DURATION: Duration = Duration::from_millis(100);
 /// Monaco `FIND_INPUT_AREA_HEIGHT`: the widget's height without replace.
 pub(crate) const FIND_INPUT_AREA_HEIGHT: f32 = 33.;
 /// The widget's `line-height`, which its inputs' lines take.
@@ -258,10 +260,10 @@ impl FindWidgetLayout {
         let initial = px(FIND_WIDGET_INITIAL_WIDTH);
         let max_width = editor_width - px(28.) - minimap_width - px(15.);
         let reduced = initial + px(28.) + minimap_width >= editor_width;
-        let narrow =
-            initial + px(28.) + minimap_width - px(MATCHES_COUNT_MIN_WIDTH) >= editor_width;
-        let collapsed = initial + px(28.) + minimap_width - px(MATCHES_COUNT_MIN_WIDTH)
-            >= editor_width + px(50.);
+        // Monaco's thresholds use `MAX_MATCHES_COUNT_WIDTH`, which grows
+        // with the widest count shown.
+        let narrow = initial + px(28.) + minimap_width - matches_width >= editor_width;
+        let collapsed = initial + px(28.) + minimap_width - matches_width >= editor_width + px(50.);
         let mut layout = Self {
             reduced,
             narrow,
@@ -395,6 +397,10 @@ pub struct FindWidget {
     measured: Rc<Cell<Option<(Pixels, Pixels)>>>,
     /// The layout of the last frame, for tests.
     last_layout: FindWidgetLayout,
+    /// When the find input's toggles last flashed (Monaco
+    /// `FindInput.highlightFindOptions`'s `highlight-0`/`highlight-1`
+    /// animation on `.controls`).
+    options_flash: Option<std::time::Instant>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -477,8 +483,21 @@ impl FindWidget {
             matches_width: px(MATCHES_COUNT_MIN_WIDTH),
             measured: Rc::new(Cell::new(None)),
             last_layout: FindWidgetLayout::default(),
+            options_flash: None,
             _subscriptions: subscriptions,
         }
+    }
+
+    /// Monaco `FindInput.highlightFindOptions`: the find input's toggles
+    /// flash, their background fading out over 100ms.
+    pub(crate) fn highlight_find_options(&mut self, cx: &mut Context<Self>) {
+        self.options_flash = Some(std::time::Instant::now());
+        cx.notify();
+    }
+
+    /// Whether the toggles are flashing, for tests.
+    pub(crate) fn options_flashing_for_tests(&self) -> bool {
+        self.options_flash.is_some()
     }
 
     /// The find and replace inputs.
@@ -1301,7 +1320,7 @@ impl Render for FindWidget {
         let Some(state) = self.control_state(cx) else {
             return div().into_any_element();
         };
-        let (colors, options, status, matches_count, invalid, layout_info, editor_focus) = {
+        let (colors, options, status, matches_count, invalid, layout_info, editor_focus, dark) = {
             let editor = editor.read(cx);
             (
                 editor.colors().clone(),
@@ -1311,8 +1330,29 @@ impl Render for FindWidget {
                 editor.is_find_query_invalid(),
                 editor.layout_info(),
                 editor.focus_handle(cx),
+                editor.theme().kind == crate::theme::ThemeKind::Dark,
             )
         };
+        // Monaco's `monaco-findInput-highlight-0` keyframes (`-dark-0` in
+        // `vs-dark` and `hc-black`): `.controls` starts at
+        // `rgba(253, 255, 0, 0.8)` (`rgba(255, 255, 255, 0.44)`) and fades to
+        // transparent, linearly over 100ms.
+        let options_flash = self.options_flash.and_then(|start| {
+            let t = start.elapsed().as_secs_f32() / OPTIONS_FLASH_DURATION.as_secs_f32();
+            if t >= 1. {
+                self.options_flash = None;
+                return None;
+            }
+            window.request_animation_frame();
+            let start = if dark {
+                gpui::rgba(0xffffff70)
+            } else {
+                gpui::rgba(0xfdff00cc)
+            };
+            let mut color: gpui::Hsla = start.into();
+            color.a *= 1. - t;
+            Some(color)
+        });
         let replace_visible = self.replace_visible && !state.read_only;
         let (shown, reveal) = editor.read(cx).find_widget_reveal(cx);
         if !shown {
@@ -1453,6 +1493,7 @@ impl Render for FindWidget {
                 .when(!layout.collapsed, |this| {
                     this.child(
                         controls()
+                            .when_some(options_flash, |this, color| this.bg(color))
                             .child(toggle(
                                 Control::MatchCase,
                                 Codicon::CaseSensitive,
@@ -1972,5 +2013,29 @@ impl Render for FindOptionsWidget {
                 )
             }))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Monaco's narrow and collapsed thresholds use
+    /// `MAX_MATCHES_COUNT_WIDTH`, which grows with the widest count shown.
+    #[test]
+    fn narrow_threshold_follows_the_matches_count_width() {
+        let initial = px(FIND_WIDGET_INITIAL_WIDTH);
+        let editor = initial + px(28. - 80.);
+        let layout = |matches: f32| {
+            FindWidgetLayout::compute(editor, editor, px(0.), initial, false, px(matches))
+        };
+        assert!(layout(MATCHES_COUNT_MIN_WIDTH).narrow);
+        assert!(!layout(100.).narrow);
+        let editor = initial + px(28. - 130.);
+        let collapsed = |matches: f32| {
+            FindWidgetLayout::compute(editor, editor, px(0.), initial, false, px(matches)).collapsed
+        };
+        assert!(collapsed(MATCHES_COUNT_MIN_WIDTH));
+        assert!(!collapsed(100.));
     }
 }

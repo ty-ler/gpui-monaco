@@ -35,6 +35,9 @@ pub(crate) struct MultiCursorSession {
     /// Monaco `usesFindOptions`: changing the find widget's match case or
     /// whole word ends the session.
     uses_find_options: bool,
+    /// Monaco `currentMatch`: the primary cursor's word when the session
+    /// started from an empty primary selection, the first step's result.
+    current_match: Option<Selection>,
     /// Set while the session changes the selections itself (Monaco
     /// `_ignoreSelectionChange`).
     applying: bool,
@@ -52,19 +55,15 @@ impl CodeEditor {
             .text_for_range(self.selection_range(selection))
     }
 
+    /// Monaco `_expandEmptyToWord`: an empty selection grows to the word
+    /// at it (`getConfiguredWordAtPosition`: any run of characters that
+    /// aren't whitespace or word separators, letters or not).
     fn word_selection(&self, selection: &Selection, cx: &gpui::App) -> Selection {
         if !selection.is_empty() {
             return *selection;
         }
         let config = self.cursor_config(cx);
-        cursor::word_at(&config, self.snapshot.rope(), selection.head)
-            .filter(|word| {
-                let rope = self.snapshot.rope();
-                let text = rope.text_for_range(
-                    rope.point_utf16_to_offset(word.start)..rope.point_utf16_to_offset(word.end),
-                );
-                text.chars().any(|c| c.is_alphanumeric() || c == '_')
-            })
+        cursor::word_at_position(&config, self.snapshot.rope(), selection.head)
             .map(|word| Selection {
                 anchor: word.start,
                 head: word.end,
@@ -84,7 +83,7 @@ impl CodeEditor {
         }
     }
 
-    fn uses_find_options(&self) -> bool {
+    pub(crate) fn uses_find_options(&self) -> bool {
         self.options.selected_text_match_mode == crate::options::SelectedTextMatchMode::FindOptions
     }
 
@@ -174,7 +173,8 @@ impl CodeEditor {
         let selections = self.cursors.selections();
         let from_word = selections.len() == 1 && selections[0].is_empty();
         let (whole_word, match_case, uses_find_options) = self.session_options(from_word);
-        let primary = self.word_selection(&self.cursors.primary().selection(), cx);
+        let selection = self.cursors.primary().selection();
+        let primary = self.word_selection(&selection, cx);
         if primary.is_empty() {
             return None;
         }
@@ -184,6 +184,7 @@ impl CodeEditor {
             match_case,
             from_word,
             uses_find_options,
+            current_match: selection.is_empty().then_some(primary),
             ..Default::default()
         })
     }
@@ -231,64 +232,24 @@ impl CodeEditor {
         }
     }
 
-    /// Expands empty selections to their words. A single cursor starts a
-    /// whole-word, case-sensitive session; with several selections Monaco
-    /// only expands them (`addSelectionToNextFindMatch` when the
-    /// selections don't share their text, which an empty one never does).
-    /// Returns whether any changed.
-    fn expand_empty_selections(&mut self, from_find_widget: bool, cx: &mut Context<Self>) -> bool {
-        if self.is_find_widget_search(from_find_widget) {
-            return false;
-        }
-        let selections = self.cursors.selections();
-        if selections.iter().all(|s| !s.is_empty()) {
-            return false;
-        }
-        let expanded: Vec<Selection> = selections
-            .iter()
-            .map(|s| self.word_selection(s, cx))
-            .collect();
-        let primary = self.word_selection(&self.cursors.primary().selection(), cx);
-        let search_text = self.selection_text(&primary);
-        if selections.len() > 1 || search_text.is_empty() {
-            self.end_multi_cursor_session(cx);
-            self.set_selections(&expanded, cx);
-            return true;
-        }
-        let (whole_word, match_case, uses_find_options) = self.session_options(true);
-        self.start_multi_cursor_session(
-            MultiCursorSession {
-                search_text,
-                whole_word,
-                match_case,
-                from_word: true,
-                uses_find_options,
-                ..Default::default()
-            },
-            cx,
-        );
-        self.apply_session_selections(&expanded, cx);
-        true
-    }
-
     /// Whether every selection has the same text (Monaco
-    /// `modelRangesContainSameText`).
+    /// `modelRangesContainSameText`); an empty selection after the first
+    /// never does.
     fn selections_share_text(&self, match_case: bool) -> bool {
-        let mut texts = self
-            .cursors
-            .selections()
-            .into_iter()
-            .map(|s| self.selection_text(&s));
-        let Some(first) = texts.next() else {
+        let selections = self.cursors.selections();
+        let Some((first, rest)) = selections.split_first() else {
             return true;
         };
-        texts.all(|text| {
+        let text = |s: &Selection| {
+            let text = self.selection_text(s);
             if match_case {
-                text == first
+                text
             } else {
-                text.to_lowercase() == first.to_lowercase()
+                text.to_lowercase()
             }
-        })
+        };
+        let first = text(first);
+        rest.iter().all(|s| !s.is_empty() && text(s) == first)
     }
 
     /// Monaco `MultiCursorSession._highlightFindOptions`, on each search
@@ -325,31 +286,21 @@ impl CodeEditor {
         }
     }
 
-    /// Monaco `_getNextMatch` / `_getPreviousMatch`: the session's next
-    /// match after the last selection (or previous one before it), after
-    /// expanding empty selections like Cmd+D. `None` when there is nothing
-    /// to do.
+    /// Monaco `_getNextMatch` / `_getPreviousMatch`: the session's first
+    /// result (the primary cursor's word, when it started from an empty
+    /// one), then the next match after the last selection (or previous one
+    /// before it). Begins a session if there is none. `None` when there is
+    /// nothing to do.
     fn session_step(
         &mut self,
         next: bool,
         from_find_widget: bool,
         cx: &mut Context<Self>,
     ) -> Option<Selection> {
-        if self.expand_empty_selections(from_find_widget, cx) {
-            return None;
-        }
-        // Monaco: selections with different texts start no session.
-        if self.current_session().is_none() {
-            let match_case = if self.is_find_widget_search(from_find_widget) {
-                self.find.options.match_case
-            } else {
-                self.selected_text_match_options().1
-            };
-            if !self.selections_share_text(match_case) {
-                return None;
-            }
-        }
         let session = self.begin_session(from_find_widget, cx)?;
+        if let Some(found) = self.multi_cursor.as_mut()?.current_match.take() {
+            return Some(found);
+        }
         self.highlight_session_find_options(&session, cx);
         let data = self.session_search(&session)?;
         let last = *self.cursors.selections().last()?;
@@ -361,6 +312,35 @@ impl CodeEditor {
             search::find_previous(rope, &data, range.start)
         }?;
         Some(self.range_selection(found))
+    }
+
+    /// Monaco `MultiCursorSelectionController.addSelectionToNextFindMatch`:
+    /// without a session, several selections that don't share their text
+    /// only grow to their words.
+    fn add_selection_to_next_find_match_inner(
+        &mut self,
+        from_find_widget: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if self.current_session().is_none() && self.cursors.selections().len() > 1 {
+            let match_case = if self.is_find_widget_search(from_find_widget) {
+                self.find.options.match_case
+            } else {
+                self.selected_text_match_options().1
+            };
+            if !self.selections_share_text(match_case) {
+                let expanded: Vec<Selection> = self
+                    .cursors
+                    .selections()
+                    .iter()
+                    .map(|s| self.word_selection(s, cx))
+                    .collect();
+                self.end_multi_cursor_session(cx);
+                self.set_selections(&expanded, cx);
+                return;
+            }
+        }
+        self.add_selection_to_find_match_inner(true, from_find_widget, cx);
     }
 
     fn add_selection_to_find_match_inner(
@@ -476,12 +456,10 @@ impl CodeEditor {
                 scopes.sort_by_key(|s| s.start);
                 scopes
                     .into_iter()
-                    .flat_map(|scope| {
-                        search::find_matches(rope, data, scope, crate::find::MATCHES_LIMIT)
-                    })
+                    .flat_map(|scope| search::find_matches(rope, data, scope, usize::MAX))
                     .collect()
             }
-            None => search::find_matches(rope, data, 0..rope.len(), crate::find::MATCHES_LIMIT),
+            None => search::find_matches(rope, data, 0..rope.len(), usize::MAX),
         }
     }
 
@@ -588,7 +566,7 @@ impl CodeEditor {
     /// selected text as a new selection.
     pub fn add_selection_to_next_find_match(&mut self, cx: &mut Context<Self>) {
         self.multi_cursor_command(false, cx, |this, from, cx| {
-            this.add_selection_to_find_match_inner(true, from, cx)
+            this.add_selection_to_next_find_match_inner(from, cx)
         });
     }
 
@@ -623,7 +601,7 @@ impl CodeEditor {
         let any = command.as_any();
         type Run = fn(&mut CodeEditor, bool, &mut Context<CodeEditor>);
         let run: Run = if any.is::<AddSelectionToNextFindMatch>() {
-            |this, from, cx| this.add_selection_to_find_match_inner(true, from, cx)
+            |this, from, cx| this.add_selection_to_next_find_match_inner(from, cx)
         } else if any.is::<AddSelectionToPreviousFindMatch>() {
             |this, from, cx| this.add_selection_to_find_match_inner(false, from, cx)
         } else if any.is::<MoveSelectionToNextFindMatch>() {
