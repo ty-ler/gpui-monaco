@@ -167,10 +167,12 @@ be"
     );
 }
 
-/// A replacement away from the primary cursor isn't a `compositionType`:
-/// it replaces that range only.
+/// A replacement on the primary cursor's line that doesn't contain it is
+/// still a `compositionType` at every cursor: Monaco `_emitTypeEvent` pads
+/// the text between the range and the cursor into the inserted text, so
+/// every line is edited and the cursors stay after it.
 #[gpui::test]
-fn replacing_text_away_from_the_cursors_replaces_it_once(cx: &mut TestAppContext) {
+fn replacing_text_away_from_the_cursors_replaces_it_at_every_cursor(cx: &mut TestAppContext) {
     let (editor, cx) = setup(
         "abc
 abc", cx,
@@ -186,8 +188,101 @@ abc", cx,
     assert_eq!(
         text(&editor, cx),
         "Xbc
+Xbc"
+    );
+    assert_eq!(
+        selections(&editor, cx),
+        vec![Selection::collapsed(p(1, 4)), Selection::collapsed(p(2, 4))]
+    );
+    // One undo restores both.
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(
+        text(&editor, cx),
+        "abc
 abc"
     );
+}
+
+/// macOS autocorrect replacing `teh` in `teh |` (Monaco
+/// `compositionType("the ", 4, 0, 0)`) keeps the caret after the space.
+#[gpui::test]
+fn autocorrect_before_the_caret_keeps_the_caret(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("teh ", cx);
+    set(&editor, &[Selection::collapsed(p(1, 5))], cx);
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(0..3), "the", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "the ");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 5))]);
+}
+
+/// A replacement after the caret pads the text between them in front, and
+/// the caret lands after the replacement.
+#[gpui::test]
+fn replacing_text_after_the_caret(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("a teh", cx);
+    set(&editor, &[Selection::collapsed(p(1, 2))], cx);
+    editor.update_in(cx, |e, window, cx| {
+        e.replace_text_in_range(Some(2..5), "the", window, cx)
+    });
+    assert_eq!(text(&editor, cx), "a the");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 6))]);
+}
+
+/// With one cursor, the composition's updates and commit are
+/// `compositionType` edits that join the typing before and after them in
+/// one undo step (Monaco `CompositionOperation`, `TypingOther`).
+#[gpui::test]
+fn single_cursor_composition_is_one_undo_step_with_the_typing(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    editor.update(cx, |e, cx| e.type_text("a", cx));
+    mark(&editor, "に", None, cx);
+    mark(&editor, "にほ", None, cx);
+    mark(&editor, "にほん", None, cx);
+    commit(&editor, "日本", cx);
+    assert_eq!(text(&editor, cx), "a日本");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 4))]);
+    editor.update(cx, |e, cx| e.type_text("b", cx));
+    assert_eq!(text(&editor, cx), "a日本b");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "");
+}
+
+/// A single-cursor composition starting over a selection replaces it, in
+/// the same undo step.
+#[gpui::test]
+fn single_cursor_composition_over_a_selection(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("foo bar", cx);
+    set(
+        &editor,
+        &[Selection {
+            anchor: p(1, 1),
+            head: p(1, 4),
+        }],
+        cx,
+    );
+    mark(&editor, "か", None, cx);
+    assert_eq!(text(&editor, cx), "か bar");
+    assert_eq!(marked(&editor, cx), Some(0..1));
+    commit(&editor, "下", cx);
+    assert_eq!(text(&editor, cx), "下 bar");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 2))]);
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "foo bar");
+}
+
+/// The IME's caret within a single-cursor composition moves the cursor.
+#[gpui::test]
+fn single_cursor_composition_caret(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("x", cx);
+    set(&editor, &[Selection::collapsed(p(1, 2))], cx);
+    mark(&editor, "abc", Some(1..1), cx);
+    assert_eq!(text(&editor, cx), "xabc");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 3))]);
+    assert_eq!(marked(&editor, cx), Some(1..4));
+    commit(&editor, "ABC", cx);
+    assert_eq!(text(&editor, cx), "xABC");
+    assert_eq!(selections(&editor, cx), vec![Selection::collapsed(p(1, 5))]);
 }
 
 /// The IME's selected range within the composition is its active clause
