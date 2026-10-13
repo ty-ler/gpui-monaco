@@ -102,18 +102,30 @@ pub(crate) struct GotoState {
     highlight: Option<Task<()>>,
 }
 
-/// Results of a navigation command: every location has its model's uri
-/// (`None` only for a queried model without one), sorted by uri and
-/// position, without duplicates (Monaco `ReferencesModel`).
-pub(crate) fn sorted_locations(
-    locations: Vec<Location>,
-    queried: Option<&SharedString>,
-) -> Vec<Location> {
+/// Results of a navigation command: every location has its model's uri,
+/// [normalized](crate::normalize_uri), with a location without one in the
+/// `queried` model's [`resource`](crate::TextModel::resource), sorted by
+/// uri and position, without duplicates (Monaco `ReferencesModel`, whose
+/// locations are `URI`s compared by `toString()`).
+pub(crate) fn sorted_locations(locations: Vec<Location>, queried: &SharedString) -> Vec<Location> {
     let mut locations: Vec<Location> = locations
         .into_iter()
-        .map(|location| Location {
-            uri: location.uri.clone().or_else(|| queried.cloned()),
-            ..location
+        .map(|location| {
+            let uri = match location.uri {
+                None => queried.clone(),
+                Some(uri) => {
+                    let normalized = crate::normalize_uri(&uri);
+                    if normalized == uri.as_ref() {
+                        uri
+                    } else {
+                        normalized.into()
+                    }
+                }
+            };
+            Location {
+                uri: Some(uri),
+                ..location
+            }
         })
         .collect();
     locations.sort_by(|a, b| {
@@ -337,8 +349,8 @@ impl CodeEditor {
         let position = self.model().read(cx).validate_position(position);
         self.set_selections(&[Selection::collapsed(position)], cx);
         self.reveal_position_in_center_if_outside_viewport(position, cx);
-        let uri = self.model().read(cx).uri().cloned();
-        let locations = sorted_locations(locations, uri.as_ref());
+        let uri = self.model().read(cx).resource().clone();
+        let locations = sorted_locations(locations, &uri);
         self.announce(aria_message(&locations), cx);
         if locations.is_empty() {
             // Monaco mutes the message unless one was given.
@@ -405,7 +417,7 @@ impl CodeEditor {
         let tasks = Self::request_locations(model, kind, position, compact, cx);
         let model = model.clone();
         let state = self.navigation_state(cx);
-        let uri = model.read(cx).uri().cloned();
+        let uri = model.read(cx).resource().clone();
         self.start_cancellable(crate::editor_state::CancellableOperation::Navigation);
         self.goto.task = Some(cx.spawn(async move |this, cx| {
             let mut locations = Vec::new();
@@ -415,7 +427,7 @@ impl CodeEditor {
                     Err(err) => log::warn!("navigation failed: {err:#}"),
                 }
             }
-            let locations = sorted_locations(locations, uri.as_ref());
+            let locations = sorted_locations(locations, &uri);
             this.update(cx, |this, cx| {
                 this.goto.task = None;
                 // Monaco cancels when the text or the cursor changed.
@@ -428,7 +440,9 @@ impl CodeEditor {
                 // target selection range.
                 let at_cursor = locations.iter().any(|location| {
                     let range = location.selection_range();
-                    location.uri == uri && range.start <= position && position <= range.end
+                    location.uri.as_ref() == Some(&uri)
+                        && range.start <= position
+                        && position <= range.end
                 });
                 let alternative = this
                     .options
@@ -626,12 +640,13 @@ impl CodeEditor {
         if nav.locations.is_empty() {
             return;
         }
-        let uri = self.model().read(cx).uri().cloned();
+        let model = self.model().read(cx);
         let position = self.cursors.primary().position;
-        // Monaco tests `OneReference.range`: a link's target selection range.
+        // Monaco tests `OneReference.range`: a link's target selection range,
+        // in a model whose uri is the location's.
         let inside = nav.locations.iter().any(|location| {
             let range = location.selection_range();
-            location.uri == uri && range.start <= position && position <= range.end
+            model.is_at(location.uri.as_deref()) && range.start <= position && position <= range.end
         });
         if !inside {
             cx.set_global(SymbolNavigation::default());
@@ -642,8 +657,8 @@ impl CodeEditor {
     /// when `uri` names another model (standalone Monaco's
     /// `openCodeEditor` only finds the focused editor's model).
     pub(crate) fn go_to_locations_action(&mut self, args: GoToLocations, cx: &mut Context<Self>) {
-        let uri = self.model().read(cx).uri().cloned();
-        if args.uri.is_some() && args.uri.as_deref() != uri.as_deref() {
+        // Monaco compares `model.uri.toString()` with the resource's.
+        if !self.model().read(cx).is_at(args.uri.as_deref()) {
             return;
         }
         let position = args
@@ -720,9 +735,8 @@ fn editor_for_uri(uri: &str, cx: &App) -> Option<Entity<CodeEditor>> {
         .into_iter()
         .filter(|editor| {
             let editor = editor.read(cx);
-            !editor.in_peek
-                && editor.model().read(cx).uri().is_some()
-                && editor.model().read(cx).is_at(Some(uri))
+            // A model without a uri is at its `inmemory://model/N`.
+            !editor.in_peek && editor.model().read(cx).is_at(Some(uri))
         })
         .collect();
     editors
@@ -796,7 +810,7 @@ mod tests {
                 location(Some("file:///b.rs"), 5),
                 location(None, 1),
             ],
-            Some(&here),
+            &here,
         );
         assert_eq!(
             sorted,
@@ -804,6 +818,29 @@ mod tests {
                 location(Some("file:///a.rs"), 2),
                 location(Some("file:///b.rs"), 1),
                 location(Some("file:///b.rs"), 5),
+            ]
+        );
+    }
+
+    #[test]
+    fn locations_are_compared_by_normalized_uri() {
+        // Monaco's locations are `URI`s: `file:///a b.rs` and
+        // `file:///a%20b.rs` are one, and a location without a uri is in
+        // the queried model's `inmemory://model/N`.
+        let here = SharedString::from("inmemory://model/1");
+        let sorted = sorted_locations(
+            vec![
+                location(Some("file:///a b.rs"), 2),
+                location(Some("file:///a%20b.rs"), 2),
+                location(None, 1),
+            ],
+            &here,
+        );
+        assert_eq!(
+            sorted,
+            vec![
+                location(Some("file:///a%20b.rs"), 2),
+                location(Some("inmemory://model/1"), 1),
             ]
         );
     }

@@ -192,7 +192,9 @@ pub fn score(selector: &LanguageSelector, target: &ProviderTarget) -> u32 {
 /// What a provider sees about the model it's asked about.
 #[derive(Clone)]
 pub struct ProviderContext {
-    /// The model's uri, if the host gave it one, as given.
+    /// The model's uri, if the host gave it one, as given. Monaco's
+    /// `model.uri` is [`ProviderContext::resource`], which a provider
+    /// naming the model (in a `Location`, say) should use.
     pub uri: Option<SharedString>,
     /// The model's uri as Monaco has it (`model.uri.toString()`): the
     /// [`TextModel::resource`](crate::TextModel::resource), normalized, or

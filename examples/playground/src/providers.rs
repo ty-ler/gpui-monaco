@@ -265,11 +265,13 @@ impl ReferenceProvider for DemoReferences {
         let mut found = occurrences(&context.snapshot, &word, None);
         for model in gpui_monaco::models(cx) {
             let model = model.read(cx);
-            let Some(uri) = model.uri().cloned() else {
-                continue;
-            };
-            if Some(&uri) != context.uri.as_ref() {
-                found.extend(occurrences(&model.buffer().snapshot(), &word, Some(uri)));
+            let uri = model.resource();
+            if uri != &context.resource {
+                found.extend(occurrences(
+                    &model.buffer().snapshot(),
+                    &word,
+                    Some(uri.clone()),
+                ));
             }
         }
         Task::ready(Ok(found))

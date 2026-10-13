@@ -44,7 +44,7 @@ struct Config {
 /// Monaco `InlineCompletionResults`: a request's completion model, refiltered
 /// while the same word grows.
 struct Results {
-    uri: Option<SharedString>,
+    uri: SharedString,
     row: u32,
     /// The word at the request (start, end columns).
     word: (u32, u32),
@@ -55,8 +55,8 @@ struct Results {
 impl Results {
     /// Monaco `canBeReused`: the same model and line, a non-empty word that
     /// starts in the same place and got longer, and nothing incomplete.
-    fn can_be_reused(&self, uri: Option<&SharedString>, row: u32, word: (u32, u32)) -> bool {
-        self.uri.as_ref() == uri
+    fn can_be_reused(&self, uri: &SharedString, row: u32, word: (u32, u32)) -> bool {
+        &self.uri == uri
             && self.row == row
             && self.word.1 > self.word.0
             && self.word.0 == word.0
@@ -249,7 +249,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
         if trigger.is_none()
             && let Ok(mut last) = self.last.lock()
             && let Some(results) = last.as_mut()
-            && results.can_be_reused(context.uri.as_ref(), position.row, word)
+            && results.can_be_reused(&context.resource, position.row, word)
         {
             let delta = position.column - results.word.1;
             results.model.set_line_context(LineContext {
@@ -283,7 +283,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
             move |item| !hidden_kinds.contains(&item.kind),
             cx,
         );
-        let uri = context.uri.clone();
+        let uri = context.resource.clone();
         let last = self.last.clone();
         cx.spawn(async move |cx| {
             let mut items: Vec<CompletionItem> = Vec::new();
@@ -495,6 +495,19 @@ mod tests {
         let items = provide(&editor, PointUtf16::new(0, 3), cx).await;
         assert_eq!(items, Some(vec!["hell".to_string(), "hello".to_string()]));
         assert_eq!(requests.get(), 1);
+    }
+
+    /// Monaco's `canBeReused` compares `model.uri`, which differs between
+    /// two models created without one (`inmemory://model/N`).
+    #[gpui::test]
+    async fn results_are_not_reused_in_another_model_without_a_uri(cx: &mut TestAppContext) {
+        let (editor, cx, requests) = setup(cx);
+        provide(&editor, PointUtf16::new(0, 2), cx).await;
+        assert_eq!(requests.get(), 1);
+        let other = cx.update(|_, cx| cx.new(|_| TextModel::new("hel")));
+        editor.update(cx, |editor, cx| editor.set_model(other, cx));
+        provide(&editor, PointUtf16::new(0, 3), cx).await;
+        assert_eq!(requests.get(), 2);
     }
 
     #[gpui::test]

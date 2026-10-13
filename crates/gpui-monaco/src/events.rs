@@ -351,9 +351,13 @@ pub(crate) struct CursorChangeCause {
 /// `IModelChangedEvent`).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct ModelChange {
-    /// The previous model's uri (Monaco `oldModelUrl`).
+    /// The previous model's [`resource`](crate::TextModel::resource)
+    /// (Monaco `oldModelUrl`): its normalized uri, `inmemory://model/N` for
+    /// a model without one, `None` when the editor had no model.
     pub old_uri: Option<SharedString>,
-    /// The new model's uri (Monaco `newModelUrl`).
+    /// The new model's [`resource`](crate::TextModel::resource) (Monaco
+    /// `newModelUrl`), `None` when the model is detached
+    /// ([`CodeEditor::set_model`](crate::CodeEditor::set_model) with `None`).
     pub new_uri: Option<SharedString>,
 }
 

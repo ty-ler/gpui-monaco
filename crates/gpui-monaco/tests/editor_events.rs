@@ -77,6 +77,50 @@ fn lines(count: usize) -> String {
         .join("\n")
 }
 
+/// Monaco `model?.uri || null`: a model without a uri reports its
+/// `inmemory://model/N`, a uri is normalized, and only a detached editor
+/// has none.
+#[gpui::test]
+fn model_change_uris_are_the_models_resources(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("hello", cx);
+    let events = record(&editor, cx);
+    let changes = || {
+        events
+            .borrow()
+            .iter()
+            .filter_map(|event| match event {
+                CodeEditorEvent::ModelChanged(change) => {
+                    Some((change.old_uri.clone(), change.new_uri.clone()))
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+    };
+    let first = cx.update(|_, cx| cx.new(|_| TextModel::new("a")));
+    let second = cx.update(|_, cx| cx.new(|_| TextModel::new("b")));
+    let spaced = cx.update(|_, cx| cx.new(|_| TextModel::new("c").with_uri("file:///a b.txt")));
+    let first_uri = first.read_with(cx, |m, _| m.resource().clone());
+    let second_uri = second.read_with(cx, |m, _| m.resource().clone());
+    assert!(first_uri.starts_with("inmemory://model/"));
+    assert_ne!(first_uri, second_uri);
+
+    editor.update(cx, |e, cx| e.set_model(first.clone(), cx));
+    editor.update(cx, |e, cx| e.set_model(second.clone(), cx));
+    editor.update(cx, |e, cx| e.set_model(spaced.clone(), cx));
+    editor.update(cx, |e, cx| e.set_model(None, cx));
+    editor.update(cx, |e, cx| e.set_model(first.clone(), cx));
+    assert_eq!(
+        changes(),
+        [
+            (Some("file:///a.txt".into()), Some(first_uri.clone())),
+            (Some(first_uri.clone()), Some(second_uri.clone())),
+            (Some(second_uri), Some("file:///a%20b.txt".into())),
+            (Some("file:///a%20b.txt".into()), None),
+            (None, Some(first_uri)),
+        ]
+    );
+}
+
 #[gpui::test]
 fn model_language_and_configuration_events(cx: &mut TestAppContext) {
     let (editor, cx) = setup("hello", cx);

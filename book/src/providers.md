@@ -33,7 +33,7 @@ struct MyHover;
 impl HoverProvider for MyHover {
     fn provide_hover(
         &self,
-        context: &ProviderContext,   // uri, language id and a text snapshot
+        context: &ProviderContext,   // resource (Monaco's model.uri), language id and a text snapshot
         position: PointUtf16,
         cx: &mut App,
     ) -> Task<anyhow::Result<Option<Hover>>> {
@@ -168,7 +168,7 @@ Hosts with locations of their own, such as a test explorer or a code lens that l
 
 - **`go_to_locations(position, locations, multiple, no_results_message, cx)`** (Monaco `editor.action.goToLocations`) moves the cursor to `position` and handles `locations` like a navigation command. `multiple` (a `GoToLocation`) overrides `goto_location.multiple_references`. Without locations, `no_results_message` shows, if given. The peek view's title is "Locations". `goto_location.multiple_tests` (Monaco `gotoLocation.multipleTests`) is there for a host's go to test commands to pass as `multiple`.
 - **`peek_locations(position, locations, multiple, cx)`** (Monaco `editor.action.peekLocations`, also `editor.action.showReferences`) always peeks, even one location.
-- **By id:** `trigger_with_payload("editor.action.goToLocations", json, …)` takes Monaco's JSON shapes (`{ "uri", "position": { "lineNumber", "column" }, "locations": [{ "uri", "range": { "startLineNumber", … } }], "multiple", "noResultsMessage", "openInPeek" }`, 1-based). `execute_command` and command ids in code lenses, code actions and completions take Monaco's positional arguments (uri, position, locations, multiple, noResultsMessage, openInPeek) and run in the focused editor showing the uri (or the first one). As in standalone Monaco, a uri no editor shows does nothing.
+- **By id:** `trigger_with_payload("editor.action.goToLocations", json, …)` takes Monaco's JSON shapes (`{ "uri", "position": { "lineNumber", "column" }, "locations": [{ "uri", "range": { "startLineNumber", … } }], "multiple", "noResultsMessage", "openInPeek" }`, 1-based). `execute_command` and command ids in code lenses, code actions and completions take Monaco's positional arguments (uri, position, locations, multiple, noResultsMessage, openInPeek) and run in the focused editor showing the uri (or the first one): a model's `resource()`, `inmemory://model/N` for one without a uri, compared normalized as Monaco compares `URI`s. As in standalone Monaco, a uri no editor shows does nothing.
 
 To preview other documents, the peek view looks models up by uri with `model_for_uri`. That covers models shown in an editor, models you `register_model`, and whatever your `set_model_resolver` callback returns, for example a model read from disk. Results it can't resolve show "no preview available".
 

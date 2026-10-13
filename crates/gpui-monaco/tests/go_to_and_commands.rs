@@ -274,6 +274,95 @@ fn go_to_locations_runs_as_a_command(cx: &mut TestAppContext) {
     assert_eq!(peek_rows(&editor, cx), Some(vec![0, 2]));
 }
 
+fn execute(cx: &mut VisualTestContext, id: &str, arguments: Vec<serde_json::Value>) {
+    cx.update(|_, cx| {
+        gpui_monaco::execute_command(
+            cx,
+            &Command {
+                id: id.to_string().into(),
+                title: SharedString::default(),
+                arguments,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    });
+    draw(cx);
+}
+
+/// Monaco passes `model.uri`, which a model created without one has as
+/// `inmemory://model/N`, and `openCodeEditor` finds the editor by it.
+#[gpui::test]
+fn peek_locations_targets_a_model_without_a_uri(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(|| TextModel::new(TEXT), cx);
+    let uri = editor.read_with(cx, |e, cx| e.model().read(cx).resource().clone());
+    assert!(uri.starts_with("inmemory://model/"));
+    execute(
+        cx,
+        "editor.action.peekLocations",
+        vec![
+            json!(uri),
+            json!({ "lineNumber": 3, "column": 5 }),
+            json!([location(&uri, 1, 4, 7), location(&uri, 4, 5, 8)]),
+        ],
+    );
+    assert_eq!(head(&editor, cx), p(2, 4));
+    assert_eq!(peek_rows(&editor, cx), Some(vec![0, 3]));
+    // The results are in the model, as its uri names them.
+    let uris = editor
+        .read_with(cx, |e, cx| e.peek_results(cx))
+        .map(|(locations, _)| locations.iter().map(|l| l.uri.clone()).collect::<Vec<_>>());
+    assert_eq!(uris, Some(vec![Some(uri.clone()), Some(uri.clone())]));
+    cx.simulate_keystrokes("escape");
+    // `showReferences` too.
+    execute(
+        cx,
+        "editor.action.showReferences",
+        vec![
+            json!(uri),
+            json!({ "lineNumber": 3, "column": 5 }),
+            json!([location(&uri, 4, 5, 8)]),
+        ],
+    );
+    assert_eq!(peek_rows(&editor, cx), Some(vec![3]));
+}
+
+/// Monaco compares `URI.toString()`s: `file:///src/my main.rs` and
+/// `file:///src/my%20main.rs` name one model, for the command's uri, its
+/// locations and F12 through them.
+#[gpui::test]
+fn go_to_locations_compares_normalized_uris(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_with(
+        || TextModel::new(TEXT).with_uri("file:///src/my main.rs"),
+        cx,
+    );
+    let encoded = "file:///src/my%20main.rs";
+    execute(
+        cx,
+        "editor.action.goToLocations",
+        vec![
+            json!(encoded),
+            json!({ "lineNumber": 3, "column": 5 }),
+            json!([
+                location("file:///src/my main.rs", 4, 5, 8),
+                location(encoded, 1, 4, 7),
+                // The same location, spelled the other way: one result.
+                location("file:///src/my main.rs", 1, 4, 7),
+            ]),
+            json!("goto"),
+        ],
+    );
+    assert_eq!(peek_rows(&editor, cx), None);
+    assert_eq!(head(&editor, cx), p(0, 3));
+    assert!(cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
+    cx.simulate_keystrokes("f12");
+    assert_eq!(head(&editor, cx), p(3, 4));
+    // Still in the results: F12 wraps around to the first.
+    assert!(cx.update(|_, cx| gpui_monaco::has_symbol_navigation(cx)));
+    cx.simulate_keystrokes("f12");
+    assert_eq!(head(&editor, cx), p(0, 3));
+}
+
 #[gpui::test]
 fn go_to_locations_in_other_models_asks_the_host(cx: &mut TestAppContext) {
     let (editor, cx) = setup(cx);
