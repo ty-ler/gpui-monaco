@@ -28,6 +28,12 @@ impl HighlightState {
     pub fn syntax(&self) -> Option<&SyntaxSnapshot> {
         self.downcast_ref()
     }
+
+    /// Whether `other` is this same state (a clone of it), so whatever was
+    /// read from one holds for the other.
+    pub fn ptr_eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
 }
 
 /// Produces highlight spans for a buffer.

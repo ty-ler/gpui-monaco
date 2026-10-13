@@ -923,3 +923,96 @@ fn change_view_zones_batches_one_event(cx: &mut TestAppContext) {
     });
     assert_eq!(changes.get(), 2);
 }
+
+/// Every zone on screen is rendered right above the line after it, and no
+/// other: `heights(row)` is the height of the zone after `row` (0: none).
+fn check_zones_on_screen(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+    heights: &dyn Fn(u32) -> f32,
+) {
+    let (bounds, _) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let rows = editor.read_with(cx, |e, cx| e.model().read(cx).buffer().max_point().row);
+    let mut expected = Vec::new();
+    for row in 0..rows {
+        let height = px(heights(row));
+        if height == px(0.) {
+            continue;
+        }
+        let Some(next) = editor.read_with(cx, |e, _| e.scrolled_visible_position(p(row + 1, 0)))
+        else {
+            continue;
+        };
+        let top = next.y - height;
+        if top + height >= bounds.top() && top <= bounds.bottom() {
+            expected.push((top, height));
+        }
+    }
+    let mut drawn: Vec<(Pixels, Pixels)> = widget_bounds(editor, EmbeddedKind::ViewZone, cx)
+        .iter()
+        .map(|b| (b.top(), b.size.height))
+        .collect();
+    drawn.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    assert!(!drawn.is_empty());
+    assert_eq!(drawn.len(), expected.len(), "{drawn:?}\n{expected:?}");
+    for ((top, height), (expected_top, expected_height)) in drawn.iter().zip(&expected) {
+        assert_near(*top, *expected_top);
+        assert_eq!(height, expected_height);
+    }
+}
+
+/// With a zone after every line, exactly the zones on screen are rendered,
+/// each right above the line after it: scrolled into the middle, after
+/// typing a line break above them, and after one of them is resized (the
+/// zones are laid out once and kept while nothing about them changes).
+#[gpui::test]
+fn many_zones_render_just_the_ones_on_screen(cx: &mut TestAppContext) {
+    let text: String = (0..300).map(|i| format!("line {i}\n")).collect();
+    let (editor, cx) = setup(&text, cx);
+    let mut ids = Vec::new();
+    for line in 1..=300 {
+        let (probe, _) = Probe::new(cx);
+        let id = editor.update(cx, |e, cx| {
+            e.add_view_zone(
+                ViewZone::new(line, ZoneHeight::Pixels(px(5.)), probe.into()),
+                cx,
+            )
+        });
+        ids.push(id);
+    }
+    draw(cx);
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(1000.), ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    check_zones_on_screen(&editor, cx, &|_| 5.);
+    // Drawn again unchanged.
+    draw(cx);
+    check_zones_on_screen(&editor, cx, &|_| 5.);
+
+    // A line break near the top moves every zone below it down a line.
+    let before = line_top(&editor, cx, 45);
+    editor.update(cx, |e, cx| e.set_position(p(2, 0), cx));
+    cx.simulate_keystrokes("enter");
+    editor.update(cx, |e, cx| {
+        e.set_scroll_top(px(1000.), ScrollType::Immediate, cx)
+    });
+    draw(cx);
+    assert_near(line_top(&editor, cx, 46), before + line_height(&editor, cx));
+    // The new line 3 (row 2) has no zone after it.
+    check_zones_on_screen(&editor, cx, &|row| if row == 2 { 0. } else { 5. });
+
+    // A taller zone pushes the lines after it down: the zone after line
+    // 45, now after row 45.
+    let before = line_top(&editor, cx, 46);
+    editor.update(cx, |e, cx| {
+        e.set_view_zone_height(ids[44], ZoneHeight::Pixels(px(40.)), cx)
+    });
+    draw(cx);
+    assert_near(line_top(&editor, cx, 46), before + px(35.));
+    check_zones_on_screen(&editor, cx, &|row| match row {
+        2 => 0.,
+        45 => 40.,
+        _ => 5.,
+    });
+}
