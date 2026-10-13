@@ -872,6 +872,37 @@ impl Widgets {
                 + self.gutter.len()
     }
 
+    /// Removes the widgets in `ids` in one pass over each list (removing
+    /// thousands of code lens zones one by one is quadratic). Returns
+    /// whether any was removed.
+    pub fn remove_all(&mut self, ids: &std::collections::HashSet<WidgetId>) -> bool {
+        if ids.is_empty() {
+            return false;
+        }
+        let zones = self.zones.len();
+        let callbacks = &mut self.zone_callbacks;
+        self.zones.retain(|zone| {
+            let keep = !ids.contains(&zone.id);
+            if !keep {
+                *callbacks -= usize::from(zone.has_callbacks());
+            }
+            keep
+        });
+        let zones_removed = self.zones.len() != zones;
+        if zones_removed {
+            self.zones_generation += 1;
+        }
+        let others =
+            self.content.len() + self.overlays.len() + self.glyphs.len() + self.gutter.len();
+        self.content.retain(|w| !ids.contains(&w.id));
+        self.overlays.retain(|w| !ids.contains(&w.id));
+        self.glyphs.retain(|w| !ids.contains(&w.id));
+        self.gutter.retain(|w| !ids.contains(&w.id));
+        zones_removed
+            || others
+                != self.content.len() + self.overlays.len() + self.glyphs.len() + self.gutter.len()
+    }
+
     /// Adds a view zone.
     pub fn push_zone(&mut self, zone: ZoneState) {
         self.zone_callbacks += usize::from(zone.has_callbacks());

@@ -285,10 +285,11 @@ fn occurrences(
     uri: Option<gpui::SharedString>,
 ) -> Vec<Location> {
     let is_word = |c: char| c.is_alphanumeric() || c == '_';
-    let rows = snapshot.rope().max_point().row + 1;
+    let rope = snapshot.rope();
     let mut found = Vec::new();
-    for row in 0..rows {
-        let line = snapshot.line(row);
+    let mut row = 0;
+    // The lines borrowed, not copied.
+    rope.for_each_line(0..rope.len(), |_, line| {
         for (start, _) in line.match_indices(word) {
             let end = start + word.len();
             let before = line[..start].chars().next_back();
@@ -304,7 +305,9 @@ fn occurrences(
                 ..Default::default()
             });
         }
-    }
+        row += 1;
+        true
+    });
     found
 }
 
@@ -412,31 +415,34 @@ impl DefinitionProvider for DemoDefinitions {
         if word.is_empty() {
             return Task::ready(Ok(Vec::new()));
         }
-        let rows = context.snapshot.rope().max_point().row + 1;
-        let found = (0..rows).find_map(|row| {
-            let line = context.snapshot.line(row);
-            ["fn ", "struct ", "enum ", "trait "]
-                .iter()
-                .find_map(|keyword| {
-                    let declaration = format!("{keyword}{word}");
-                    let column = line.find(&declaration)? + keyword.len();
-                    let after = line[column + word.len()..].chars().next();
-                    if after.is_some_and(|c| c.is_alphanumeric() || c == '_') {
-                        return None;
-                    }
-                    let column = line[..column].encode_utf16().count() as u32;
-                    let name = PointUtf16::new(row, column)
-                        ..PointUtf16::new(row, column + word.encode_utf16().count() as u32);
-                    // A `LocationLink`: the definition hover shows the whole
-                    // line; navigating and peek select the name.
-                    Some(Location {
-                        uri: None,
-                        range: PointUtf16::new(row, 0)
-                            ..PointUtf16::new(row, line.encode_utf16().count() as u32),
-                        target_selection_range: Some(name),
-                        ..Default::default()
-                    })
+        let declarations = ["fn ", "struct ", "enum ", "trait "]
+            .map(|keyword| (keyword, format!("{keyword}{word}")));
+        let rope = context.snapshot.rope();
+        let mut found = None;
+        let mut row = 0;
+        // The lines borrowed, not copied, up to the first declaration.
+        rope.for_each_line(0..rope.len(), |_, line| {
+            found = declarations.iter().find_map(|(keyword, declaration)| {
+                let column = line.find(declaration.as_str())? + keyword.len();
+                let after = line[column + word.len()..].chars().next();
+                if after.is_some_and(|c| c.is_alphanumeric() || c == '_') {
+                    return None;
+                }
+                let column = line[..column].encode_utf16().count() as u32;
+                let name = PointUtf16::new(row, column)
+                    ..PointUtf16::new(row, column + word.encode_utf16().count() as u32);
+                // A `LocationLink`: the definition hover shows the whole
+                // line; navigating and peek select the name.
+                Some(Location {
+                    uri: None,
+                    range: PointUtf16::new(row, 0)
+                        ..PointUtf16::new(row, line.encode_utf16().count() as u32),
+                    target_selection_range: Some(name),
+                    ..Default::default()
                 })
+            });
+            row += 1;
+            found.is_none()
         });
         Task::ready(Ok(found.into_iter().collect()))
     }
@@ -524,21 +530,28 @@ impl CodeLensProvider for DemoCodeLens {
     fn provide_code_lenses(
         &self,
         context: &ProviderContext,
-        _: &mut App,
+        cx: &mut App,
     ) -> Task<anyhow::Result<Vec<CodeLens>>> {
-        let rows = context.snapshot.rope().max_point().row + 1;
-        let lenses = (0..rows)
-            .filter_map(|row| {
-                let line = context.snapshot.line(row);
-                let column = line.find("fn ")? as u32;
-                Some(CodeLens {
-                    range: PointUtf16::new(row, column + 3)..PointUtf16::new(row, column + 3),
-                    command: None,
-                    ..Default::default()
-                })
-            })
-            .collect();
-        Task::ready(Ok(lenses))
+        // Scanning the whole document: off the main thread, the lines
+        // borrowed, not copied.
+        let rope = context.snapshot.rope().clone();
+        cx.background_executor().spawn(async move {
+            let mut lenses = Vec::new();
+            let mut row = 0;
+            rope.for_each_line(0..rope.len(), |_, line| {
+                if let Some(column) = line.find("fn ") {
+                    let column = column as u32 + 3;
+                    lenses.push(CodeLens {
+                        range: PointUtf16::new(row, column)..PointUtf16::new(row, column),
+                        command: None,
+                        ..Default::default()
+                    });
+                }
+                row += 1;
+                true
+            });
+            Ok(lenses)
+        })
     }
 
     fn resolve_code_lens(
@@ -574,7 +587,53 @@ impl CodeLensProvider for DemoCodeLens {
 /// Inlay hints: `: Type` after `let name` (the type a part linking to its
 /// `struct`, hovering and right-clicking there), and parameter names
 /// before the first argument of calls to a `fn` in the file.
-struct DemoInlayHints;
+#[derive(Default)]
+struct DemoInlayHints {
+    /// The last model's index, by its uri and text version: scrolling asks
+    /// again for each viewport, and only edits change the index.
+    index: std::cell::RefCell<Option<(gpui::SharedString, usize, std::rc::Rc<HintIndex>)>>,
+}
+
+/// The `struct Name` rows and columns, and each `fn`'s name and first
+/// parameter.
+struct HintIndex {
+    structs: Vec<(String, u32, usize)>,
+    params: Vec<(String, String)>,
+}
+
+fn ident(s: &str) -> String {
+    s.chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect()
+}
+
+impl HintIndex {
+    /// One pass over the lines, borrowed, not copied.
+    fn new(rope: &gpui_monaco::text::Rope) -> Self {
+        let mut structs = Vec::new();
+        let mut params = Vec::new();
+        let mut row = 0;
+        rope.for_each_line(0..rope.len(), |_, line| {
+            if let Some(at) = line.find("struct ") {
+                let at = at + 7;
+                structs.push((ident(&line[at..]), row, at));
+            }
+            let param = (|| {
+                let at = line.find("fn ")? + 3;
+                let name = ident(&line[at..]);
+                let open = at + name.len();
+                let rest = line.get(open..)?.strip_prefix('(')?;
+                let param = ident(rest.trim_start_matches(['&', ' ']));
+                (!param.is_empty() && param != "self").then_some((name, param))
+            })();
+            params.extend(param);
+            row += 1;
+            true
+        });
+        Self { structs, params }
+    }
+}
+
 impl InlayHintsProvider for DemoInlayHints {
     fn provide_inlay_hints(
         &self,
@@ -582,117 +641,120 @@ impl InlayHintsProvider for DemoInlayHints {
         range: std::ops::Range<PointUtf16>,
         _: &mut App,
     ) -> Task<anyhow::Result<Vec<InlayHint>>> {
-        let rope = context.snapshot.rope();
-        let rows = rope.max_point().row + 1;
-        let lines: Vec<String> = (0..rows).map(|row| context.snapshot.line(row)).collect();
-        let ident = |s: &str| -> String {
-            s.chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_')
-                .collect()
-        };
-        // `struct Name` rows, and each `fn`'s first parameter.
-        let structs: Vec<(String, u32, usize)> = lines
-            .iter()
-            .enumerate()
-            .filter_map(|(row, line)| {
-                let at = line.find("struct ")? + 7;
-                Some((ident(&line[at..]), row as u32, at))
-            })
-            .collect();
-        let params: Vec<(String, String)> = lines
-            .iter()
-            .filter_map(|line| {
-                let at = line.find("fn ")? + 3;
-                let name = ident(&line[at..]);
-                let open = at + name.len();
-                let rest = line.get(open..)?.strip_prefix('(')?;
-                let param = ident(rest.trim_start_matches(['&', ' ']));
-                (!param.is_empty() && param != "self").then_some((name, param))
-            })
-            .collect();
-        let mut hints = Vec::new();
-        for row in range.start.row..=range.end.row.min(rows - 1) {
-            let line = &lines[row as usize];
-            if let Some(at) = line.find("let ") {
-                // The binding's name, after any `mut`.
-                let mut name_at = at + 4;
-                if line[name_at..].starts_with("mut ") {
-                    name_at += 4;
-                }
-                let name = ident(&line[name_at..]);
-                let end = name_at + name.len();
-                // A plain binding: not typed already, nor a pattern
-                // (`let Some(x)`, `let Point { .. }`).
-                let after = line[end..].trim_start();
-                if !name.is_empty() && !after.starts_with([':', '(', '{']) {
-                    // The type: a `Name::` or `Name {` after `=`, else i32.
-                    let value = line[end..].split('=').nth(1).unwrap_or("").trim_start();
-                    let ty = ident(value);
-                    let known = structs.iter().find(|(s, _, _)| *s == ty);
-                    let ty = if known.is_some() {
-                        ty
-                    } else {
-                        "i32".to_string()
-                    };
-                    hints.push(InlayHint {
-                        position: PointUtf16::new(row, end as u32),
-                        label: vec![
-                            InlayHintLabelPart {
-                                label: ": ".into(),
-                                ..Default::default()
-                            },
-                            InlayHintLabelPart {
-                                label: ty.clone().into(),
-                                location: known.map(|(s, r, c)| {
-                                    Location::new(
-                                        None,
-                                        PointUtf16::new(*r, *c as u32)
-                                            ..PointUtf16::new(*r, (*c + s.len()) as u32),
-                                    )
-                                }),
-                                tooltip: known.map(|_| {
-                                    Documentation::from(format!("`{ty}`, from this file"))
-                                }),
-                                ..Default::default()
-                            },
-                        ]
-                        .into(),
-                        kind: Some(InlayHintKind::Type),
-                        text_edits: vec![(
-                            PointUtf16::new(row, end as u32)..PointUtf16::new(row, end as u32),
-                            format!(": {ty}"),
-                        )],
-                        ..Default::default()
-                    });
-                }
+        let version = context.snapshot.version();
+        let mut cached = self.index.borrow_mut();
+        let index = match &*cached {
+            Some((resource, at, index)) if *resource == context.resource && *at == version => {
+                index.clone()
             }
-            for (name, param) in &params {
-                let call = format!("{name}(");
-                let mut from = 0;
-                while let Some(found) = line[from..].find(&call) {
-                    let open = from + found + call.len();
-                    from = open;
-                    let before = line[..open - call.len()].chars().last();
-                    let is_definition = line[..open - call.len()].trim_end().ends_with("fn");
-                    if is_definition
-                        || before.is_some_and(|c| c.is_alphanumeric() || c == '_')
-                        || line[open..].starts_with(')')
-                    {
-                        continue;
-                    }
-                    hints.push(InlayHint {
-                        position: PointUtf16::new(row, open as u32),
-                        label: format!("{param}:").into(),
-                        kind: Some(InlayHintKind::Parameter),
-                        padding_right: true,
-                        ..Default::default()
-                    });
-                }
+            _ => {
+                let index = std::rc::Rc::new(HintIndex::new(context.snapshot.rope()));
+                *cached = Some((context.resource.clone(), version, index.clone()));
+                index
+            }
+        };
+        Task::ready(Ok(demo_inlay_hints(&context.snapshot, &index, range)))
+    }
+}
+
+/// The demo's inlay hints for the rows of `range` (their lines borrowed,
+/// not copied).
+fn demo_inlay_hints(
+    snapshot: &gpui_monaco::text::BufferSnapshot,
+    index: &HintIndex,
+    range: std::ops::Range<PointUtf16>,
+) -> Vec<InlayHint> {
+    let HintIndex { structs, params } = index;
+    let rope = snapshot.rope();
+    let rows = rope.max_point().row + 1;
+    let mut hints = Vec::new();
+    let last_row = range.end.row.min(rows - 1);
+    let mut row = range.start.row;
+    let start = rope.point_to_offset(gpui_monaco::text::Point::new(row, 0));
+    rope.for_each_line(start..rope.len(), |_, line| {
+        if row > last_row {
+            return false;
+        }
+        if let Some(at) = line.find("let ") {
+            // The binding's name, after any `mut`.
+            let mut name_at = at + 4;
+            if line[name_at..].starts_with("mut ") {
+                name_at += 4;
+            }
+            let name = ident(&line[name_at..]);
+            let end = name_at + name.len();
+            // A plain binding: not typed already, nor a pattern
+            // (`let Some(x)`, `let Point { .. }`).
+            let after = line[end..].trim_start();
+            if !name.is_empty() && !after.starts_with([':', '(', '{']) {
+                // The type: a `Name::` or `Name {` after `=`, else i32.
+                let value = line[end..].split('=').nth(1).unwrap_or("").trim_start();
+                let ty = ident(value);
+                let known = structs.iter().find(|(s, _, _)| *s == ty);
+                let ty = if known.is_some() {
+                    ty
+                } else {
+                    "i32".to_string()
+                };
+                hints.push(InlayHint {
+                    position: PointUtf16::new(row, end as u32),
+                    label: vec![
+                        InlayHintLabelPart {
+                            label: ": ".into(),
+                            ..Default::default()
+                        },
+                        InlayHintLabelPart {
+                            label: ty.clone().into(),
+                            location: known.map(|(s, r, c)| {
+                                Location::new(
+                                    None,
+                                    PointUtf16::new(*r, *c as u32)
+                                        ..PointUtf16::new(*r, (*c + s.len()) as u32),
+                                )
+                            }),
+                            tooltip: known
+                                .map(|_| Documentation::from(format!("`{ty}`, from this file"))),
+                            ..Default::default()
+                        },
+                    ]
+                    .into(),
+                    kind: Some(InlayHintKind::Type),
+                    text_edits: vec![(
+                        PointUtf16::new(row, end as u32)..PointUtf16::new(row, end as u32),
+                        format!(": {ty}"),
+                    )],
+                    ..Default::default()
+                });
             }
         }
-        hints.sort_by_key(|hint| hint.position);
-        Task::ready(Ok(hints))
-    }
+        for (name, param) in params {
+            let call = format!("{name}(");
+            let mut from = 0;
+            while let Some(found) = line[from..].find(&call) {
+                let open = from + found + call.len();
+                from = open;
+                let before = line[..open - call.len()].chars().last();
+                let is_definition = line[..open - call.len()].trim_end().ends_with("fn");
+                if is_definition
+                    || before.is_some_and(|c| c.is_alphanumeric() || c == '_')
+                    || line[open..].starts_with(')')
+                {
+                    continue;
+                }
+                hints.push(InlayHint {
+                    position: PointUtf16::new(row, open as u32),
+                    label: format!("{param}:").into(),
+                    kind: Some(InlayHintKind::Parameter),
+                    padding_right: true,
+                    ..Default::default()
+                });
+            }
+        }
+        row += 1;
+        true
+    });
+    hints.sort_by_key(|hint| hint.position);
+    hints
 }
 
 /// Ghost text completing a few lines from what's typed, and an inline edit
@@ -701,32 +763,33 @@ struct DemoInlineCompletions;
 
 /// An inline edit adding a doc comment above the first `pub fn` without one.
 fn demo_inline_edit(context: &ProviderContext) -> Option<InlineCompletion> {
-    let snapshot = &context.snapshot;
-    let rows = snapshot.rope().max_point().row + 1;
-    (0..rows).find_map(|row| {
-        let line = snapshot.line(row);
-        let name = line.trim_start().strip_prefix("pub fn ")?;
-        let name: String = name
-            .chars()
-            .take_while(|c| c.is_alphanumeric() || *c == '_')
-            .collect();
-        let above = if row > 0 {
-            snapshot.line(row - 1)
-        } else {
-            String::new()
-        };
-        let above = above.trim_start();
-        if above.starts_with("///") || above.starts_with("#[") {
-            return None;
+    let rope = context.snapshot.rope();
+    let mut found = None;
+    let mut row = 0;
+    // Whether the line above is documented or has an attribute.
+    let mut above_documented = false;
+    // The lines borrowed, not copied, up to the first undocumented one.
+    rope.for_each_line(0..rope.len(), |_, line| {
+        let trimmed = line.trim_start();
+        if !above_documented && let Some(name) = trimmed.strip_prefix("pub fn ") {
+            let name: String = name
+                .chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect();
+            let indent = &line[..line.len() - trimmed.len()];
+            found = Some(InlineCompletion {
+                insert_text: format!("{indent}/// TODO: document `{name}`.\n"),
+                range: Some(PointUtf16::new(row, 0)..PointUtf16::new(row, 0)),
+                is_inline_edit: true,
+                ..Default::default()
+            });
+            return false;
         }
-        let indent = &line[..line.len() - line.trim_start().len()];
-        Some(InlineCompletion {
-            insert_text: format!("{indent}/// TODO: document `{name}`.\n"),
-            range: Some(PointUtf16::new(row, 0)..PointUtf16::new(row, 0)),
-            is_inline_edit: true,
-            ..Default::default()
-        })
-    })
+        above_documented = trimmed.starts_with("///") || trimmed.starts_with("#[");
+        row += 1;
+        true
+    });
+    found
 }
 impl InlineCompletionsProvider for DemoInlineCompletions {
     fn provide_inline_completions(
@@ -833,7 +896,7 @@ impl DocumentPasteEditProvider for DemoPasteAsString {
 
 pub fn register(cx: &mut App) {
     register_code_lens_provider(cx, LanguageSelector::All, DemoCodeLens);
-    register_inlay_hints_provider(cx, LanguageSelector::All, DemoInlayHints);
+    register_inlay_hints_provider(cx, LanguageSelector::All, DemoInlayHints::default());
     register_document_paste_edit_provider(cx, LanguageSelector::All, DemoPasteAsString);
     let _ = gpui_monaco::register_command(cx, "playground.references", |args, _| {
         eprintln!("references to {args:?}");

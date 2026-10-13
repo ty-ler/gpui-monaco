@@ -80,9 +80,9 @@ Measured with `PLAYGROUND_PERF=1`.
 
 | File | Open in running app | Keystroke p95 | Page Down p95 |
 |---|---|---|---|
-| 277 lines | 0.8ms | 4.6ms | 3.6ms |
-| 100k lines / 3.5MB | 7.5ms | 5.8ms | 8.5ms |
-| 300k lines / 10MB | 26ms | 6.0ms | 9.5ms |
+| 277 lines | 1.1ms | 4.6ms | 3.6ms |
+| 100k lines / 3.5MB | 5ms | 5.8ms | 8.5ms |
+| 300k lines / 10MB | 11ms | 6.0ms | 9.5ms |
 
 Startup to the first frame, including app and window creation, is about 200 to 300ms regardless of file size.
 
@@ -101,3 +101,11 @@ Each of these was a measured hot spot on large files:
   - Typing within a line updates only the edited rows' view-line counts.
   - `ViewLines` and `Buffer` are shared, not cloned, each frame.
 - **Per-keystroke work on a line scales with the columns it needs, not the line.** On a long line (minified code), fetching the whole line as a `String`, or encoding it to UTF-16, on every keystroke is most of the cost. `Rope::line_units_utf16` reads only the UTF-16 columns asked for, so ghost text and the suggest preview (`LineSource`), the minimap's decoration offsets (`ViewLines::line_content_prefix`, up to the minimap's width) and indent guides (leading whitespace only) read just that. Bracket matching skips the position-to-offset lookup when a block has no strings or comments, and checks a bracket's first code unit before comparing it.
+- **Opening a file avoids per-line work.**
+  - Indentation guessing streams its 10 000 lines from the rope instead of copying and encoding each one.
+  - Rope chunks of ASCII text are measured a line at a time, not a char at a time.
+  - Line endings and unusual line terminators are found by byte search.
+  - `Rope::point_to_offset` and line lengths skip the char-by-char walk.
+  - The first minimap tile reads from the rope only what fits in its width, not whole lines.
+  - Code lens zones are removed in one pass.
+  - The playground's demo providers scan the document with borrowed lines. Code lenses are found off the main thread. The inlay hints' document index is cached per model and version, so a scroll scans only the requested rows. The hints stay synchronous: hints that arrive a frame later make the next frame lay them out.

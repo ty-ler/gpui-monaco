@@ -2,9 +2,7 @@
 
 use crate::Rope;
 
-const TAB: u16 = b'\t' as u16;
 const SPACE: u16 = b' ' as u16;
-const COMMA: u16 = b',' as u16;
 
 /// Monaco `IGuessedIndentation`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -22,23 +20,36 @@ struct SpacesDiff {
     looks_like_alignment: bool,
 }
 
+/// The UTF-16 unit at `index` of `line` (Monaco `charCodeAt`).
+fn utf16_at(line: &str, index: usize) -> Option<u16> {
+    let bytes = line.as_bytes();
+    // Up to the indentation and beyond, lines are mostly ASCII: no need to
+    // encode them.
+    if bytes.len() > index && bytes[..=index].is_ascii() {
+        return Some(u16::from(bytes[index]));
+    }
+    line.encode_utf16().nth(index)
+}
+
 /// Monaco `spacesDiff`: how the indentation (`a_length` and `b_length`
-/// UTF-16 units) of two lines differs.
-fn spaces_diff(a: &[u16], a_length: usize, b: &[u16], b_length: usize, result: &mut SpacesDiff) {
+/// units) of two lines differs. The indentation is tabs and spaces, so its
+/// bytes are its UTF-16 units.
+fn spaces_diff(a: &str, a_length: usize, b: &str, b_length: usize, result: &mut SpacesDiff) {
     result.spaces_diff = 0;
     result.looks_like_alignment = false;
+    let (a_bytes, b_bytes) = (a.as_bytes(), b.as_bytes());
 
     // This can go both ways: "\t" and "\t    " count 1 tab and 4 spaces.
     let mut i = 0;
-    while i < a_length && i < b_length && a[i] == b[i] {
+    while i < a_length && i < b_length && a_bytes[i] == b_bytes[i] {
         i += 1;
     }
-    let count = |s: &[u16], len: usize| {
-        let spaces = s[i..len].iter().filter(|&&c| c == SPACE).count();
+    let count = |s: &[u8], len: usize| {
+        let spaces = s[i..len].iter().filter(|&&c| c == b' ').count();
         (spaces, len - i - spaces)
     };
-    let (a_spaces, a_tabs) = count(a, a_length);
-    let (b_spaces, b_tabs) = count(b, b_length);
+    let (a_spaces, a_tabs) = count(a_bytes, a_length);
+    let (b_spaces, b_tabs) = count(b_bytes, b_length);
     if (a_spaces > 0 && a_tabs > 0) || (b_spaces > 0 && b_tabs > 0) {
         return;
     }
@@ -49,11 +60,9 @@ fn spaces_diff(a: &[u16], a_length: usize, b: &[u16], b_length: usize, result: &
         result.spaces_diff = spaces_diff;
         if spaces_diff > 0
             && b_spaces >= 1
-            && b_spaces - 1 < a.len()
-            && b_spaces < b.len()
-            && b[b_spaces] != SPACE
-            && a[b_spaces - 1] == SPACE
-            && a.last() == Some(&COMMA)
+            && utf16_at(b, b_spaces).is_some_and(|c| c != SPACE)
+            && utf16_at(a, b_spaces - 1) == Some(SPACE)
+            && a.ends_with(',')
         {
             // const a = b + c,
             //       d = b - c;
@@ -68,6 +77,9 @@ fn spaces_diff(a: &[u16], a_length: usize, b: &[u16], b_length: usize, result: &
 
 /// Monaco `guessIndentation`: whether the first 10 000 lines of `text`
 /// indent with spaces, and with how many, falling back to the defaults.
+///
+/// The lines are streamed from the rope's chunks, not copied out or
+/// encoded to UTF-16 one by one.
 pub fn guess_indentation(
     text: &Rope,
     default_tab_size: u32,
@@ -78,7 +90,7 @@ pub fn guess_indentation(
     let mut lines_with_tabs = 0;
     let mut lines_with_spaces = 0;
     // The last line with content and where its content starts.
-    let mut previous_line: Vec<u16> = Vec::new();
+    let mut previous_line = String::new();
     let mut previous_indentation = 0;
     // Prefer even guesses for the tab size, in [2, 8].
     const ALLOWED_TAB_SIZE_GUESSES: [usize; 7] = [2, 4, 6, 8, 3, 5, 7];
@@ -86,16 +98,20 @@ pub fn guess_indentation(
     let mut spaces_diff_count = [0usize; 9];
     let mut diff = SpacesDiff::default();
 
-    for row in 0..line_count {
-        let line: Vec<u16> = text.line(row).encode_utf16().collect();
+    let mut row = 0;
+    text.for_each_line(0..text.len(), |_, line| {
+        if row == line_count {
+            return false;
+        }
+        row += 1;
         let mut has_content = false;
         let mut indentation = 0;
         let mut spaces = 0;
         let mut tabs = 0;
-        for (j, &c) in line.iter().enumerate() {
-            if c == TAB {
+        for (j, &c) in line.as_bytes().iter().enumerate() {
+            if c == b'\t' {
                 tabs += 1;
-            } else if c == SPACE {
+            } else if c == b' ' {
                 spaces += 1;
             } else {
                 has_content = true;
@@ -105,7 +121,7 @@ pub fn guess_indentation(
         }
         // Empty and whitespace-only lines are ignored.
         if !has_content {
-            continue;
+            return true;
         }
         if tabs > 0 {
             lines_with_tabs += 1;
@@ -116,7 +132,7 @@ pub fn guess_indentation(
         spaces_diff(
             &previous_line,
             previous_indentation,
-            &line,
+            line,
             indentation,
             &mut diff,
         );
@@ -125,14 +141,16 @@ pub fn guess_indentation(
         if diff.looks_like_alignment
             && !(default_insert_spaces && default_tab_size as usize == diff.spaces_diff)
         {
-            continue;
+            return true;
         }
         if diff.spaces_diff <= MAX_ALLOWED_TAB_SIZE_GUESS {
             spaces_diff_count[diff.spaces_diff] += 1;
         }
-        previous_line = line;
+        previous_line.clear();
+        previous_line.push_str(line);
         previous_indentation = indentation;
-    }
+        true
+    });
 
     let mut insert_spaces = default_insert_spaces;
     if lines_with_tabs != lines_with_spaces {
@@ -168,6 +186,159 @@ pub fn guess_indentation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TAB: u16 = b'\t' as u16;
+    const COMMA: u16 = b',' as u16;
+
+    // The per-line implementation `guess_indentation` replaced (each
+    // line copied out and encoded to UTF-16), to check it against.
+    /// Monaco `spacesDiff`: how the indentation (`a_length` and `b_length`
+    /// UTF-16 units) of two lines differs.
+    fn spaces_diff_utf16(
+        a: &[u16],
+        a_length: usize,
+        b: &[u16],
+        b_length: usize,
+        result: &mut SpacesDiff,
+    ) {
+        result.spaces_diff = 0;
+        result.looks_like_alignment = false;
+
+        // This can go both ways: "\t" and "\t    " count 1 tab and 4 spaces.
+        let mut i = 0;
+        while i < a_length && i < b_length && a[i] == b[i] {
+            i += 1;
+        }
+        let count = |s: &[u16], len: usize| {
+            let spaces = s[i..len].iter().filter(|&&c| c == SPACE).count();
+            (spaces, len - i - spaces)
+        };
+        let (a_spaces, a_tabs) = count(a, a_length);
+        let (b_spaces, b_tabs) = count(b, b_length);
+        if (a_spaces > 0 && a_tabs > 0) || (b_spaces > 0 && b_tabs > 0) {
+            return;
+        }
+        let tabs_diff = a_tabs.abs_diff(b_tabs);
+        let spaces_diff = a_spaces.abs_diff(b_spaces);
+        if tabs_diff == 0 {
+            // The difference may be alignment, which is no hint.
+            result.spaces_diff = spaces_diff;
+            if spaces_diff > 0
+                && b_spaces >= 1
+                && b_spaces - 1 < a.len()
+                && b_spaces < b.len()
+                && b[b_spaces] != SPACE
+                && a[b_spaces - 1] == SPACE
+                && a.last() == Some(&COMMA)
+            {
+                // const a = b + c,
+                //       d = b - c;
+                result.looks_like_alignment = true;
+            }
+            return;
+        }
+        if spaces_diff % tabs_diff == 0 {
+            result.spaces_diff = spaces_diff / tabs_diff;
+        }
+    }
+
+    /// Monaco `guessIndentation`: whether the first 10 000 lines of `text`
+    /// indent with spaces, and with how many, falling back to the defaults.
+    fn guess_indentation_per_line(
+        text: &Rope,
+        default_tab_size: u32,
+        default_insert_spaces: bool,
+    ) -> GuessedIndentation {
+        let line_count = text.line_count().min(10_000);
+        // Lines with at least one tab, and with only spaces, in their indentation.
+        let mut lines_with_tabs = 0;
+        let mut lines_with_spaces = 0;
+        // The last line with content and where its content starts.
+        let mut previous_line: Vec<u16> = Vec::new();
+        let mut previous_indentation = 0;
+        // Prefer even guesses for the tab size, in [2, 8].
+        const ALLOWED_TAB_SIZE_GUESSES: [usize; 7] = [2, 4, 6, 8, 3, 5, 7];
+        const MAX_ALLOWED_TAB_SIZE_GUESS: usize = 8;
+        let mut spaces_diff_count = [0usize; 9];
+        let mut diff = SpacesDiff::default();
+
+        for row in 0..line_count {
+            let line: Vec<u16> = text.line(row).encode_utf16().collect();
+            let mut has_content = false;
+            let mut indentation = 0;
+            let mut spaces = 0;
+            let mut tabs = 0;
+            for (j, &c) in line.iter().enumerate() {
+                if c == TAB {
+                    tabs += 1;
+                } else if c == SPACE {
+                    spaces += 1;
+                } else {
+                    has_content = true;
+                    indentation = j;
+                    break;
+                }
+            }
+            // Empty and whitespace-only lines are ignored.
+            if !has_content {
+                continue;
+            }
+            if tabs > 0 {
+                lines_with_tabs += 1;
+            } else if spaces > 1 {
+                lines_with_spaces += 1;
+            }
+
+            spaces_diff_utf16(
+                &previous_line,
+                previous_indentation,
+                &line,
+                indentation,
+                &mut diff,
+            );
+            // Alignment counts only when it matches the default spaces indent
+            // (`- item` lists); otherwise the line is skipped.
+            if diff.looks_like_alignment
+                && !(default_insert_spaces && default_tab_size as usize == diff.spaces_diff)
+            {
+                continue;
+            }
+            if diff.spaces_diff <= MAX_ALLOWED_TAB_SIZE_GUESS {
+                spaces_diff_count[diff.spaces_diff] += 1;
+            }
+            previous_line = line;
+            previous_indentation = indentation;
+        }
+
+        let mut insert_spaces = default_insert_spaces;
+        if lines_with_tabs != lines_with_spaces {
+            insert_spaces = lines_with_tabs < lines_with_spaces;
+        }
+        let mut tab_size = default_tab_size;
+        // The tab size is guessed only when indenting with spaces.
+        if insert_spaces {
+            let mut score = 0;
+            for guess in ALLOWED_TAB_SIZE_GUESSES {
+                if spaces_diff_count[guess] > score {
+                    score = spaces_diff_count[guess];
+                    tab_size = guess as u32;
+                }
+            }
+            // 2 wins over 4 with at least 2/3 of 4's count (e.g. YAML nested
+            // deeper in places).
+            if tab_size == 4
+                && spaces_diff_count[4] > 0
+                && spaces_diff_count[2] > 0
+                && spaces_diff_count[2] as f64 >= spaces_diff_count[4] as f64 * 2. / 3.
+            {
+                tab_size = 2;
+            }
+        }
+        GuessedIndentation {
+            tab_size,
+            insert_spaces,
+        }
+    }
 
     /// What a test expects of the tab size.
     enum Tab {
@@ -623,5 +794,51 @@ mod tests {
                 "}",
             ],
         );
+    }
+
+    proptest::proptest! {
+        // Lines of tabs, spaces, ASCII and non-ASCII text, commas and
+        // `\r`: the streaming guess agrees with the per-line one.
+        #[test]
+        fn streaming_matches_per_line(
+            lines in proptest::collection::vec("[ \t]{0,10}[a-c,é𝒳 \r]{0,6}", 0..60),
+            default_spaces in proptest::bool::ANY,
+            default_tab in 1u32..9,
+        ) {
+            let text = Rope::from(lines.join("\n").as_str());
+            proptest::prop_assert_eq!(
+                guess_indentation(&text, default_tab, default_spaces),
+                guess_indentation_per_line(&text, default_tab, default_spaces)
+            );
+        }
+    }
+
+    /// Past 10 000 lines, and lines spanning the rope's chunks.
+    #[test]
+    fn streaming_matches_per_line_on_large_texts() {
+        let mut text = String::new();
+        for row in 0..12_000 {
+            let indent = match row % 7 {
+                0 => "\t".to_string(),
+                1 | 2 => " ".repeat(row % 9),
+                3 => format!("\t{}", " ".repeat(row % 3)),
+                _ => "  ".repeat(row % 5),
+            };
+            let body = "é,".repeat(row % 40);
+            text.push_str(&format!("{indent}x{body}\n"));
+            if row == 10_500 {
+                // After line 10 000: ignored.
+                for _ in 0..500 {
+                    text.push_str("\tz\n");
+                }
+            }
+        }
+        let rope = Rope::from(text.as_str());
+        for (tab, spaces) in [(4, true), (8, false), (2, true)] {
+            assert_eq!(
+                guess_indentation(&rope, tab, spaces),
+                guess_indentation_per_line(&rope, tab, spaces)
+            );
+        }
     }
 }
