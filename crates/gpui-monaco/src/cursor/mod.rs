@@ -97,7 +97,7 @@ pub use transforms::{
 pub use typing::{
     composition_type, copy_text, cut, delete_all_left, delete_inside_word, delete_left,
     delete_right, delete_word, delete_word_left, delete_word_part, delete_word_right, line_break,
-    outdent, paste, tab, type_text,
+    outdent, paste, tab, type_text, type_without_interceptors,
 };
 pub(crate) use word::word_at_position;
 pub use word::{WordNavigationType, move_word, word_at};

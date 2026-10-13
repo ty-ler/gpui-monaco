@@ -255,12 +255,25 @@ impl CodeEditor {
         if edits.is_empty() {
             return;
         }
-        // Part of the same undo step as the typing (Monaco pops the undo
-        // stop and keeps the previous edit type).
+        // Part of the same undo step as the edit that triggered it (Monaco
+        // `popUndoStop`, keeping the previous edit type), even one that
+        // pushed an undo stop after itself, such as a paste or a cut. The
+        // stop goes back after the mirror edit.
         self.linked.syncing = true;
         let kind = self.prev_edit_kind.unwrap_or(EditOperationType::Other);
         edits.sort_by_key(|(range, _)| range.start);
+        let sealed = self.model().update(cx, |model, _| {
+            let sealed = model.is_last_undo_step_sealed();
+            if sealed {
+                model.pop_stack_element();
+            }
+            sealed
+        });
         self.apply_edits_moving_cursors(&edits, kind, cx);
+        if sealed {
+            self.model()
+                .update(cx, |model, _| model.push_stack_element());
+        }
         self.prev_edit_kind = Some(kind);
         self.linked.syncing = false;
     }

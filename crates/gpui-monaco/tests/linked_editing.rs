@@ -540,6 +540,37 @@ fn breakout_paste_content_starting_with_space_then_undo(cx: &mut TestAppContext)
     assert_eq!(text(&editor, cx), "<ooo></ooo>");
 }
 
+/// Monaco `_syncRanges` pops the undo stop the paste pushed after itself,
+/// so the mirror edit joins the paste's undo step; typing after starts a
+/// new one.
+#[gpui::test]
+fn paste_and_its_mirror_edit_are_one_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = mock_editor(STATE, None, cx);
+    set_position(&editor, cx, 1, 5);
+    paste(&editor, cx, "abc");
+    assert_eq!(text(&editor, cx), "<oooabc></oooabc>");
+    type_text(&editor, cx, "x");
+    assert_eq!(text(&editor, cx), "<oooabcx></oooabcx>");
+    undo(&editor, cx);
+    assert_eq!(text(&editor, cx), "<oooabc></oooabc>");
+    undo(&editor, cx);
+    assert_eq!(text(&editor, cx), STATE);
+    redo(&editor, cx);
+    assert_eq!(text(&editor, cx), "<oooabc></oooabc>");
+}
+
+/// Likewise for a cut (`Other`, with undo stops before and after).
+#[gpui::test]
+fn cut_and_its_mirror_edit_are_one_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = mock_editor(STATE, None, cx);
+    set_position(&editor, cx, 1, 2);
+    set_selection(&editor, cx, (1, 2, 1, 4));
+    trigger(&editor, cx, "cut", json!({}));
+    assert_eq!(text(&editor, cx), "<o></o>");
+    undo(&editor, cx);
+    assert_eq!(text(&editor, cx), STATE);
+}
+
 linked_case!(breakout_paste_content_starting_with_space_in_middle,
     pattern: None, at: (1, 4), paste " i", "<oo io></ooo>");
 

@@ -39,9 +39,9 @@ use super::{
 type Commands<'a> = Vec<Option<Box<dyn Command + 'a>>>;
 
 /// Types `text` at every cursor, replacing selections (Monaco
-/// `TypeOperations.typeWithoutInterceptors`, which for a single character is
-/// what `typeWithInterceptors` falls back to without language features).
-/// Typing a lone line break behaves like [`line_break`].
+/// `SimpleCharacterTypeOperation`, what `typeWithInterceptors` falls back
+/// to without language features). Typing a lone line break behaves like
+/// [`line_break`]; [`type_without_interceptors`] inserts it as is.
 ///
 /// `prev` is the `kind` of the previous edit operation (`None` at start);
 /// it decides whether an undo stop goes before this one, so consecutive
@@ -61,6 +61,19 @@ pub fn type_text(
         return line_break(config, model, cursors);
     }
     type_simple(model, cursors, text, prev, config.overtype)
+}
+
+/// Monaco `TypeWithoutInterceptorsOperation` (what `Cursor.type` runs for
+/// text that doesn't come from the keyboard): replaces every selection by
+/// `text` in one edit, with no auto-closing, auto-surrounding, Enter
+/// auto-indent or overtype; a line break is inserted as is.
+pub fn type_without_interceptors(
+    model: &impl CursorModel,
+    cursors: &CursorCollection,
+    text: &str,
+    prev: Option<EditOperationType>,
+) -> EditOperation {
+    type_simple(model, cursors, text, prev, false)
 }
 
 /// Monaco `SimpleCharacterTypeOperation`: replaces every selection by

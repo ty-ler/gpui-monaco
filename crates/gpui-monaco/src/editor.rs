@@ -4090,14 +4090,39 @@ impl CodeEditor {
         self.end_update(cx);
     }
 
-    fn type_text_inner(&mut self, text: &str, cx: &mut Context<Self>) {
-        let single_line;
-        let text = if self.options.single_line && text.contains('\n') {
-            single_line = text.replace(['\r', '\n'], " ");
-            single_line.as_str()
+    /// Monaco `Cursor.type` from any source but the keyboard
+    /// (`TypeOperations.typeWithoutInterceptors`): replaces every selection
+    /// by `text` in one edit, without auto-closing, auto-surrounding,
+    /// Enter's auto-indent or electric characters, and without
+    /// [`CodeEditorEvent::WillType`]/[`CodeEditorEvent::DidType`], so
+    /// suggest, signature help, inline completions and format-on-type don't
+    /// react to it (Monaco `CodeEditorWidget._type`).
+    pub(crate) fn type_text_without_interceptors(&mut self, text: &str, cx: &mut Context<Self>) {
+        if text.is_empty() {
+            return;
+        }
+        let text = self.single_line_text(text);
+        let prev = self.prev_edit_kind;
+        self.begin_update(cx);
+        self.run_edit(cx, |_, m, s| {
+            cursor::type_without_interceptors(m, s, &text, prev)
+        });
+        self.end_update(cx);
+    }
+
+    /// `text` with its line breaks turned into spaces in a single-line
+    /// editor.
+    fn single_line_text<'a>(&self, text: &'a str) -> std::borrow::Cow<'a, str> {
+        if self.options.single_line && text.contains('\n') {
+            text.replace(['\r', '\n'], " ").into()
         } else {
-            text
-        };
+            text.into()
+        }
+    }
+
+    fn type_text_inner(&mut self, text: &str, cx: &mut Context<Self>) {
+        let text = self.single_line_text(text);
+        let text = text.as_ref();
         if let Some(ch) = text.chars().next().filter(|_| text.chars().count() == 1) {
             self.commit_suggestion_on(ch, cx);
         }
@@ -4619,7 +4644,7 @@ impl CodeEditor {
 
     /// The editor's own paste, when paste edit providers leave it to it.
     pub(crate) fn paste_item_for_providers(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
-        self.paste_item_inner(item, cx);
+        self.paste_item_inner(item, true, cx);
         self.trigger_inline_completions(cx);
     }
 
@@ -4649,11 +4674,20 @@ impl CodeEditor {
         if self.paste_with_providers(data, item.clone(), cx) {
             return;
         }
-        self.paste_item_inner(item, cx);
+        self.paste_item_inner(item, true, cx);
         self.trigger_inline_completions(cx);
     }
 
-    pub(crate) fn paste_item_inner(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
+    /// Monaco `CodeEditorWidget._paste`: pastes `item` at every cursor.
+    /// Only a paste from the keyboard (`keyboard`, Monaco's `'keyboard'`
+    /// source) fires `onDidPaste`, which format-on-paste and
+    /// `AutoIndentOnPaste` listen to.
+    pub(crate) fn paste_item_inner(
+        &mut self,
+        item: ClipboardItem,
+        keyboard: bool,
+        cx: &mut Context<Self>,
+    ) {
         let version = self.snapshot.version();
         let primary_start = self.cursors.primary().selection().start();
         let language_id = Self::clipboard_metadata(&item)
@@ -4663,7 +4697,7 @@ impl CodeEditor {
         self.paste_clipboard_item(item, cx);
         // Nothing may have changed.
         self.next_selection_change = CursorChangeCause::default();
-        if self.snapshot.version() != version {
+        if keyboard && self.snapshot.version() != version {
             // Monaco `onDidPaste`: from the primary selection's start before
             // to its start after.
             let range = primary_start..self.cursors.primary().selection().start();

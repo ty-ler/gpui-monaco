@@ -646,6 +646,12 @@ impl Buffer {
         }
     }
 
+    /// Whether the most recent undo step is closed to further edits (a
+    /// [`Buffer::push_stack_element`] or an ungrouped edit ended it).
+    pub fn is_last_step_sealed(&self) -> bool {
+        self.history.undo.last().is_some_and(|last| last.sealed)
+    }
+
     /// Sets the cursor state saved with the most recent undo step. `before` is
     /// only recorded if the step has none yet, so grouped typing keeps the
     /// state from before its first edit; `after` always replaces.
