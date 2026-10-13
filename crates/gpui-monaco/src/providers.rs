@@ -2310,6 +2310,18 @@ fn code_action_providers_changed(cx: &mut App) {
     cx.default_global::<CodeActionProvidersEpoch>().0 += 1;
 }
 
+/// Bumped when a completion provider is registered or removed; open
+/// suggest sessions ask again or close (Monaco's `SuggestModel` listening
+/// to `completionProvider.onDidChange`).
+#[derive(Default)]
+pub(crate) struct CompletionProvidersEpoch(pub u64);
+
+impl Global for CompletionProvidersEpoch {}
+
+fn completion_providers_changed(cx: &mut App) {
+    cx.default_global::<CompletionProvidersEpoch>().0 += 1;
+}
+
 // ----- document highlights -------------------------------------------------------
 
 /// What an occurrence highlight marks (Monaco `DocumentHighlightKind`).
@@ -3080,15 +3092,28 @@ macro_rules! register_fn {
     };
 }
 
-register_fn!(
-    /// Registers a completion provider for the models `selector` matches (Monaco
-    /// `registerCompletionItemProvider`). Providers are asked in groups of equal
-    /// [score](LanguageSelector::score), best first, and the first group with items
-    /// wins; the lists of that group's providers are merged.
-    register_completion_provider,
-    completion,
-    CompletionProvider
-);
+/// Registers a completion provider for the models `selector` matches (Monaco
+/// `registerCompletionItemProvider`). Providers are asked in groups of equal
+/// [score](LanguageSelector::score), best first, and the first group with items
+/// wins; the lists of that group's providers are merged. Open suggest sessions
+/// ask again, as they do when one is unregistered (Monaco's `SuggestModel` on
+/// `completionProvider.onDidChange`).
+pub fn register_completion_provider(
+    cx: &mut App,
+    selector: LanguageSelector,
+    provider: impl CompletionProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.completion.push(Entry {
+        id,
+        selector,
+        provider: Arc::new(provider),
+    });
+    completion_providers_changed(cx);
+    id
+}
 register_fn!(
     /// Registers a hover provider for the models `selector` matches (Monaco
     /// `registerHoverProvider`). Results from all matching providers are shown together.
@@ -3346,7 +3371,9 @@ register_fn!(
 pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     let features = features(cx);
     features.document_highlight.retain(|e| e.id != registration);
+    let completion_changed = features.completion.len();
     features.completion.retain(|e| e.id != registration);
+    let completion_changed = features.completion.len() != completion_changed;
     features.hover.retain(|e| e.id != registration);
     features.colors.retain(|e| e.id != registration);
     features.definition.retain(|e| e.id != registration);
@@ -3397,6 +3424,9 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     }
     if code_action_changed {
         code_action_providers_changed(cx);
+    }
+    if completion_changed {
+        completion_providers_changed(cx);
     }
 }
 
