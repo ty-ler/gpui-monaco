@@ -318,6 +318,75 @@ pub trait CursorModel {
         let start = (columns.start as usize).min(end);
         String::from_utf16_lossy(&units[start..end])
     }
+    /// The UTF-16 units of `row` in the columns `window` picks given the
+    /// row's length, clamped to it, with those columns: [`line_slice`]
+    /// without looking the row up twice.
+    ///
+    /// [`line_slice`]: CursorModel::line_slice
+    fn line_units_in(
+        &self,
+        row: u32,
+        window: &dyn Fn(u32) -> Range<u32>,
+    ) -> (Vec<u16>, Range<u32>) {
+        let max = self.line_max_column(row);
+        let columns = clamp_columns(window(max), max);
+        let units = self
+            .line_slice(row, columns.clone())
+            .encode_utf16()
+            .collect();
+        (units, columns)
+    }
+}
+
+/// `columns` clamped to a row `max` units long.
+fn clamp_columns(columns: Range<u32>, max: u32) -> Range<u32> {
+    columns.start.min(max)..columns.end.min(max)
+}
+
+/// Rows up to this many bytes are read whole by [`rope_line_units_in`].
+const SHORT_ROW_BYTES: usize = 4096;
+
+/// [`CursorModel::line_units_in`] for a rope: a short row is read in one
+/// pass from its start, else `None`. Two rope seeks instead of the five of
+/// [`CursorModel::line_max_column`] and [`CursorModel::line_slice`].
+fn rope_line_units_in(
+    rope: &text::Rope,
+    row: u32,
+    window: &dyn Fn(u32) -> Range<u32>,
+) -> Option<(Vec<u16>, Range<u32>)> {
+    if row > rope.max_point().row {
+        return None;
+    }
+    let start = rope.point_to_offset(text::Point::new(row, 0));
+    let mut units: Vec<u16> = Vec::new();
+    let mut bytes = 0;
+    'chunks: for chunk in rope.chunks_in_range(start..rope.len()) {
+        let line = match chunk.find('\n') {
+            Some(newline) => &chunk[..newline],
+            None => chunk,
+        };
+        bytes += line.len();
+        if bytes > SHORT_ROW_BYTES {
+            return None;
+        }
+        units.extend(line.encode_utf16());
+        if line.len() < chunk.len() {
+            break 'chunks;
+        }
+    }
+    let columns = clamp_columns(window(units.len() as u32), units.len() as u32);
+    // A column between a surrogate pair's halves clamps in the rope.
+    let splits = |column: u32| {
+        units
+            .get(column as usize)
+            .is_some_and(|&unit| (0xDC00..0xE000).contains(&unit))
+    };
+    if splits(columns.start) || splits(columns.end) {
+        return None;
+    }
+    units.truncate(columns.end as usize);
+    units.drain(..columns.start.min(columns.end) as usize);
+    Some((units, columns))
 }
 
 impl CursorModel for text::Rope {
@@ -338,7 +407,22 @@ impl CursorModel for text::Rope {
         let (start, end) = (columns.start.min(max), columns.end.min(max));
         let start = rope.point_utf16_to_offset(Position::new(row, start.min(end)));
         let end = rope.point_utf16_to_offset(Position::new(row, end));
-        rope.slice(start..end).to_string()
+        rope.text_for_range(start..end)
+    }
+    fn line_units_in(
+        &self,
+        row: u32,
+        window: &dyn Fn(u32) -> Range<u32>,
+    ) -> (Vec<u16>, Range<u32>) {
+        rope_line_units_in(self, row, window).unwrap_or_else(|| {
+            let max = self.line_max_column(row);
+            let columns = clamp_columns(window(max), max);
+            let units = self
+                .line_slice(row, columns.clone())
+                .encode_utf16()
+                .collect();
+            (units, columns)
+        })
     }
     fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
         // A column inside a pair doesn't survive clipping.
@@ -360,12 +444,14 @@ impl CursorModel for text::Buffer {
         self.rope().line_len_utf16(row)
     }
     fn line_slice(&self, row: u32, columns: Range<u32>) -> String {
-        let rope = self.rope();
-        let max = rope.line_len_utf16(row);
-        let (start, end) = (columns.start.min(max), columns.end.min(max));
-        let start = rope.point_utf16_to_offset(Position::new(row, start.min(end)));
-        let end = rope.point_utf16_to_offset(Position::new(row, end));
-        rope.slice(start..end).to_string()
+        self.rope().line_slice(row, columns)
+    }
+    fn line_units_in(
+        &self,
+        row: u32,
+        window: &dyn Fn(u32) -> Range<u32>,
+    ) -> (Vec<u16>, Range<u32>) {
+        self.rope().line_units_in(row, window)
     }
     fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
         // A column inside a pair doesn't survive clipping.
@@ -501,4 +587,52 @@ pub(crate) fn value_in_range(model: &dyn CursorModel, range: Range<Position>) ->
         range.end.column,
     ));
     result
+}
+
+#[cfg(test)]
+mod line_units_tests {
+    use std::ops::Range;
+
+    use super::{CursorModel, Position};
+
+    /// The rope's one-pass `line_units_in` matches looking the row's length
+    /// up and then slicing it, for every window: short and long rows,
+    /// surrogate pairs (split or not), rows past the end.
+    #[test]
+    fn rope_line_units_match_length_then_slice() {
+        let long = "a(".repeat(3000);
+        let text = format!("fn a() {{}}\n\n😀x😀(é)\n{long}\n{long}😀\nend");
+        let rope = text::Rope::from(text.as_str());
+        // Slicing as `line_slice` did before it read the text directly.
+        let slice = |row: u32, columns: Range<u32>| {
+            let max = rope.line_len_utf16(row);
+            let (start, end) = (columns.start.min(max), columns.end.min(max));
+            let start = rope.point_utf16_to_offset(Position::new(row, start.min(end)));
+            let end = rope.point_utf16_to_offset(Position::new(row, end));
+            rope.slice(start..end).to_string()
+        };
+        let windows: Vec<Box<dyn Fn(u32) -> Range<u32>>> = vec![
+            Box::new(|max| 0..max),
+            Box::new(|_| 0..3),
+            Box::new(|_| 1..4),
+            Box::new(|_| 2..5),
+            Box::new(|_| 0..20_000),
+            Box::new(|max| max.saturating_sub(3)..max),
+            Box::new(|max| max.saturating_sub(5000)..max),
+            Box::new(|_| 4000..9000),
+        ];
+        for row in 0..rope.line_count() + 2 {
+            for window in &windows {
+                let max = rope.line_len_utf16(row);
+                let columns = window(max).start.min(max)..window(max).end.min(max);
+                let expected: Vec<u16> = slice(row, columns.clone()).encode_utf16().collect();
+                assert_eq!(
+                    rope.line_units_in(row, window),
+                    (expected, columns.clone()),
+                    "row {row}"
+                );
+                assert_eq!(rope.line_slice(row, columns.clone()), slice(row, columns));
+            }
+        }
+    }
 }

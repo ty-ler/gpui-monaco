@@ -5,6 +5,7 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Bracket matching on large files (#378):** Typing and moving the cursor no longer re-query strings and comments for every bracket highlight: the model keeps each 64-row block's strings and comments until the next parse, so cursor moves and keystrokes between parses reuse them, with the same results as querying them again. Each scanned row is read with one seek instead of building a rope slice, and finding the rows too long to tokenize takes one pass over the text instead of three seeks per row. Keystroke to paint on a 100k-line Rust file went from 4.21ms to 3.16ms (median), 300k lines from 2.27ms to 2.09ms, and 277 lines from 2.07ms to 1.65ms. Page Down on 100k lines went from 4.02ms to 3.68ms.
 - **Opening a file (#378):** Opening a file in a running app is fast again: 100k lines 62 → 5ms, 300k lines 31 → 11ms, 1M lines 86 → 36ms, a 2MB minified line 14 → 4ms and 277 lines 1.8 → 1.2ms (playground perf mode, Apple M5 Pro). Typing and scrolling are unchanged or faster.
   - **Code lens zones:** going to a new model removes the lenses' zones in one pass, with one `ViewZonesChanged`, as Monaco's single `changeViewZones` does, instead of one at a time (quadratic with thousands of lenses).
   - **Indentation guessing:** `guess_indentation` streams its 10 000 lines from the rope instead of copying and UTF-16 encoding each one. It guesses exactly what it did before.

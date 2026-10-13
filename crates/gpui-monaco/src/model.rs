@@ -624,6 +624,28 @@ pub struct TextModel {
     /// Byte ranges whose edges the next edit moves decorations past
     /// (Monaco `forceMoveMarkers`).
     force_move_markers: Vec<Range<usize>>,
+    /// Bumped whenever the syntax state changes, to tell when
+    /// `skip_spans` is stale.
+    syntax_generation: u64,
+    /// Strings and comments of the syntax text for bracket matching (see
+    /// [`TextModel::bracket_skip_ranges`]).
+    skip_spans: std::cell::RefCell<SkipSpans>,
+}
+
+/// Rows per block of [`SkipSpans`].
+pub(crate) const SKIP_BLOCK_ROWS: u32 = 64;
+/// More blocks than this and [`SkipSpans`] starts over.
+const MAX_SKIP_BLOCKS: usize = 1024;
+
+/// The strings, comments and regexes of a syntax state's text, by block of
+/// [`SKIP_BLOCK_ROWS`] rows of that text: bracket matching asks for the
+/// same rows on every cursor move, and while typing the syntax text lags
+/// the model's, so the blocks outlive edits until the next parse.
+#[derive(Default)]
+struct SkipSpans {
+    /// The syntax generation and tokenized line length the blocks are for.
+    key: (u64, u32),
+    blocks: std::collections::HashMap<u32, Vec<Range<usize>>>,
 }
 
 /// The line heights and fonts a decorations change changes (Monaco's
@@ -719,6 +741,8 @@ impl TextModel {
             attached_editors: 0,
             internal: false,
             force_move_markers: Vec::new(),
+            syntax_generation: 0,
+            skip_spans: Default::default(),
         }
         .with_options(ModelOptions::default())
     }
@@ -1162,6 +1186,7 @@ impl TextModel {
             task: None,
             dirty: false,
         });
+        self.syntax_generation += 1;
         self.language = Some(language);
         self.reparse(cx);
     }
@@ -1291,6 +1316,59 @@ impl TextModel {
             .collect()
     }
 
+    /// [`TextModel::string_and_comment_ranges`] for bracket matching, the
+    /// same in every state: a range that is (or, while the syntax lags
+    /// the text, maps back to exactly) one block of [`SKIP_BLOCK_ROWS`]
+    /// rows of the syntax text takes that block's strings and comments,
+    /// kept until the syntax changes. Typing within a block leaves every
+    /// block mapping back to one; inserted or removed line breaks shift
+    /// the later ones until the next parse, which are queried each time.
+    pub(crate) fn bracket_skip_ranges(&self, range: Range<usize>) -> Vec<Range<usize>> {
+        let Some(syntax) = self.syntax_snapshot() else {
+            return Vec::new();
+        };
+        let limit = self.tokenization_line_limit();
+        let patch = (syntax.text.version() != self.buffer.version())
+            .then(|| self.buffer.edits_since(syntax.text.version()));
+        let old_range = match &patch {
+            Some(patch) => {
+                let inverse = patch.invert();
+                inverse.transform_offset(range.start, text::Bias::Left)
+                    ..inverse.transform_offset(range.end, text::Bias::Right)
+            }
+            None => range,
+        };
+        // Spans of the syntax text to the model's, as `standard_token_spans`.
+        let map = |spans: &mut dyn Iterator<Item = Range<usize>>| -> Vec<Range<usize>> {
+            match &patch {
+                Some(patch) => spans
+                    .filter_map(|range| {
+                        let start = patch.transform_offset(range.start, text::Bias::Right);
+                        let end = patch.transform_offset(range.end, text::Bias::Left);
+                        (start < end).then_some(start..end)
+                    })
+                    .collect(),
+                None => spans.collect(),
+            }
+        };
+        let rope = syntax.text.rope();
+        let Some(block) = skip_block(rope, &old_range) else {
+            return map(&mut old_token_spans(&syntax, old_range, limit).map(|(range, _)| range));
+        };
+        let mut cache = self.skip_spans.borrow_mut();
+        let key = (self.syntax_generation, limit);
+        if cache.key != key || cache.blocks.len() > MAX_SKIP_BLOCKS {
+            cache.key = key;
+            cache.blocks.clear();
+        }
+        let spans = cache.blocks.entry(block).or_insert_with(|| {
+            old_token_spans(&syntax, old_range, limit)
+                .map(|(range, _)| range)
+                .collect()
+        });
+        map(&mut spans.iter().cloned())
+    }
+
     /// Byte ranges of strings, comments and regexes intersecting `range`
     /// with their standard token types, from one highlights query. Text
     /// between them is [`StandardTokenType::Other`](crate::cursor::StandardTokenType::Other).
@@ -1311,33 +1389,16 @@ impl TextModel {
             }
             None => range,
         };
-        // Long lines are untokenized (Monaco `maxTokenizationLineLength`).
-        tokenized_ranges(
-            syntax.text.rope(),
-            old_range,
-            self.tokenization_line_limit(),
-        )
-        .into_iter()
-        .flat_map(|old_range| {
-            syntax
-                .highlighter
-                .highlights(&syntax.state, syntax.text.rope(), old_range)
-        })
-        .filter_map(|span| {
-            let kind = standard_token_type(&span.highlight.name());
-            if kind == crate::cursor::StandardTokenType::Other {
-                return None;
-            }
-            match &patch {
+        old_token_spans(&syntax, old_range, self.tokenization_line_limit())
+            .filter_map(|(range, kind)| match &patch {
                 Some(patch) => {
-                    let start = patch.transform_offset(span.range.start, text::Bias::Right);
-                    let end = patch.transform_offset(span.range.end, text::Bias::Left);
+                    let start = patch.transform_offset(range.start, text::Bias::Right);
+                    let end = patch.transform_offset(range.end, text::Bias::Left);
                     (start < end).then_some((start..end, kind))
                 }
-                None => Some((span.range, kind)),
-            }
-        })
-        .collect()
+                None => Some((range, kind)),
+            })
+            .collect()
     }
 
     /// Monaco `isModelDecorationVisible`: a decoration with
@@ -1595,6 +1656,7 @@ impl TextModel {
         let elapsed = start.elapsed();
         let ranges = whole_text_rows(snapshot.rope());
         syntax.latest = Some((state, snapshot));
+        self.syntax_generation += 1;
         cx.emit(TextModelEvent::SyntaxUpdated { ranges });
         cx.notify();
         Some(elapsed)
@@ -1647,6 +1709,7 @@ impl TextModel {
                 };
                 syntax.latest = Some((state, snapshot));
                 syntax.task = None;
+                this.syntax_generation += 1;
                 let dirty = std::mem::take(&mut syntax.dirty);
                 cx.emit(TextModelEvent::SyntaxUpdated { ranges });
                 cx.notify();
@@ -2368,8 +2431,119 @@ pub(crate) fn tokens_in_range_are(
     true
 }
 
+/// The block of [`SKIP_BLOCK_ROWS`] rows of `rope` that `range` is
+/// exactly, if any.
+fn skip_block(rope: &Rope, range: &Range<usize>) -> Option<u32> {
+    if range.is_empty() || range.end > rope.len() {
+        return None;
+    }
+    let start = rope.offset_to_point(range.start);
+    if start.column != 0 || !start.row.is_multiple_of(SKIP_BLOCK_ROWS) {
+        return None;
+    }
+    let end_row = start.row + SKIP_BLOCK_ROWS;
+    let end = if end_row > rope.max_point().row {
+        rope.len()
+    } else {
+        rope.point_to_offset(text::Point::new(end_row, 0))
+    };
+    (range.end == end).then_some(start.row / SKIP_BLOCK_ROWS)
+}
+
+/// The strings, comments and regexes of `syntax`'s text in `range` (of
+/// that text), with their standard token types.
+fn old_token_spans(
+    syntax: &SyntaxSnapshot,
+    range: Range<usize>,
+    max_line_length: u32,
+) -> impl Iterator<Item = (Range<usize>, crate::cursor::StandardTokenType)> + '_ {
+    // Long lines are untokenized (Monaco `maxTokenizationLineLength`).
+    tokenized_ranges(syntax.text.rope(), range, max_line_length)
+        .into_iter()
+        .flat_map(|range| {
+            syntax
+                .highlighter
+                .highlights(&syntax.state, syntax.text.rope(), range)
+        })
+        .filter_map(|span| {
+            let kind = standard_token_type(&span.highlight.name());
+            (kind != crate::cursor::StandardTokenType::Other).then_some((span.range, kind))
+        })
+}
+
 /// The parts of `range` on lines shorter than `max_line_length`.
+///
+/// One pass over the rows' text: a rope seek per row (two, plus one for
+/// its length) made this most of a bracket or token query's cost.
 pub(crate) fn tokenized_ranges(
+    rope: &Rope,
+    range: Range<usize>,
+    max_line_length: u32,
+) -> Vec<Range<usize>> {
+    let range = range.start.min(rope.len())..range.end.min(rope.len());
+    if max_line_length == u32::MAX {
+        return vec![range];
+    }
+    let (first, last) = (
+        rope.offset_to_point(range.start).row,
+        rope.offset_to_point(range.end).row,
+    );
+    let limit = max_line_length as usize;
+    let mut ranges: Vec<Range<usize>> = Vec::new();
+    let mut push = |line_start: usize, len: usize| {
+        let start = line_start.max(range.start);
+        let end = (line_start + len + 1).min(rope.len()).min(range.end);
+        match ranges.last_mut() {
+            Some(last) if last.end == start => last.end = end,
+            _ => ranges.push(start..end),
+        }
+    };
+    // Whole rows, so each row's length is its full length.
+    let rows_end = rope.point_to_offset(text::Point::new(last, u32::MAX));
+    let mut row = first;
+    let mut line_start = rope.point_to_offset(text::Point::new(first, 0));
+    // Short rows are measured in one pass over their text; a row reaching
+    // the limit in bytes (its UTF-16 length is at most that) is measured
+    // with a seek and skipped, not read through.
+    'rows: loop {
+        let mut len = 0;
+        for chunk in rope.chunks_in_range(line_start..rows_end) {
+            let mut rest = chunk;
+            while let Some(newline) = rest.find('\n') {
+                len += newline;
+                if len >= limit {
+                    break;
+                }
+                push(line_start, len);
+                line_start += len + 1;
+                row += 1;
+                len = 0;
+                rest = &rest[newline + 1..];
+            }
+            len += rest.len();
+            if len >= limit {
+                if rope.line_len_utf16(row) < max_line_length {
+                    push(line_start, rope.line_len(row) as usize);
+                }
+                if row == last {
+                    break 'rows;
+                }
+                row += 1;
+                line_start = rope.point_to_offset(text::Point::new(row, 0));
+                continue 'rows;
+            }
+        }
+        if len < limit {
+            push(line_start, len);
+        }
+        break;
+    }
+    ranges
+}
+
+/// [`tokenized_ranges`] a row at a time, the reference it's tested against.
+#[cfg(test)]
+fn tokenized_ranges_by_row(
     rope: &Rope,
     range: Range<usize>,
     max_line_length: u32,
@@ -2433,6 +2607,68 @@ mod token_range_tests {
         assert!(!tokens_in_range_are(&rope, &spans, 5..7, String));
     }
 
+    /// The one-pass [`tokenized_ranges`](super::tokenized_ranges) matches
+    /// the row-at-a-time one for every range, with long, short, empty and
+    /// non-BMP rows.
+    #[test]
+    fn tokenized_ranges_match_row_by_row() {
+        use super::{tokenized_ranges, tokenized_ranges_by_row};
+        let texts = [
+            "",
+            "\n",
+            "ab\n\ncdefgh\nij",
+            "abcdefgh\nab\nabcdefgh\n",
+            "\u{1F600}\u{1F600}\u{1F600}\nab\n\u{1F600}\u{1F600}x\nabc\u{e9}d\n",
+            "a\nabcdefghijkl\nb\nc\nabcdefghijkl",
+        ];
+        for text in texts {
+            let rope = Rope::from(text);
+            for max in [0, 1, 3, 4, 5, 6, 7, 100, u32::MAX] {
+                for start in 0..=text.len() + 1 {
+                    for end in start..=text.len() + 1 {
+                        if !text.is_char_boundary(start.min(text.len()))
+                            || !text.is_char_boundary(end.min(text.len()))
+                        {
+                            continue;
+                        }
+                        assert_eq!(
+                            tokenized_ranges(&rope, start..end, max),
+                            tokenized_ranges_by_row(&rope, start..end, max),
+                            "{text:?} {start}..{end} max {max}"
+                        );
+                    }
+                }
+            }
+        }
+        // Rows across many chunks, some past the limit, some with
+        // multi-byte characters before or after it.
+        let text = format!(
+            "{}\nab\n{}\n\n{}\n{}x\n{}",
+            "a".repeat(5000),
+            "é".repeat(3000),
+            "😀".repeat(1500),
+            "b".repeat(2999),
+            "c".repeat(4000)
+        );
+        let rope = Rope::from(text.as_str());
+        let offsets: Vec<usize> = (0..=text.len())
+            .step_by(997)
+            .chain([0, 5000, 5001, 5004, text.len()])
+            .filter(|&offset| text.is_char_boundary(offset))
+            .collect();
+        for max in [0, 2, 2999, 3000, 3001, 4000, 6000, u32::MAX] {
+            for &start in &offsets {
+                for &end in offsets.iter().filter(|&&end| end >= start) {
+                    assert_eq!(
+                        tokenized_ranges(&rope, start..end, max),
+                        tokenized_ranges_by_row(&rope, start..end, max),
+                        "{start}..{end} max {max}"
+                    );
+                }
+            }
+        }
+    }
+
     /// Monaco: an empty line is one `Other` token.
     #[test]
     fn empty_lines_are_other_tokens() {
@@ -2440,5 +2676,153 @@ mod token_range_tests {
         let spans = [(0..4, Comment), (6..10, Comment)];
         assert!(!tokens_in_range_are(&rope, &spans, 2..8, Comment));
         assert!(tokens_in_range_are(&rope, &spans, 7..8, Comment));
+    }
+}
+
+#[cfg(test)]
+mod bracket_skip_tests {
+    use std::ops::Range;
+
+    use gpui::{AppContext as _, Entity, TestAppContext};
+
+    use super::TextModel;
+
+    /// Rust with strings and comments, block comments across the 64-row
+    /// blocks, a few hundred rows.
+    fn text() -> String {
+        let mut text = String::new();
+        for i in 0..60 {
+            text.push_str(&format!("fn f{i}() {{ let s = \"({i}\"; }} // ) {i}\n"));
+            if i % 7 == 3 {
+                text.push_str("/* (\n  [\n*/ let r = b\"{\";\n");
+            }
+            text.push_str("    call(a, [b], '}');\n");
+            text.push_str("    /* { */ x(\"\\\"(\");\n");
+            text.push('\n');
+        }
+        text
+    }
+
+    fn rust_model(cx: &mut TestAppContext, text: &str) -> Entity<TextModel> {
+        cx.update(|cx| crate::set_language_registry(cx, gpui_monaco_languages::registry()));
+        let model = cx.new(|_| TextModel::new(text).with_language("rust"));
+        model.update(cx, |model, cx| model.ensure_syntax(cx));
+        cx.run_until_parked();
+        model
+    }
+
+    /// The model's 64-row blocks, as bracket matching asks for them.
+    fn blocks(model: &TextModel) -> Vec<Range<usize>> {
+        let rope = model.buffer().rope();
+        let max_row = rope.max_point().row;
+        (0..=max_row / 64)
+            .map(|block| {
+                let start = rope.point_to_offset(text::Point::new(block * 64, 0));
+                let end = if (block + 1) * 64 > max_row {
+                    rope.len()
+                } else {
+                    rope.point_to_offset(text::Point::new((block + 1) * 64, 0))
+                };
+                start..end
+            })
+            .collect()
+    }
+
+    /// Each block's strings and comments, cached or not, are exactly what
+    /// one uncached query for the block (`string_and_comment_ranges`)
+    /// returns, while the syntax is current and while it lags the text:
+    /// edits at block boundaries, inside a string across one, inserted
+    /// and removed line breaks.
+    #[gpui::test]
+    fn cached_blocks_match_one_query_per_block(cx: &mut TestAppContext) {
+        let mut lines: Vec<String> = text().lines().map(str::to_string).collect();
+        // A string across the boundary between blocks 0 and 1.
+        lines.splice(
+            62..67,
+            ["let m = \"", "(a", "[b", "{c", "\";"].map(str::to_string),
+        );
+        let model = rust_model(cx, &(lines.join("\n") + "\n"));
+        let check = |model: &TextModel| {
+            for block in blocks(model) {
+                let expected = model.string_and_comment_ranges(block.clone());
+                // Cold or cached, then cached.
+                assert_eq!(
+                    model.bracket_skip_ranges(block.clone()),
+                    expected,
+                    "{block:?}"
+                );
+                assert_eq!(
+                    model.bracket_skip_ranges(block.clone()),
+                    expected,
+                    "{block:?}"
+                );
+            }
+        };
+        model.read_with(cx, |model, _| {
+            assert!(
+                blocks(model)
+                    .iter()
+                    .all(|block| { !model.string_and_comment_ranges(block.clone()).is_empty() })
+            );
+            check(model);
+        });
+        type Edit = fn(&TextModel) -> Vec<(Range<usize>, &'static str)>;
+        fn at(model: &TextModel, row: u32, column: u32) -> usize {
+            model
+                .buffer()
+                .rope()
+                .point_to_offset(text::Point::new(row, column))
+        }
+        // Edits the parse hasn't caught up with, checked after each.
+        let edits: [Edit; 7] = [
+            // Typing within a block.
+            |m| vec![(at(m, 100, 4)..at(m, 100, 4), "x(")],
+            // At block boundaries: in the string across one, and at the
+            // start and end of others.
+            |m| vec![(at(m, 64, 0)..at(m, 64, 0), "(")],
+            |m| vec![(at(m, 128, 0)..at(m, 128, 0), "\"{")],
+            |m| vec![(at(m, 192, 0) - 1..at(m, 192, 0) - 1, "/*")],
+            // Line breaks inserted and removed, so later blocks shift.
+            |m| vec![(at(m, 10, 4)..at(m, 10, 4), "\n\n(\n")],
+            |m| vec![(at(m, 63, 2)..at(m, 65, 1), "")],
+            // Text removed across a boundary.
+            |m| vec![(at(m, 127, 3)..at(m, 129, 2), "]")],
+        ];
+        for edit in edits {
+            model.update(cx, |model, cx| {
+                let edit = edit(model);
+                model.edit(edit, cx).unwrap();
+            });
+            model.read_with(cx, |model, _| {
+                let syntax = model.syntax_snapshot().unwrap();
+                assert_ne!(syntax.text.version(), model.version());
+                check(model);
+            });
+        }
+        // And once the parse catches up.
+        cx.run_until_parked();
+        model.read_with(cx, |model, _| check(model));
+    }
+
+    /// A parse starts the cache over.
+    #[gpui::test]
+    fn cached_blocks_follow_the_parse(cx: &mut TestAppContext) {
+        let model = rust_model(cx, "a();\n// (\nb();\n");
+        let skip = |model: &Entity<TextModel>, cx: &mut TestAppContext| {
+            model.read_with(cx, |model, _| {
+                model.bracket_skip_ranges(0..model.buffer().len())
+            })
+        };
+        assert_eq!(skip(&model, cx), vec![5..9]);
+        // The comment becomes code.
+        model.update(cx, |model, cx| model.edit([(5..7, "  ")], cx).unwrap());
+        cx.run_until_parked();
+        assert_eq!(skip(&model, cx), Vec::<Range<usize>>::new());
+        // And a comment again, after a forced retokenize too.
+        model.update(cx, |model, cx| model.edit([(0..0, "//")], cx).unwrap());
+        cx.run_until_parked();
+        assert_eq!(skip(&model, cx), vec![0..6]);
+        model.update(cx, |model, cx| model.force_retokenize(cx));
+        assert_eq!(skip(&model, cx), vec![0..6]);
     }
 }
