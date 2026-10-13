@@ -1968,3 +1968,34 @@ fn the_rename_flag_needs_different_paths(cx: &mut TestAppContext) {
     assert!(cx.debug_bounds("multi-diff-original-label-0").is_none());
     assert!(cx.debug_bounds("multi-diff-original-label-1").is_some());
 }
+
+/// Monaco toggles `shadow` on `.header`, but the standard rule targets
+/// `.header-content.shadow` and never matches: only the cards variant's
+/// stuck header floats with a shadow.
+#[gpui::test]
+fn only_the_cards_variant_shadows_a_stuck_header(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(10, cx);
+    let shadowed = |multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, _| m.shadowed_headers_for_tests())
+    };
+    multi.update(cx, |m, cx| m.set_scroll_top(px(100.), cx));
+    paint(cx);
+    assert!(shadowed(&multi, cx).is_empty(), "standard variant");
+
+    set_variant(&multi, MultiDiffEditorVariant::NoCards, cx);
+    multi.update(cx, |m, cx| m.set_scroll_top(px(100.), cx));
+    paint(cx);
+    assert!(shadowed(&multi, cx).is_empty(), "noCards variant");
+
+    set_variant(&multi, MultiDiffEditorVariant::Cards, cx);
+    multi.update(cx, |m, cx| m.set_scroll_top(px(100.), cx));
+    paint(cx);
+    assert_eq!(shadowed(&multi, cx), vec![0], "cards variant");
+
+    multi.update(cx, |m, cx| m.set_scroll_top(px(0.), cx));
+    paint(cx);
+    assert!(
+        shadowed(&multi, cx).is_empty(),
+        "not scrolled under its header"
+    );
+}

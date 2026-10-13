@@ -4,6 +4,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 
 - **Models and editors are entities.** Create them with `cx.new`, and read or change them through `read`/`update`.
 - **Positions are 0-based.** They're `PointUtf16 { row, column }` with UTF-16 columns, where Monaco uses 1-based `{ lineNumber, column }`. `PointUtf16::from_monaco` and `to_monaco` convert.
+- **Ranges are `Range<PointUtf16>`.** Monaco's `IRange`, `Selection` and their helpers become a Rust `start..end` and `Selection` (`anchor`, `head`). Mind the ends when porting `Range` helpers: Monaco's `containsPosition`, `containsRange` and `areIntersectingOrTouching` include the end, but Rust's `Range::contains` excludes it, so `range.contains(&p)` misses a position at the end. Write `range.start <= p && p <= range.end` for `containsPosition`, `outer.start <= inner.start && inner.end <= outer.end` for `containsRange`, and `a.start <= b.end && b.start <= a.end` for `areIntersectingOrTouching`; Monaco's `strictContainsRange` and `areIntersecting` are the strict versions.
 - **Events are GPUI events.** Subscribe with `cx.subscribe(&editor, …)` instead of `onDid…` listeners.
 - **Async results are `Task`s.** Dropping a task cancels it, so there are no cancellation tokens.
 
@@ -13,7 +14,9 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 
 | Monaco | gpui-monaco |
 |---|---|
-| `monaco.editor.create(el, { value, language })` | `cx.new(\|cx\| TextModel::new(value).with_language(language))`, then `CodeEditor::new(model, window, cx)` |
+| `monaco.editor.create(el, { value, language })` | `create_model(cx, value, Some(language), None)?`, then `cx.new(\|cx\| CodeEditor::new(model, window, cx))`. Like the model Monaco's `create` makes, it's registered, so `model_for_uri`, `models(cx)` and word-based suggestions see it; a bare `TextModel::new(value).with_language(language)` isn't until you `register_model` it |
+| `monaco.editor.createDiffEditor(el, options)`, `IDiffEditor` | `cx.new(\|cx\| DiffEditor::new(original, modified, window, cx))`, then `update_options`; `setModel` is `set_models`, `getLineChanges` `line_changes()`, `goToDiff` `go_to_diff(next, cx)`, `getOriginalEditor`/`getModifiedEditor` `original_editor()`/`modified_editor()`. See [Diff editor](diff-editor.md) |
+| `monaco.editor.createMultiFileDiffEditor(el)` | `cx.new(\|cx\| MultiDiffEditor::new(documents, window, cx))` with a `MultiDiffDocument` per file; `set_documents` replaces them. See [Diff editor](diff-editor.md#many-files) |
 | `monaco.editor.createModel(value, language, uri)` | `create_model(cx, value, language, uri)`, which fails like Monaco's for a uri a live model has; or `TextModel::new(value).with_language(language).with_uri(uri)` (a language id or MIME type), then `register_model` so providers can find it |
 | `monaco.editor.registerLinkOpener(opener)`, `registerEditorOpener(opener)` | `register_link_opener(cx, \|url, cx\| …)`, `register_editor_opener(cx, \|editor, uri, selection, cx\| …)`, returning a `Disposable`; they answer synchronously. Link openers also get the links clicked in markdown (hovers, suggest details, parameter hints, messages), as Monaco's opener service does |
 | `monaco.editor.getModel(uri)` | `model_for_uri(cx, uri)`, comparing normalized uris as Monaco does |
@@ -32,6 +35,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `monaco.editor.addEditorAction(descriptor)` | `add_editor_action(cx, EditorActionDescriptor::new(…))` |
 | `monaco.editor.addKeybindingRule(rule)`, `addKeybindingRules(rules)` | `add_keybinding_rule(cx, KeybindingRule::new(keystrokes, command))`, `add_keybinding_rules(cx, vec![…])`, returning an `anyhow::Result<Disposable>` |
 | `monaco.languages.register(...)` | `set_language_registry(cx, registry)`, with grammars from `gpui-monaco-languages` |
+| `monaco.languages.getLanguages()` | `language_registry(cx).languages()` (`LanguageRegistry::languages`), each a `Language` with its id, name, extensions, file names and MIME types |
 | `editor.dispose()` / `model.dispose()` | drop the entity |
 | `editor.layout()` | not needed: the editor lays itself out every frame |
 
@@ -171,6 +175,22 @@ Monaco's global `monaco.editor.on…` events are free functions returning a gpui
 | `onDidChangeModelLanguage` | `on_did_change_model_language(cx, …)` (the model and its old language id) |
 | `onDidChangeMarkers` | `on_did_change_markers(cx, …)` (the changed uris) |
 
+## Keybindings
+
+Keystrokes are GPUI strings, not `KeyMod | KeyCode` numbers:
+
+| Monaco | GPUI keystroke |
+|---|---|
+| `KeyMod.CtrlCmd` | `secondary-` (Cmd on macOS, Ctrl elsewhere). Use it rather than `cmd-` or `ctrl-` so a rule works on every platform, as Monaco's does |
+| `KeyMod.WinCtrl` | `ctrl-` (Ctrl on every platform) |
+| `KeyMod.Shift`, `KeyMod.Alt` | `shift-`, `alt-` |
+| `KeyCode.KeyK`, `KeyCode.Digit1`, `KeyCode.F12` | `k`, `1`, `f12` |
+| `KeyCode.Enter`, `Escape`, `Tab`, `Backspace`, `Delete`, `UpArrow`, `PageDown` | `enter`, `escape`, `tab`, `backspace`, `delete`, `up`, `pagedown` |
+| `KeyMod.chord(KeyMod.CtrlCmd \| KeyCode.KeyK, KeyMod.CtrlCmd \| KeyCode.KeyM)` | `"secondary-k secondary-m"` (space-separated keystrokes) |
+| `when` clause | a GPUI key context predicate over `context_keys(cx)` |
+
+So `editor.addCommand(KeyMod.CtrlCmd | KeyCode.KeyS, save)` becomes `editor.add_command("secondary-s", save, None, cx)`. [Keybindings](keymap.md) covers rebinding and removing the defaults.
+
 ## Language features
 
 Monaco's `monaco.languages.register…Provider(selector, provider)` functions become `providers::register_…_provider(cx, LanguageSelector, provider)`, where each provider is a Rust trait. `providers::unregister_provider(cx, registration)` replaces `IDisposable.dispose()`. Matching providers are ranked as in Monaco: by selector score, then newest first.
@@ -184,6 +204,7 @@ Monaco's `monaco.languages.register…Provider(selector, provider)` functions be
 | `registerReferenceProvider` | `ReferenceProvider` |
 | `registerDocumentHighlightProvider` | `DocumentHighlightProvider` |
 | `registerRenameProvider` | `RenameProvider` |
+| `registerNewSymbolNameProvider` | `NewSymbolNamesProvider` (`register_new_symbol_name_provider`), the rename box's suggestions |
 | `registerCodeActionProvider` | `CodeActionProvider` |
 | `registerCodeLensProvider` | `CodeLensProvider` |
 | `registerInlayHintsProvider` | `InlayHintsProvider` |

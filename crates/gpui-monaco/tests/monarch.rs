@@ -160,6 +160,51 @@ fn set_monarch_tokens_provider_before_the_language_is_registered(cx: &mut TestAp
     assert_eq!(name_at(&model, 0, cx), None);
 }
 
+/// Monaco `TokenizationRegistry.register` keeps one tokenizer per
+/// language, and disposing one doesn't bring back the tokenizer it
+/// replaced: the language goes back to its own highlighting (none for
+/// `mini`, its registered grammar for `inner`), not to the earlier one.
+#[gpui::test]
+fn disposing_a_tokenizer_does_not_restore_the_one_it_replaced(cx: &mut TestAppContext) {
+    init(cx);
+    let words = |token: &str| json!({ "tokenizer": { "root": [["[a-z0-9]+", token]] } });
+    let model = shown("let x", cx);
+    let a = cx
+        .update(|cx| gpui_monaco::set_monarch_tokens_provider(cx, "mini", &words("a")))
+        .unwrap();
+    let b = cx
+        .update(|cx| gpui_monaco::set_monarch_tokens_provider(cx, "mini", &words("b")))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx).as_deref(), Some("b.mini"));
+    cx.update(|cx| b.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx), None);
+    // `a` was replaced, so disposing it does nothing.
+    cx.update(|cx| a.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&model, 0, cx), None);
+
+    let inner = cx.new(|_| TextModel::new("12").with_language("inner"));
+    inner.update(cx, |model, cx| model.ensure_syntax(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&inner, 0, cx).as_deref(), Some("number.inner"));
+    let a = cx
+        .update(|cx| gpui_monaco::set_monarch_tokens_provider(cx, "inner", &words("a")))
+        .unwrap();
+    let b = cx
+        .update(|cx| gpui_monaco::set_monarch_tokens_provider(cx, "inner", &words("b")))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(name_at(&inner, 0, cx).as_deref(), Some("b.inner"));
+    cx.update(|cx| b.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&inner, 0, cx).as_deref(), Some("number.inner"));
+    cx.update(|cx| a.dispose(cx));
+    cx.run_until_parked();
+    assert_eq!(name_at(&inner, 0, cx).as_deref(), Some("number.inner"));
+}
+
 /// A line-state tokenizer: words starting with `k` are keywords, and a
 /// `(` opens a comment that runs until `)`, across lines.
 struct Parens;

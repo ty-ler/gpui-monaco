@@ -44,6 +44,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Cmd+Shift+Space:** parameter hints. While they show, **Escape / Shift+Escape** close them, and with several signatures **Up / Down (or Alt+Up / Alt+Down, Ctrl+P / Ctrl+N)** go to the previous and next one
 - **Shift+Escape:** Monaco's second Escape. It closes the suggest widget, parameter hints, the problem zone, the reference peek and the find widget, leaves snippet mode and linked editing, then removes the other cursors and the selection. Unlike Escape, it leaves ghost text, the hover, inline messages and the selection anchor alone
 - **Ctrl+Left / Ctrl+Right** on Windows with a screen reader: Monaco's accessibility word navigation (`cursorWordAccessibilityLeft`/`Right`)
+- **Insert:** toggle overtype mode (`editor.action.toggleOvertypeInsertMode`, "Toggle Overtype/Insert Mode" in the command palette). Standalone Monaco has neither the command nor the key; they're VS Code's workbench additions, kept here. To drop the key, add `KeybindingRule::remove("insert", "editor.action.toggleOvertypeInsertMode")` (see below)
 
 Tab focus mode (Ctrl+M; Ctrl+Shift+M on macOS) makes Tab and Shift+Tab move focus out of the editor, for keyboard and screen reader users. As in Monaco, only indenting and accepting ghost text give way: Tab still accepts the focused suggestion, moves between a snippet's tab stops and inserts tab completions. In a read-only editor Tab and Shift+Tab always move the focus, as Monaco's `tab` and `outdent` need a writable editor. In the quick input and the rename box they stay in the widget, and in the find widget and the hover they move among its controls either way.
 
@@ -81,6 +82,8 @@ Monaco gives each keybinding rule a weight, and of the rules whose `when` holds 
 Escape runs one of Monaco's rules, the heaviest that applies: close the reference peek, end linked editing, close the suggest widget or ghost text, the parameter hints, the problem zone, leave the snippet (or close the hover or message), close the find widget, end F12 navigation, cancel a pending request or the selection anchor, then remove the other cursors and the selection.
 
 ## Rebinding
+
+Keystrokes are written in GPUI syntax. `secondary-` is Monaco's `KeyMod.CtrlCmd` (Cmd on macOS, Ctrl elsewhere), so prefer it to `cmd-` or `ctrl-` for a binding that should follow the platform; `ctrl-` is `KeyMod.WinCtrl`, and a chord (`KeyMod.chord`) is space-separated keystrokes such as `"secondary-k secondary-m"`. [Migrating from Monaco](migrating.md#keybindings) has the full mapping.
 
 GPUI uses the binding added last, so to override a key, bind it in the same context after `init`. A binding of yours in plain `CodeEditor` beats the default ones in narrower contexts too, so Cmd+Right bound there no longer accepts ghost text; add the context (`CodeEditor && !inlineSuggestionVisible`) to keep them:
 

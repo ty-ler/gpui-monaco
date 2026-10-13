@@ -5,6 +5,12 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Monaco quirks and VS Code additions, decided (#431):** Ported Monaco's interval line numbers with folded lines, its standard multi diff header without a shadow and its tokenizer disposal, and documented the rest (audit 4 §B.15, §E.4, §E.29, §F.7, §H.5, §G.17).
+  - **Interval line numbers:** with `LineNumbers::Interval`, the always-numbered "last" line is the one whose number is the view's line count, as in Monaco: with lines 2–10 of 25 folded, line 16 is numbered and line 25 isn't.
+  - **Sticky header shadow:** the default (`NoCardsNonCompact`) multi diff variant no longer draws a shadow under a header with its file scrolled under it. Monaco's rule for it never matches; only the cards variant's header floats with a shadow.
+  - **Disposing a tokenizer:** disposing a `set_monarch_tokens_provider`, `set_tokens_provider` or factory tokenizer no longer brings back a runtime tokenizer it replaced, as in Monaco; the language goes back to its own highlighting (its registered highlighter or tree-sitter grammar), as listed in Differences from Monaco.
+  - **Kept and documented:** the accessible diff viewer's correctly ordered `@@` header (Monaco's sides are swapped) and Insert toggling overtype mode (a VS Code workbench binding; one `KeybindingRule::remove` drops it) are in Differences from Monaco.
+  - **Migrating from Monaco:** a `KeyMod`/`KeyCode` table (`secondary-` for `KeyMod.CtrlCmd`, chords), end-inclusive `Range` helpers, `create_model` for `monaco.editor.create`, and rows for `createDiffEditor`, `createMultiFileDiffEditor`, `getLanguages` and `registerNewSymbolNameProvider`; `keymap.md` and `KeybindingRule::keystrokes` explain `secondary-`.
 - **Inline edits and the paste chip (#430):** ported Monaco's inline edit and paste options button details (audit 4 §C.44–§C.47, §G.16).
   - **Docked gutter icon:** the inline edit pill beside its edit shows `keyboard-tab-above` (the cursor on or above the edit's first line) or `keyboard-tab-below` when Tab doesn't accept, instead of arrows.
   - **Toolbar warning:** the warning row above the inline toolbar shows the message only, without an icon (the `icon` is the ghost text's).
