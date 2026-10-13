@@ -392,6 +392,11 @@ impl CodeEditor {
         // `onDidBlurEditorWidget` stops it. (Focus events can be missed
         // before the window is active, so the frame compares.)
         let after = self.commands.focus;
+        // Monaco's code lenses: `onDidFocusEditorText` schedules a request,
+        // `onDidBlurEditorText` cancels one.
+        if after.text != before.text {
+            self.code_lens_focus_changed(after.text);
+        }
         if after.text && !before.text {
             self.word_highlights_focus_changed(true, cx);
         } else if before.widget && !after.widget {

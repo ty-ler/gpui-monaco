@@ -3904,7 +3904,6 @@ fn prepaint_editor(
     editor.check_unusual_line_terminators(window, cx);
     editor.refresh_unicode_highlights(cx);
     editor.refresh_post_edit(cx);
-    editor.resolve_visible_code_lenses(cx);
     // Injected text these added (ghost text) is in the view lines' columns
     // from the next frame.
     if editor.sync_injected_text(&[], cx) {
@@ -6261,6 +6260,7 @@ fn prepaint_editor(
     }
     editor.layout = Some(layout.clone());
     editor.report_layout(cx);
+    editor.code_lens_layout_changed(cx);
     // Monaco `RenameWidget.afterRender(null)`: the box's line scrolled out
     // of view, so rename is cancelled.
     if editor.rename_out_of_view(cx) {

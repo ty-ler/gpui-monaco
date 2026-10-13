@@ -1389,3 +1389,91 @@ fn no_gutter_lightbulb_without_a_glyph_margin(cx: &mut TestAppContext) {
     let (bulb, line) = bulb_and_line(&editor, cx, 1);
     assert!(bulb.right() <= line.x, "{bulb:?} over the text at {line:?}");
 }
+
+/// Monaco `CodeActionController.showCodeActionsFromLightbulb`: a lone AI
+/// fix runs on the click with `retrigger: false`, so the actions aren't
+/// asked for again afterwards.
+#[gpui::test]
+fn clicking_a_lone_ai_fix_does_not_ask_again(cx: &mut TestAppContext) {
+    let ran = Rc::new(RefCell::new(0));
+    let count = ran.clone();
+    let provider = Actions {
+        actions: vec![CodeAction {
+            is_ai: true,
+            command: Some(Command {
+                id: "test.ai".into(),
+                title: "Ask AI".into(),
+                ..Default::default()
+            }),
+            ..action("Fix with AI", "quickfix")
+        }],
+        ..Default::default()
+    };
+    let contexts = provider.contexts.clone();
+    let (editor, cx) = setup(provider, cx);
+    cx.update(|_, cx| {
+        let _ = gpui_monaco::register_command(cx, "test.ai", move |_, _| {
+            *count.borrow_mut() += 1;
+        });
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 4))], cx)
+    });
+    wait(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    let before = contexts.borrow().len();
+    editor.update(cx, |e, cx| e.show_lightbulb_menu_for_tests(cx));
+    draw(cx);
+    assert_eq!(*ran.borrow(), 1);
+    assert!(!editor.read_with(cx, |e, _| e.is_code_action_menu_visible()));
+    wait(cx);
+    wait(cx);
+    assert_eq!(
+        contexts.borrow().len(),
+        before,
+        "asked for the actions again"
+    );
+}
+
+/// Monaco `LightBulbWidget`'s `mouseenter`: dragging a selection over the
+/// bulb with the primary button down hides it.
+#[gpui::test]
+fn a_drag_over_the_lightbulb_hides_it(cx: &mut TestAppContext) {
+    let provider = Actions {
+        actions: vec![action("Fix", "quickfix")],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(provider, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(1, 4))], cx)
+    });
+    wait(cx);
+    let (bulb, _) = bulb_and_line(&editor, cx, 2);
+    let line_height = editor.read_with(cx, |e, _| e.options().resolved_line_height());
+    let start = editor
+        .read_with(cx, |e, _| e.scrolled_visible_position(p(0, 2)))
+        .unwrap()
+        + gpui::point(gpui::px(0.), line_height / 2.);
+    cx.simulate_mouse_down(start, gpui::MouseButton::Left, gpui::Modifiers::none());
+    // Moving with the button down, but not over the bulb: it stays.
+    cx.simulate_mouse_move(
+        start + gpui::point(gpui::px(0.), line_height),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::none(),
+    );
+    draw(cx);
+    assert!(editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    cx.simulate_mouse_move(
+        bulb.center(),
+        Some(gpui::MouseButton::Left),
+        gpui::Modifiers::none(),
+    );
+    draw(cx);
+    assert!(!editor.read_with(cx, |e, _| e.is_lightbulb_visible()));
+    cx.simulate_mouse_up(
+        bulb.center(),
+        gpui::MouseButton::Left,
+        gpui::Modifiers::none(),
+    );
+    draw(cx);
+}

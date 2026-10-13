@@ -22,13 +22,43 @@ use gpui::{
     ParentElement, Pixels, Render, SharedString, StatefulInteractiveElement as _, Styled, Task,
     WeakEntity, Window, div, px,
 };
-use text::PointUtf16;
+use std::ops::Range;
+
+use crate::decorations::move_edge;
+use text::{Bias, Patch, PointUtf16, Rope, Stickiness};
 
 /// Monaco's debounce floor for requesting and resolving lenses.
 const MIN_DELAY: Duration = Duration::from_millis(250);
 
 /// Monaco's `.codelens-decoration.fadein` (`animation: fadein 0.1s linear`).
 const FADE_IN: Duration = Duration::from_millis(100);
+
+/// Monaco `ILanguageFeatureDebounceService`'s delay: the average of the
+/// last few durations, at least 250ms, and 375ms before any.
+fn moving_delay(samples: &[Duration]) -> Duration {
+    if samples.is_empty() {
+        return MIN_DELAY.mul_f32(1.5);
+    }
+    let average = samples.iter().sum::<Duration>() / samples.len() as u32;
+    average.max(MIN_DELAY)
+}
+
+/// Moves a lens's tracked range through `patch` (Monaco's
+/// `codeLensDecorationOptions`: it grows when typing at its edges, and
+/// collapses to the edit's start when an edit replaces all of it).
+fn move_lens_range(patch: &Patch, old: &Rope, new: &Rope, range: &Range<usize>) -> Range<usize> {
+    if let Some(edit) = patch
+        .edits()
+        .iter()
+        .find(|edit| edit.old.start <= range.start && range.end <= edit.old.end)
+    {
+        return edit.new.start..edit.new.start;
+    }
+    let (start_bias, end_bias) = Stickiness::AlwaysGrowsWhenTypingAtEdges.biases();
+    let start = move_edge(patch, old, new, range.start, start_bias);
+    let end = move_edge(patch, old, new, range.end, end_bias);
+    start..end.max(start)
+}
 
 /// One lens and its provider.
 #[derive(Clone)]
@@ -37,14 +67,20 @@ struct Item {
     provider: Arc<dyn CodeLensProvider>,
     /// The provider's position, for ordering.
     rank: usize,
-    /// Asked to resolve already.
-    resolving: bool,
 }
 
 /// The lenses of one line and their zone (Monaco `CodeLensWidget`).
 struct Group {
+    /// The line the lenses are above: their first lens's tracked range's
+    /// start (Monaco `CodeLensWidget.getLineNumber`), kept up to date on
+    /// edits.
     row: u32,
     items: Vec<Item>,
+    /// Each item's range in bytes, tracked through edits as Monaco tracks
+    /// them with decorations (`move_lens_range`).
+    ranges: Vec<Range<usize>>,
+    /// Where `row` starts, in bytes: the zone sits after the line before.
+    line_start: usize,
     view: gpui::Entity<CodeLensLine>,
     zone: WidgetId,
     /// Bumped when the zone is reused for a new request's lenses, so
@@ -61,7 +97,23 @@ pub(crate) struct CodeLensState {
     epoch: u64,
     pending: Option<text::Version>,
     task: Option<Task<()>>,
+    /// `task` is still waiting out its delay: blurring cancels it then
+    /// (Monaco's scheduler, not the request it starts).
+    waiting: bool,
+    /// The text gained focus: ask again for the same text (Monaco
+    /// `onDidFocusEditorText`).
+    refocused: bool,
     samples: Vec<Duration>,
+    /// The scheduled resolve (Monaco `_resolveCodeLensesScheduler`):
+    /// scheduling again restarts its delay.
+    resolve_timer: Option<Task<()>>,
+    /// The resolves running (Monaco `_resolveCodeLensesPromise`): the next
+    /// run and edits cancel them.
+    resolving: Option<Task<()>>,
+    /// The resolves' durations, for their moving-average delay.
+    resolve_samples: Vec<Duration>,
+    /// The scroll top and viewport size resolves were last scheduled for.
+    resolve_view: Option<(Pixels, gpui::Size<Pixels>)>,
     /// The zones' height (Monaco `_getLayoutInfo().codeLensHeight`), to
     /// re-lay them out when the font or zoom changes.
     height: Pixels,
@@ -334,12 +386,21 @@ impl CodeEditor {
     }
 
     fn code_lens_delay(&self) -> Duration {
-        if self.code_lens.samples.is_empty() {
-            return MIN_DELAY.mul_f32(1.5);
+        moving_delay(&self.code_lens.samples)
+    }
+
+    /// Monaco `onDidFocusEditorText` schedules a request, and
+    /// `onDidBlurEditorText` cancels one still waiting out its delay.
+    pub(crate) fn code_lens_focus_changed(&mut self, focused: bool) {
+        if focused {
+            self.code_lens.refocused = true;
+        } else {
+            self.code_lens.refocused = false;
+            if self.code_lens.waiting {
+                self.code_lens.waiting = false;
+                self.code_lens.task = None;
+            }
         }
-        let average =
-            self.code_lens.samples.iter().sum::<Duration>() / self.code_lens.samples.len() as u32;
-        average.max(MIN_DELAY)
     }
 
     /// Requests lenses when the text changed: right away the first time,
@@ -362,23 +423,27 @@ impl CodeEditor {
             .try_global::<crate::providers::CodeLensEpoch>()
             .map_or(0, |e| e.0);
         if epoch == self.code_lens.epoch
+            && !self.code_lens.refocused
             && (self.code_lens.version.as_ref() == Some(&version)
                 || self.code_lens.pending.as_ref() == Some(&version))
         {
             return;
         }
         self.code_lens.epoch = epoch;
+        self.code_lens.refocused = false;
         let delay = if self.code_lens.version.is_some() {
             self.code_lens_delay()
         } else {
             Duration::ZERO
         };
         self.code_lens.pending = Some(version);
+        self.code_lens.waiting = !delay.is_zero();
         self.code_lens.task = Some(cx.spawn(async move |this, cx| {
             if !delay.is_zero() {
                 cx.background_executor().timer(delay).await;
             }
             let Ok(requests) = this.update(cx, |this, cx| {
+                this.code_lens.waiting = false;
                 let model = this.model().read(cx);
                 let context = model.provider_context();
                 code_lens_providers(cx, this.provider_target(cx))
@@ -400,7 +465,6 @@ impl CodeEditor {
                         lens,
                         provider: provider.clone(),
                         rank,
-                        resolving: false,
                     })),
                     Err(err) => log::warn!("code lenses failed: {err:#}"),
                 }
@@ -451,32 +515,162 @@ impl CodeEditor {
         // Monaco's merge of the new groups into the shown lenses by line:
         // a line that still has lenses keeps its zone and what it shows
         // until they resolve (no blank, no fade); other zones go or come.
-        let old: Vec<(Option<u32>, Group)> = std::mem::take(&mut self.code_lens.groups)
+        // (Their rows follow edits: `code_lenses_after_edit`.)
+        let mut old = std::mem::take(&mut self.code_lens.groups)
             .into_iter()
-            .map(|group| (self.code_lens_zone_row(group.zone, cx), group))
-            .collect();
-        let mut old = old.into_iter().peekable();
+            .peekable();
         let mut merged = Vec::with_capacity(groups.len());
         for (row, items) in groups {
-            while let Some((old_row, _)) = old.peek() {
-                if old_row.is_some_and(|old_row| old_row >= row) {
-                    break;
-                }
-                if let Some((_, group)) = old.next() {
-                    self.remove_widget(group.zone, cx);
-                }
+            while let Some(group) = old.next_if(|group| group.row < row) {
+                self.remove_widget(group.zone, cx);
             }
-            let group = match old.next_if(|(old_row, _)| *old_row == Some(row)) {
-                Some((_, group)) => self.update_code_lens_group(group, row, items, cx),
+            let group = match old.next_if(|group| group.row == row) {
+                Some(group) => self.update_code_lens_group(group, row, items, cx),
                 None => self.new_code_lens_group(row, items, height, cx),
             };
             merged.push(group);
         }
-        for (_, group) in old {
+        for group in old {
             self.remove_widget(group.zone, cx);
         }
+        // Monaco `CodeLensHelper.commit`: every lens's range is tracked
+        // anew.
+        let rope = self.model().read(cx).buffer().rope().clone();
+        for group in &mut merged {
+            group.ranges = group
+                .items
+                .iter()
+                .map(|item| {
+                    let offset = |point| {
+                        rope.point_utf16_to_offset(rope.clip_point_utf16(point, Bias::Left))
+                    };
+                    offset(item.lens.range.start)..offset(item.lens.range.end)
+                })
+                .collect();
+            group.line_start = rope.point_to_offset(text::Point::new(group.row, 0));
+        }
         self.code_lens.groups = merged;
-        self.resolve_visible_code_lenses(cx);
+        self.resolve_code_lenses_soon(cx);
+    }
+
+    /// Whether any lenses are shown.
+    pub(crate) fn has_code_lenses(&self) -> bool {
+        !self.code_lens.groups.is_empty()
+    }
+
+    /// Monaco's `onDidChangeModelContent` listener cancels the resolves
+    /// scheduled or running.
+    pub(crate) fn cancel_code_lens_resolves(&mut self) {
+        self.code_lens.resolve_timer = None;
+        self.code_lens.resolving = None;
+    }
+
+    /// Monaco's `onDidChangeModelContent` listener: each line's lenses move
+    /// with their first lens's tracked range, and go when no range is left
+    /// as it was (an edit collapsed it) or another line's lenses are on
+    /// their line now. `patch` turned `old` into `new`.
+    ///
+    /// Only the lines an edit touches (their ranges, or the line break
+    /// before them, where their zone is) are measured again; the others
+    /// before the edits stay and those after shift by its length and line
+    /// count, as their zones' anchors do.
+    pub(crate) fn code_lenses_after_edit(
+        &mut self,
+        patch: &Patch,
+        old: &Rope,
+        new: &Rope,
+        cx: &mut Context<Self>,
+    ) {
+        let edits = patch.edits();
+        let (Some(first), Some(last)) = (edits.first(), edits.last()) else {
+            return;
+        };
+        if self.code_lens.groups.is_empty() {
+            return;
+        }
+        let (first, last) = (first.old.start, last.old.end);
+        let bytes = new.len() as isize - old.len() as isize;
+        let rows = new.max_point().row as i64 - old.max_point().row as i64;
+        let mut touched = false;
+        for group in &mut self.code_lens.groups {
+            let span_start = group.line_start.saturating_sub(1);
+            if span_start > last {
+                // Wholly after the edits.
+                for range in &mut group.ranges {
+                    *range = range.start.saturating_add_signed(bytes)
+                        ..range.end.saturating_add_signed(bytes);
+                }
+                group.line_start = group.line_start.saturating_add_signed(bytes);
+                group.row = (group.row as i64 + rows).max(0) as u32;
+                continue;
+            }
+            if group.ranges.iter().all(|range| range.end < first) && group.line_start <= first {
+                // Wholly before them.
+                continue;
+            }
+            touched = true;
+            for range in &mut group.ranges {
+                *range = move_lens_range(patch, old, new, range);
+            }
+            // Marks it for a new row below.
+            group.line_start = usize::MAX;
+        }
+        if !touched {
+            return;
+        }
+        let mut last_row = None;
+        let mut moved = Vec::new();
+        let mut gone = Vec::new();
+        let mut kept = Vec::with_capacity(self.code_lens.groups.len());
+        for mut group in std::mem::take(&mut self.code_lens.groups) {
+            if group.line_start == usize::MAX {
+                // Monaco `CodeLensWidget.isValid`.
+                let valid = group
+                    .ranges
+                    .iter()
+                    .zip(&group.items)
+                    .any(|(range, item)| range.is_empty() == item.lens.range.is_empty());
+                if !valid || group.ranges.is_empty() {
+                    gone.push(group);
+                    continue;
+                }
+                // Monaco `getLineNumber`.
+                let row = new.offset_to_point(group.ranges[0].start).row;
+                group.line_start = new.point_to_offset(text::Point::new(row, 0));
+                if group.row != row {
+                    group.row = row;
+                }
+                moved.push((group.zone, row));
+            }
+            // Lenses are never on the same line.
+            if last_row == Some(group.row) {
+                gone.push(group);
+                continue;
+            }
+            last_row = Some(group.row);
+            kept.push(group);
+        }
+        self.code_lens.groups = kept;
+        // Monaco `CodeLensWidget.update`: the zone after the line above,
+        // which the zone's anchor alone doesn't follow (a line break typed
+        // at its end, or the line above deleted).
+        let moved: Vec<_> = moved
+            .into_iter()
+            .filter(|(zone, row)| self.code_lens_zone_row(*zone, cx) != Some(*row))
+            .collect();
+        if !moved.is_empty() || !gone.is_empty() {
+            self.change_view_zones(
+                |zones| {
+                    for (zone, row) in moved {
+                        zones.layout_zone(zone, row, None);
+                    }
+                    for group in gone {
+                        zones.remove_zone(group.zone);
+                    }
+                },
+                cx,
+            );
+        }
     }
 
     /// Monaco `new CodeLensWidget`: a zone above `row` showing the lenses
@@ -509,6 +703,8 @@ impl CodeEditor {
         Group {
             row,
             items,
+            ranges: Vec::new(),
+            line_start: 0,
             view,
             zone,
             generation: 0,
@@ -543,10 +739,43 @@ impl CodeEditor {
         group
     }
 
-    /// Monaco `_resolveCodeLensesInViewport`: resolves the lenses without
-    /// commands on (or near) the visible lines, then shows each line's
-    /// lenses once all of them are back (`updateCommands`).
-    pub(crate) fn resolve_visible_code_lenses(&mut self, cx: &mut Context<Self>) {
+    /// Monaco `_resolveCodeLensesInViewportSoon`: resolves the visible
+    /// lenses after the resolves' moving-average delay (at least 250ms),
+    /// restarting it if one is scheduled already.
+    fn resolve_code_lenses_soon(&mut self, cx: &mut Context<Self>) {
+        let delay = moving_delay(&self.code_lens.resolve_samples);
+        self.code_lens.resolve_timer = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(delay).await;
+            this.update(cx, |this, cx| {
+                this.code_lens.resolve_timer = None;
+                this.resolve_visible_code_lenses(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Monaco's `onDidScrollChange` (the scroll top) and `onDidLayoutChange`
+    /// listeners: the visible lenses are resolved soon. Called with each
+    /// new layout.
+    pub(crate) fn code_lens_layout_changed(&mut self, cx: &mut Context<Self>) {
+        let Some(layout) = self.layout.as_ref() else {
+            return;
+        };
+        let view = (layout.scroll_top, layout.bounds.size);
+        if self.code_lens.resolve_view.replace(view) == Some(view)
+            || self.code_lens.groups.is_empty()
+        {
+            return;
+        }
+        self.resolve_code_lenses_soon(cx);
+    }
+
+    /// Monaco `_resolveCodeLensesInViewport`: cancels the resolves still
+    /// running, resolves the lenses without commands on (or near) the
+    /// visible lines, and shows each line's lenses once all of them are
+    /// back (`updateCommands`).
+    fn resolve_visible_code_lenses(&mut self, cx: &mut Context<Self>) {
+        self.code_lens.resolving = None;
         let Some(layout) = self.layout.as_ref() else {
             return;
         };
@@ -554,38 +783,50 @@ impl CodeEditor {
             return;
         };
         let rows = first.row.saturating_sub(1)..last.row + 2;
-        let context = self.model().read(cx).provider_context();
-        // (group, its items' resolves: `None` for those that keep their
-        // lens).
-        let mut requests = Vec::new();
-        for group in &mut self.code_lens.groups {
+        let model = self.model().read(cx);
+        let context = model.provider_context();
+        // Monaco `computeIfNecessary`: the visible lenses, with their
+        // ranges as tracked now.
+        let mut visible = Vec::new();
+        for (ix, group) in self.code_lens.groups.iter_mut().enumerate() {
             if !rows.contains(&group.row)
-                || group
-                    .items
-                    .iter()
-                    .all(|item| item.lens.command.is_some() || item.resolving)
+                || group.items.iter().all(|item| item.lens.command.is_some())
             {
                 continue;
             }
-            let tasks: Vec<_> = group
-                .items
-                .iter_mut()
-                .map(|item| {
-                    if item.lens.command.is_some() || item.resolving {
-                        return None;
-                    }
-                    item.resolving = true;
-                    item.provider.resolve_code_lens(&context, &item.lens, cx)
-                })
-                .collect();
-            requests.push((group.zone, group.generation, tasks));
+            let rope = model.buffer().rope();
+            for (item, range) in group.items.iter_mut().zip(&group.ranges) {
+                item.lens.range =
+                    rope.offset_to_point_utf16(range.start)..rope.offset_to_point_utf16(range.end);
+            }
+            visible.push(ix);
         }
-        if requests.is_empty() {
+        if visible.is_empty() {
             return;
         }
-        // Not cancelled by later requests (which skip these lenses); the
-        // zone tells whether the line's lenses are still the same.
-        cx.spawn(async move |this, cx| {
+        // (group, its items' resolves: `None` for those that keep their
+        // lens).
+        let requests: Vec<_> = visible
+            .into_iter()
+            .map(|ix| {
+                let group = &self.code_lens.groups[ix];
+                let tasks: Vec<_> = group
+                    .items
+                    .iter()
+                    .map(|item| {
+                        if item.lens.command.is_some() {
+                            return None;
+                        }
+                        item.provider.resolve_code_lens(&context, &item.lens, cx)
+                    })
+                    .collect();
+                (group.zone, group.generation, tasks)
+            })
+            .collect();
+        let started = Instant::now();
+        // The zone and generation tell whether the line's lenses are still
+        // the same.
+        self.code_lens.resolving = Some(cx.spawn(async move |this, cx| {
             for (zone, generation, tasks) in requests {
                 let mut resolved = Vec::with_capacity(tasks.len());
                 for task in tasks {
@@ -603,7 +844,7 @@ impl CodeEditor {
                         .iter_mut()
                         .find(|g| g.zone == zone && g.generation == generation)
                     else {
-                        return true;
+                        return;
                     };
                     let mut shown = Vec::with_capacity(resolved.len());
                     for (item, result) in group.items.iter_mut().zip(resolved) {
@@ -621,14 +862,22 @@ impl CodeEditor {
                         view.set_lenses(shown, true);
                         cx.notify();
                     });
-                    true
                 });
                 if done.is_err() {
                     return;
                 }
             }
-        })
-        .detach();
+            // Monaco updates the resolves' moving average.
+            this.update(cx, |this, _| {
+                let samples = &mut this.code_lens.resolve_samples;
+                if samples.len() == 6 {
+                    samples.remove(0);
+                }
+                samples.push(started.elapsed());
+                this.code_lens.resolving = None;
+            })
+            .ok();
+        }));
     }
 
     /// Monaco `CodeLensContribution._onModelChange`: the old model's lenses
@@ -637,11 +886,14 @@ impl CodeEditor {
     pub(crate) fn reset_code_lenses(&mut self, cx: &mut Context<Self>) {
         self.clear_code_lenses(cx);
         self.code_lens.task = None;
+        self.code_lens.waiting = false;
         self.code_lens.pending = None;
         self.code_lens.version = None;
     }
 
     fn clear_code_lenses(&mut self, cx: &mut Context<Self>) {
+        self.code_lens.resolve_timer = None;
+        self.code_lens.resolving = None;
         let groups = std::mem::take(&mut self.code_lens.groups);
         for group in groups {
             self.remove_widget(group.zone, cx);
