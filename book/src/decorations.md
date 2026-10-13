@@ -83,7 +83,7 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
 | `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, its background is widened to a character's width (so are narrower ones, such as a zero-width space's), and a range ending at a line's start stops at the end of the line before in the text area (the glyph margin and line decorations keep the decoration's own range) |
-| `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
+| `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font. With `allow_variable_fonts` off (and by default with a screen reader) the editor leaves such decorations out entirely |
 | `text_direction` | `textDirection` | kept for the getters; GPUI can't lay out right-to-left lines, so they stay left to right |
 | `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
@@ -155,7 +155,7 @@ The model emits `TextModelEvent::DecorationsChanged(DecorationsChange)` (Monaco 
 - On every edit, undo and redo while the model has decorations, since they move with the text. A list built from `collection.ranges(cx)` stays current this way.
 - Not for a delta that removes and adds nothing, such as removing ids that are already gone. So a listener that sets decorations again on this event doesn't loop.
 
-`LineHeightChanged` and `FontChanged` (Monaco `onDidChangeLineHeight` and `onDidChangeFont`) come before it when decorations with a `line_height` or a font were added, changed or removed. They list each decoration's first row and owner, and `line_height` is `None` once it's gone. An editor forwards the changes of the decorations it shows. Line heights are forwarded only with `allow_variable_line_heights`.
+`LineHeightChanged` and `FontChanged` (Monaco `onDidChangeLineHeight` and `onDidChangeFont`) come before it when decorations with a `line_height` or a font were added, changed or removed. They list each decoration's first row and owner, and `line_height` is `None` once it's gone. An editor forwards the changes of the decorations it shows. Line heights are forwarded only with `allow_variable_line_heights`, and fonts only while `allows_variable_fonts()`.
 
 ## Ownership
 

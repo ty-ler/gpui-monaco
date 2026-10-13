@@ -238,6 +238,11 @@ impl Playground {
             if std::env::var_os("PLAYGROUND_LIGATURES").is_some() {
                 options.font_ligatures = gpui_monaco::options::FontLigatures::On;
             }
+            // `PLAYGROUND_TWO_CELLS=1`: `fullwidth_character_width: TwoCells`.
+            if std::env::var_os("PLAYGROUND_TWO_CELLS").is_some() {
+                options.fullwidth_character_width =
+                    gpui_monaco::options::FullwidthCharacterWidth::TwoCells;
+            }
             // `PLAYGROUND_LINE_HIGHLIGHT=none|gutter|line|all` and
             // `PLAYGROUND_FOLDING_CONTROLS=always|never|mouseover`.
             match std::env::var("PLAYGROUND_LINE_HIGHLIGHT").as_deref() {

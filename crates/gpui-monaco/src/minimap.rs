@@ -792,7 +792,7 @@ pub(crate) fn prepaint(
         view_lines.view_line(view_line_of(header_start) - 1).row,
         0,
     ));
-    let shows_validation = editor.shows_validation_decorations();
+    let filter = editor.view_decoration_filter();
     let editor_id = cx.entity_id();
     let mut decorations: Vec<_> = editor.model().update(cx, |model, _| {
         model
@@ -800,7 +800,7 @@ pub(crate) fn prepaint(
             .into_iter()
             .filter(|d| {
                 d.options.minimap.is_some()
-                    && (shows_validation || !d.options.validation)
+                    && filter.keeps(&d.options)
                     && model.is_decoration_visible(d)
             })
             .collect()

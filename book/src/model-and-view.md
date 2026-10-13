@@ -141,7 +141,7 @@ These answer from the last frame, so they return `None` until the editor was pai
 | `statusbar_column(p, cx)` | `getStatusbarColumn`: 1-based, tabs expanded, every other character one column |
 | `content_width()`, `content_height()`, `scroll_width()`, `scroll_height()` | `getContentWidth`, `getContentHeight` (the lines and view zones, plus a shown horizontal scrollbar without `scroll_beyond_last_line` as in Monaco, but without the `scroll_beyond_last_line` room Monaco adds), `getScrollWidth`, `getScrollHeight` |
 | `scrolled_visible_position_in_editor(p)` (`top`, `left`, `height` from the editor's top-left); `scrolled_visible_position(p)` in window coordinates | `getScrolledVisiblePosition` |
-| `font_info()` | `getOption(EditorOption.fontInfo)` |
+| `font_info()` | `getOption(EditorOption.fontInfo)`: the font, size and line height, `font_feature_settings`, `pixel_ratio`, `is_monospace` and the measured widths (`typical_halfwidth_character_width`, `typical_fullwidth_character_width`, `space_width`, `middot_width`, `wsmiddot_width`, `max_digit_width`, `can_use_halfwidth_rightwards_arrow`) |
 | `visible_ranges_plus_viewport_above_below(cx)` | `getVisibleRangesPlusViewportAboveBelow` |
 | `scroll_top()`, `scroll_left()` | `getScrollTop`, `getScrollLeft` (where a smooth scroll is now) |
 | `future_scroll_position()` | `viewLayout.getFutureScrollPosition` (where a smooth scroll is going) |

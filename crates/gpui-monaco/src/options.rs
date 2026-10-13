@@ -1730,6 +1730,31 @@ pub enum FontLigatures {
 }
 
 impl FontLigatures {
+    /// Monaco `EditorFontLigatures.OFF`.
+    pub const OFF: &str = r#""liga" off, "calt" off"#;
+    /// Monaco `EditorFontLigatures.ON`.
+    pub const ON: &str = r#""liga" on, "calt" on"#;
+
+    /// The CSS `font-feature-settings` value (Monaco's validated
+    /// `fontLigatures`, `FontInfo.fontFeatureSettings`).
+    pub fn font_feature_settings(&self) -> SharedString {
+        match self {
+            Self::Off => Self::OFF.into(),
+            Self::On => Self::ON.into(),
+            Self::Settings(settings) => settings.clone(),
+        }
+    }
+
+    /// Monaco `EditorFontLigatures.validate`: `""` and `"false"` are off,
+    /// `"true"` on; other settings are kept.
+    pub fn validated(&self) -> Self {
+        match self {
+            Self::Settings(settings) if settings.is_empty() || settings == "false" => Self::Off,
+            Self::Settings(settings) if settings == "true" => Self::On,
+            other => other.clone(),
+        }
+    }
+
     /// The features to shape text with.
     pub fn features(&self) -> FontFeatures {
         let settings = match self {
@@ -1883,6 +1908,15 @@ pub struct EditorOptions {
     /// Monaco `allowVariableLineHeights`: decorations may change line
     /// heights (default `true`).
     pub allow_variable_line_heights: bool,
+    /// Monaco `allowVariableFonts`: decorations may change the font (a
+    /// `font_family`, `font_weight` or `font_style`) when the editor isn't
+    /// optimized for screen readers (default `true`). Off, the editor
+    /// leaves such decorations out entirely, their backgrounds, gutter and
+    /// overview ruler marks included.
+    pub allow_variable_fonts: bool,
+    /// Monaco `allowVariableFontsInAccessibilityMode`: the same while the
+    /// editor is optimized for screen readers (default `false`).
+    pub allow_variable_fonts_in_accessibility_mode: bool,
     /// Monaco `readOnly`: ignore edits from typing, IME and editing commands (default
     /// `false`).
     pub read_only: bool,
@@ -2285,6 +2319,8 @@ impl Default for EditorOptions {
             render_line_highlight_only_when_focus: false,
             scroll_beyond_last_line: true,
             allow_variable_line_heights: true,
+            allow_variable_fonts: true,
+            allow_variable_fonts_in_accessibility_mode: false,
             read_only: false,
             read_only_message: None,
             placeholder: None,
@@ -2533,7 +2569,9 @@ impl EditorOptions {
     /// - `font_size`: 6–100px, 0 for the default
     ///   ([`resolved_font_size`](Self::resolved_font_size)); `line_height`:
     ///   0–150, `None` for 0 ([`resolved_line_height`](Self::resolved_line_height)
-    ///   applies the rest); `font_weight`: 1–1000.
+    ///   applies the rest); `font_weight`: 1–1000; `font_ligatures`:
+    ///   `Settings("")` and `Settings("false")` are `Off`,
+    ///   `Settings("true")` `On` ([`FontLigatures::validated`]).
     /// - `line_numbers_min_chars`: 1–300; `line_decorations_width`,
     ///   `reveal_horizontal_right_padding`, `padding`, the scrollbar sizes,
     ///   `arrow_size` and slider sizes: 0–1000px; `overview_ruler_lanes`:
@@ -2563,6 +2601,7 @@ impl EditorOptions {
             .map(|height| px(clamped_float(f32::from(height), 0., 0., 150.)))
             .filter(|height| *height != px(0.));
         options.font_weight = FontWeight(clamped_int(self.font_weight.0, 400., 1., 1000.));
+        options.font_ligatures = self.font_ligatures.validated();
         options.line_numbers_min_chars = self.line_numbers_min_chars.clamp(1, 300);
         options.line_decorations_width = match self.line_decorations_width {
             LineDecorationsWidth::Pixels(width) => {
@@ -2722,6 +2761,31 @@ mod validation_tests {
         assert_eq!(
             validated(|o| o.font_weight = FontWeight(5000.)).font_weight,
             FontWeight(1000.)
+        );
+    }
+
+    #[test]
+    fn font_ligatures() {
+        // Monaco `EditorFontLigatures.validate`: `''` and `'false'` are
+        // off, `'true'` on, other strings kept.
+        let ligatures = |value: &'static str| {
+            validated(|o| o.font_ligatures = FontLigatures::Settings(value.into())).font_ligatures
+        };
+        assert_eq!(ligatures(""), FontLigatures::Off);
+        assert_eq!(ligatures("false"), FontLigatures::Off);
+        assert_eq!(ligatures("true"), FontLigatures::On);
+        assert_eq!(
+            ligatures(r#""ss01""#),
+            FontLigatures::Settings(r#""ss01""#.into())
+        );
+        assert_eq!(ligatures("false").features(), FontLigatures::Off.features());
+        assert_eq!(
+            FontLigatures::Off.font_feature_settings(),
+            r#""liga" off, "calt" off"#
+        );
+        assert_eq!(
+            FontLigatures::On.font_feature_settings(),
+            r#""liga" on, "calt" on"#
         );
     }
 
