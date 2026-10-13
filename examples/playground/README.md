@@ -64,4 +64,4 @@ Demo providers are registered by default:
 | `PLAYGROUND_SCREENSHOT=out.png` | Save a screenshot and exit (needs `--features screenshot`) |
 | `PLAYGROUND_KEYS="cmd-down text:hi wait"` | Keystrokes to play before the screenshot (`text:` types, `_` is a space, `mouse:x,y` moves the mouse and `mouse:x,y,secondary` holds Cmd/Ctrl, `click:x,y` clicks, `down:x,y` presses the left button and `drag:x,y` moves with it held, `wheel:x,y,dy` scrolls there, `wait` pauses 150ms) |
 
-`PLAYGROUND_PERF` and `PLAYGROUND_SCREENSHOT` runs (or any run with `PLAYGROUND_BACKGROUND=1`) open the window without activating the app or taking focus, so scripted runs don't pop in front of whatever you're working on.
+`PLAYGROUND_PERF` and `PLAYGROUND_SCREENSHOT` runs (or any run with `PLAYGROUND_BACKGROUND=1`) open the window hidden (`show: false`), without activating the app or taking focus, so scripted runs never appear on screen. Perf mode and screenshots draw the hidden window directly.
