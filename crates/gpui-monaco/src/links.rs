@@ -115,6 +115,7 @@ pub(crate) fn get_links(model: &Entity<TextModel>, cx: &mut App) -> Task<Vec<Pro
                         range: link.range,
                         url: Some(link.url.into()),
                         tooltip: None,
+                        data: None,
                     },
                     None,
                 )

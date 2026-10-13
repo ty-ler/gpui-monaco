@@ -2,7 +2,7 @@
 
 The `gpui-monaco-lsp` crate connects [Language Server Protocol](https://microsoft.github.io/language-server-protocol/) servers to the editor, the way `monaco-languageclient` does for Monaco. An `LspClient` starts a server and then does three things:
 
-- It registers [providers](providers.md) for the features the server supports: completion, hover, go to definition, document highlights and signature help.
+- It registers [providers](providers.md) for the features the server supports, such as completion, hover, go to definition, code actions, code lenses, links, colors and linked editing (see [Features](#features)).
 - It turns the server's diagnostics into [markers](diagnostics.md).
 - It keeps the models you attach in sync with the server.
 
@@ -66,6 +66,10 @@ Positions need no conversion: both the editor and LSP use 0-based lines and UTF-
 | `foldingRangeProvider` | Folding ranges, with their kinds. |
 | `inlayHintProvider` | Inlay hints; `workspace/inlayHint/refresh` calls `refresh_inlay_hints`. |
 | `renameProvider` | Rename (F2), with `prepareRename` when the server supports it. Edits to other documents need their models (`model_for_uri`). |
+| `codeLensProvider` | Code lenses, with `codeLens/resolve` for lenses without a command when the server supports it; `workspace/codeLens/refresh` calls `refresh_code_lenses`. |
+| `documentLinkProvider` | Links (Ctrl/Cmd+click), with the server's tooltips and `documentLink/resolve` for links without a target when the server supports it. |
+| `colorProvider` | Color decorators and the color picker, with the server's colors and presentations. Like any color provider, it replaces the editor's own hex and `rgb()` detection for the languages it's registered for. |
+| `linkedEditingRangeProvider` | Linked editing (`linkedEditing: true`), such as renaming an HTML tag pair, with the server's word pattern. |
 | `textDocument/publishDiagnostics` | Markers owned by `lsp:<name>`, shown as squiggles and in the overview ruler. Diagnostics for documents that aren't attached go to the marker service too (`set_markers_for_uri`): `model_markers` lists them, and a model opened later shows them at once. |
 
 Providers are registered for `options.languages`. An empty list registers them for every language. Either way they only answer for attached models. When the client is dropped, shuts down or its server exits, the providers are unregistered.

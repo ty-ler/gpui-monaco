@@ -8,9 +8,11 @@
 use std::ops::Range;
 
 use gpui::SharedString;
+use gpui_monaco::color::ColorF;
 use gpui_monaco::providers::{
-    CodeAction, CodeActionKind, Command, CompletionItemTag, InlayHint, InlayHintKind,
-    InlayHintLabelPart,
+    CodeAction, CodeActionKind, CodeLens, ColorInformation, ColorPresentation, Command,
+    CompletionItemTag, DocumentLink, InlayHint, InlayHintKind, InlayHintLabelPart,
+    LinkedEditingRanges,
 };
 use gpui_monaco::providers::{
     CompletionItem, CompletionItemKind, CompletionList, DocumentHighlight, DocumentHighlightKind,
@@ -690,6 +692,78 @@ pub fn command(command: lsp::Command) -> Command {
         title: command.title.into(),
         arguments: command.arguments.unwrap_or_default(),
         ..Default::default()
+    }
+}
+
+/// A code lens (`asCodeLens`). The original is kept in `data` so it can
+/// be sent back to `codeLens/resolve`.
+pub fn code_lens(lens: lsp::CodeLens) -> anyhow::Result<CodeLens> {
+    Ok(CodeLens {
+        range: range(lens.range),
+        command: lens.command.clone().map(command),
+        id: None,
+        data: Some(serde_json::to_value(&lens)?),
+    })
+}
+
+/// A document link (`asDocumentLink`): its target as a uri in
+/// [`normalize_uri`](gpui_monaco::normalize_uri)'s form. The original is
+/// kept in `data` so it can be sent back to `documentLink/resolve`.
+pub fn document_link(link: lsp::DocumentLink) -> anyhow::Result<DocumentLink> {
+    Ok(DocumentLink {
+        range: range(link.range),
+        url: link.target.as_ref().map(uri),
+        tooltip: link.tooltip.clone().map(Into::into),
+        data: Some(serde_json::to_value(&link)?),
+    })
+}
+
+/// A color in the text (`asColorInformation`).
+pub fn color_information(info: lsp::ColorInformation) -> ColorInformation {
+    ColorInformation {
+        range: range(info.range),
+        color: ColorF {
+            red: f64::from(info.color.red),
+            green: f64::from(info.color.green),
+            blue: f64::from(info.color.blue),
+            alpha: f64::from(info.color.alpha),
+        },
+    }
+}
+
+/// A gpui-monaco color as an LSP one.
+pub fn lsp_color(color: &ColorF) -> lsp::Color {
+    lsp::Color {
+        red: color.red as f32,
+        green: color.green as f32,
+        blue: color.blue as f32,
+        alpha: color.alpha as f32,
+    }
+}
+
+/// A way to write a color (`asColorPresentation`).
+pub fn color_presentation(presentation: lsp::ColorPresentation) -> ColorPresentation {
+    let edit = |edit: lsp::TextEdit| (range(edit.range), edit.new_text);
+    ColorPresentation {
+        label: presentation.label.into(),
+        text_edit: presentation.text_edit.map(edit),
+        additional_text_edits: presentation
+            .additional_text_edits
+            .unwrap_or_default()
+            .into_iter()
+            .map(edit)
+            .collect(),
+    }
+}
+
+/// Linked editing ranges (`asLinkedEditingRanges`): the word pattern is a
+/// JavaScript regular expression without flags (`new RegExp(wordPattern)`).
+pub fn linked_editing_ranges(ranges: lsp::LinkedEditingRanges) -> LinkedEditingRanges {
+    LinkedEditingRanges {
+        ranges: ranges.ranges.into_iter().map(range).collect(),
+        word_pattern: ranges
+            .word_pattern
+            .map(|pattern| gpui_monaco::syntax::Pattern::new(pattern, "")),
     }
 }
 

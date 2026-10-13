@@ -98,6 +98,10 @@ fn capabilities() -> Value {
         "implementationProvider": true,
         "documentRangeFormattingProvider": true,
         "documentOnTypeFormattingProvider": { "firstTriggerCharacter": "}", "moreTriggerCharacter": [";"] },
+        "codeLensProvider": { "resolveProvider": true },
+        "documentLinkProvider": { "resolveProvider": true },
+        "colorProvider": true,
+        "linkedEditingRangeProvider": true,
     })
 }
 
@@ -1218,4 +1222,178 @@ async fn code_actions_send_the_published_diagnostics(cx: &mut TestAppContext) {
         }])
     );
     assert_eq!(serde_json::to_value(&diagnostics[0]).unwrap()["code"], "7");
+}
+
+/// `monaco-languageclient` registers code lens, document link, color and
+/// linked editing range providers (with `codeLens/resolve` and
+/// `documentLink/resolve`), advertises them, and maps
+/// `workspace/codeLens/refresh` to the code lens providers' change event.
+#[gpui::test]
+async fn code_lenses_links_colors_and_linked_editing(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |method, params| {
+        Some(match method {
+            "textDocument/codeLens" => json!([
+                { "range": range((0, 3), (0, 7)), "data": { "lens": 1 } },
+                { "range": range((1, 0), (1, 2)), "command": { "title": "Run", "command": "fake.doIt", "arguments": [2] } },
+            ]),
+            "codeLens/resolve" => {
+                assert_eq!(params["data"], json!({ "lens": 1 }));
+                assert_eq!(params["range"], range((0, 3), (0, 7)));
+                json!({
+                    "range": params["range"],
+                    "command": { "title": "3 references", "command": "fake.doIt" },
+                    "data": params["data"],
+                })
+            }
+            "textDocument/documentLink" => json!([
+                { "range": range((0, 0), (0, 2)), "target": "file:///C:/a%20b.rs", "tooltip": "Open a b" },
+                { "range": range((1, 0), (1, 2)), "data": { "link": 2 } },
+            ]),
+            "documentLink/resolve" => {
+                assert_eq!(params["data"], json!({ "link": 2 }));
+                json!({ "range": params["range"], "target": "https://example.com/" })
+            }
+            "textDocument/documentColor" => json!([
+                { "range": range((0, 3), (0, 7)), "color": { "red": 1.0, "green": 0.5, "blue": 0.0, "alpha": 1.0 } },
+            ]),
+            "textDocument/colorPresentation" => {
+                assert_eq!(params["color"], json!({ "red": 1.0, "green": 0.5, "blue": 0.0, "alpha": 1.0 }));
+                assert_eq!(params["range"], range((0, 3), (0, 7)));
+                json!([
+                    { "label": "#ff8000" },
+                    {
+                        "label": "rgb(255, 128, 0)",
+                        "textEdit": { "range": range((0, 3), (0, 7)), "newText": "rgb(255, 128, 0)" },
+                        "additionalTextEdits": [{ "range": range((0, 0), (0, 0)), "newText": "use rgb;\n" }],
+                    },
+                ])
+            }
+            "textDocument/linkedEditingRange" => {
+                if params["position"]["line"] == 1 {
+                    Value::Null
+                } else {
+                    json!({ "ranges": [range((0, 1), (0, 4)), range((0, 7), (0, 10))], "wordPattern": "[a-z]+" })
+                }
+            }
+            _ => return None,
+        })
+    })
+    .await;
+
+    // The client says it supports them.
+    let init = &server.messages("initialize")[0]["params"]["capabilities"];
+    assert_eq!(init["textDocument"]["codeLens"], json!({}));
+    assert_eq!(init["textDocument"]["documentLink"]["tooltipSupport"], true);
+    assert_eq!(init["textDocument"]["colorProvider"], json!({}));
+    assert_eq!(init["textDocument"]["linkedEditingRange"], json!({}));
+    assert_eq!(init["workspace"]["codeLens"]["refreshSupport"], true);
+
+    // The providers are registered for the client's languages.
+    cx.update(|cx| {
+        assert_eq!(code_lens_providers(cx, Some("rust")).len(), 1);
+        assert_eq!(link_providers(cx, Some("rust")).len(), 1);
+        assert_eq!(color_providers(cx, Some("rust")).len(), 1);
+        assert_eq!(linked_editing_range_providers(cx, Some("rust")).len(), 1);
+    });
+
+    let model = model(cx, "<div></div>\nab\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let features =
+        cx.update(|cx| LspFeatures::new(client.downgrade(), client.read(cx).capabilities()));
+    let context = model.read_with(cx, |m, _| m.provider_context());
+
+    // Code lenses, a lens without a command resolved with its data.
+    let lenses = cx.update(|cx| features.provide_code_lenses(&context, cx));
+    let lenses = lenses.await.unwrap();
+    assert_eq!(lenses.len(), 2);
+    assert_eq!(lenses[0].range, p(0, 3)..p(0, 7));
+    assert_eq!(lenses[0].command, None);
+    let run = lenses[1].command.as_ref().unwrap();
+    assert_eq!((run.id.as_ref(), run.title.as_ref()), ("fake.doIt", "Run"));
+    assert_eq!(run.arguments, vec![json!(2)]);
+    let resolved = cx
+        .update(|cx| features.resolve_code_lens(&context, &lenses[0], cx))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(resolved.range, p(0, 3)..p(0, 7));
+    assert_eq!(resolved.command.unwrap().title, "3 references");
+    // A lens from elsewhere has nothing to send back.
+    assert!(
+        cx.update(|cx| features.resolve_code_lens(&context, &CodeLens::default(), cx))
+            .is_none()
+    );
+
+    // Document links, targets normalized and a link without one resolved.
+    let links = cx.update(|cx| features.provide_links(&context, cx));
+    let links = links.await.unwrap();
+    assert_eq!(links[0].range, p(0, 0)..p(0, 2));
+    assert_eq!(links[0].url.as_deref(), Some("file:///c%3A/a%20b.rs"));
+    assert_eq!(links[0].tooltip.as_deref(), Some("Open a b"));
+    assert_eq!(links[1].url, None);
+    let resolved = cx
+        .update(|cx| features.resolve_link(&links[1], cx))
+        .unwrap()
+        .await
+        .unwrap();
+    assert_eq!(resolved.url.as_deref(), Some("https://example.com/"));
+    assert_eq!(resolved.range, p(1, 0)..p(1, 2));
+
+    // Colors and their presentations.
+    let colors = cx.update(|cx| features.provide_document_colors(&context, cx));
+    let colors = colors.await.unwrap();
+    assert_eq!(colors.len(), 1);
+    assert_eq!(colors[0].range, p(0, 3)..p(0, 7));
+    let color = &colors[0].color;
+    assert_eq!(
+        (color.red, color.green, color.blue, color.alpha),
+        (1.0, 0.5, 0.0, 1.0)
+    );
+    let presentations =
+        cx.update(|cx| features.provide_color_presentations(&context, &colors[0], cx));
+    let presentations = presentations.await.unwrap();
+    assert_eq!(presentations[0].label, "#ff8000");
+    assert_eq!(presentations[0].text_edit, None);
+    assert_eq!(
+        presentations[1].text_edit,
+        Some((p(0, 3)..p(0, 7), "rgb(255, 128, 0)".to_string()))
+    );
+    assert_eq!(
+        presentations[1].additional_text_edits,
+        vec![(p(0, 0)..p(0, 0), "use rgb;\n".to_string())]
+    );
+
+    // Linked editing ranges, with the server's word pattern.
+    let linked = cx.update(|cx| features.provide_linked_editing_ranges(&context, p(0, 2), cx));
+    let linked = linked.await.unwrap().unwrap();
+    assert_eq!(linked.ranges, vec![p(0, 1)..p(0, 4), p(0, 7)..p(0, 10)]);
+    let pattern = linked.word_pattern.unwrap();
+    assert_eq!(pattern.source, "[a-z]+");
+    assert!(pattern.is_match("div"));
+    let none = cx.update(|cx| features.provide_linked_editing_ranges(&context, p(1, 0), cx));
+    assert!(none.await.unwrap().is_none());
+    let sent = &server.messages("textDocument/linkedEditingRange")[0]["params"];
+    assert_eq!(sent["position"], json!({ "line": 0, "character": 2 }));
+    assert_eq!(sent["textDocument"]["uri"], "file:///project/main.rs");
+
+    // `workspace/codeLens/refresh` is answered, not refused.
+    server.request(9, "workspace/codeLens/refresh", Value::Null);
+    cx.run_until_parked();
+    let response = server.response(9);
+    assert!(response.get("error").is_none(), "{response}");
+    assert_eq!(response["result"], Value::Null);
+
+    // Shutting down unregisters them.
+    client
+        .update(cx, |client, cx| client.shutdown(cx))
+        .await
+        .unwrap();
+    cx.update(|cx| {
+        assert!(code_lens_providers(cx, Some("rust")).is_empty());
+        assert!(link_providers(cx, Some("rust")).is_empty());
+        assert!(color_providers(cx, Some("rust")).is_empty());
+        assert!(linked_editing_range_providers(cx, Some("rust")).is_empty());
+    });
 }

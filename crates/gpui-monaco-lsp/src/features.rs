@@ -9,6 +9,12 @@ use gpui_monaco::providers::{
     register_code_action_provider,
 };
 use gpui_monaco::providers::{
+    CodeLens, CodeLensProvider, ColorInformation, ColorPresentation, DocumentColorProvider,
+    DocumentLink, LinkProvider, LinkedEditingRangeProvider, LinkedEditingRanges,
+    register_code_lens_provider, register_color_provider, register_link_provider,
+    register_linked_editing_range_provider,
+};
+use gpui_monaco::providers::{
     CompletionItem, CompletionList, CompletionProvider, CompletionTrigger, DefinitionProvider,
     DocumentFormattingProvider, DocumentHighlight, DocumentHighlightProvider,
     DocumentRangeFormattingProvider, FormattingEdits, FormattingOptions, Hover, HoverProvider,
@@ -63,6 +69,10 @@ pub(crate) struct LspFeatures {
     resolve_completions: bool,
     /// The server answers `codeAction/resolve`.
     resolve_code_actions: bool,
+    /// The server answers `codeLens/resolve`.
+    resolve_code_lenses: bool,
+    /// The server answers `documentLink/resolve`.
+    resolve_links: bool,
     /// The code action kinds the server returns, if it says.
     code_action_kinds: Option<Vec<CodeActionKind>>,
     /// The server's semantic token types and modifiers.
@@ -131,6 +141,16 @@ impl LspFeatures {
                     }
                 ))
             ),
+            resolve_code_lenses: capabilities
+                .code_lens_provider
+                .as_ref()
+                .and_then(|options| options.resolve_provider)
+                .unwrap_or(false),
+            resolve_links: capabilities
+                .document_link_provider
+                .as_ref()
+                .and_then(|options| options.resolve_provider)
+                .unwrap_or(false),
             code_action_kinds: match &capabilities.code_action_provider {
                 Some(lsp::CodeActionProviderCapability::Options(options)) => {
                     options.code_action_kinds.as_ref().map(|kinds| {
@@ -339,6 +359,34 @@ impl LspFeatures {
         }
         if capabilities.document_on_type_formatting_provider.is_some() {
             registrations.push(register_on_type_formatting_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities.code_lens_provider.is_some() {
+            registrations.push(register_code_lens_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
+        if capabilities.document_link_provider.is_some() {
+            registrations.push(register_link_provider(cx, selector.clone(), self.clone()));
+        }
+        if capabilities
+            .color_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::ColorProviderCapability::Simple(false)))
+        {
+            registrations.push(register_color_provider(cx, selector.clone(), self.clone()));
+        }
+        if capabilities
+            .linked_editing_range_provider
+            .as_ref()
+            .is_some_and(|c| !matches!(c, lsp::LinkedEditingRangeServerCapabilities::Simple(false)))
+        {
+            registrations.push(register_linked_editing_range_provider(
                 cx,
                 selector.clone(),
                 self.clone(),
@@ -1171,5 +1219,174 @@ impl DocumentSymbolProvider for LspFeatures {
                 .map(convert::document_symbols)
                 .unwrap_or_default())
         })
+    }
+}
+
+/// `vscode-languageclient`'s `CodeLensFeature`: `textDocument/codeLens`,
+/// and `codeLens/resolve` for lenses without a command when the server
+/// resolves them.
+impl CodeLensProvider for LspFeatures {
+    fn provide_code_lenses(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<CodeLens>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::CodeLensRequest>(lsp::CodeLensParams {
+            text_document: position.text_document,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+        cx.background_executor().spawn(async move {
+            request
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(convert::code_lens)
+                .collect()
+        })
+    }
+
+    fn resolve_code_lens(
+        &self,
+        _context: &ProviderContext,
+        lens: &CodeLens,
+        cx: &mut App,
+    ) -> Option<Task<Result<CodeLens>>> {
+        if !self.resolve_code_lenses {
+            return None;
+        }
+        let original: lsp::CodeLens = serde_json::from_value(lens.data.clone()?).ok()?;
+        let client = self.client.upgrade()?;
+        let connection = client.read(cx).connection().clone();
+        let request = connection.request::<lsp::request::CodeLensResolve>(original);
+        Some(
+            cx.background_executor()
+                .spawn(async move { convert::code_lens(request.await?) }),
+        )
+    }
+}
+
+/// `vscode-languageclient`'s `DocumentLinkFeature`:
+/// `textDocument/documentLink`, and `documentLink/resolve` for links
+/// without a target when the server resolves them.
+impl LinkProvider for LspFeatures {
+    fn provide_links(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<DocumentLink>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request =
+            connection.request::<lsp::request::DocumentLinkRequest>(lsp::DocumentLinkParams {
+                text_document: position.text_document,
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            });
+        cx.background_executor().spawn(async move {
+            request
+                .await?
+                .unwrap_or_default()
+                .into_iter()
+                .map(convert::document_link)
+                .collect()
+        })
+    }
+
+    fn resolve_link(
+        &self,
+        link: &DocumentLink,
+        cx: &mut App,
+    ) -> Option<Task<Result<DocumentLink>>> {
+        if !self.resolve_links {
+            return None;
+        }
+        let original: lsp::DocumentLink = serde_json::from_value(link.data.clone()?).ok()?;
+        let client = self.client.upgrade()?;
+        let connection = client.read(cx).connection().clone();
+        let request = connection.request::<lsp::request::DocumentLinkResolve>(original);
+        Some(
+            cx.background_executor()
+                .spawn(async move { convert::document_link(request.await?) }),
+        )
+    }
+}
+
+/// `vscode-languageclient`'s `ColorProviderFeature`:
+/// `textDocument/documentColor` and `textDocument/colorPresentation`.
+impl DocumentColorProvider for LspFeatures {
+    fn provide_document_colors(
+        &self,
+        context: &ProviderContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<ColorInformation>>> {
+        let Some((connection, position)) = self.prepare(context, PointUtf16::zero(), cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::DocumentColor>(lsp::DocumentColorParams {
+            text_document: position.text_document,
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        });
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .into_iter()
+                .map(convert::color_information)
+                .collect())
+        })
+    }
+
+    fn provide_color_presentations(
+        &self,
+        context: &ProviderContext,
+        color: &ColorInformation,
+        cx: &mut App,
+    ) -> Task<Result<Vec<ColorPresentation>>> {
+        let Some((connection, position)) = self.prepare(context, color.range.start, cx) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = connection.request::<lsp::request::ColorPresentationRequest>(
+            lsp::ColorPresentationParams {
+                text_document: position.text_document,
+                color: convert::lsp_color(&color.color),
+                range: convert::lsp_range(&color.range),
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            },
+        );
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .into_iter()
+                .map(convert::color_presentation)
+                .collect())
+        })
+    }
+}
+
+/// `vscode-languageclient`'s `LinkedEditingFeature`:
+/// `textDocument/linkedEditingRange`.
+impl LinkedEditingRangeProvider for LspFeatures {
+    fn provide_linked_editing_ranges(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Option<LinkedEditingRanges>>> {
+        let Some((connection, position)) = self.prepare(context, position, cx) else {
+            return Task::ready(Ok(None));
+        };
+        let request =
+            connection.request::<lsp::request::LinkedEditingRange>(lsp::LinkedEditingRangeParams {
+                text_document_position_params: position,
+                work_done_progress_params: Default::default(),
+            });
+        cx.background_executor()
+            .spawn(async move { Ok(request.await?.map(convert::linked_editing_ranges)) })
     }
 }
