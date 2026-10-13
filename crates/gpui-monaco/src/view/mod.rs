@@ -17,5 +17,6 @@ pub(crate) mod minimap;
 pub(crate) mod overview_ruler;
 pub mod prefix_sum;
 pub mod reveal;
+mod rows;
 pub mod selections;
 pub mod view_lines;
