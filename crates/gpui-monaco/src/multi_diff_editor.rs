@@ -3182,10 +3182,12 @@ fn header_shadow(color: Hsla) -> Vec<BoxShadow> {
 fn highlight_range(editor: &Entity<CodeEditor>, range: Range<PointUtf16>, cx: &mut App) {
     let model = editor.read(cx).model().clone();
     let collection = editor.update(cx, |editor, cx| {
+        let high_contrast = editor.theme().high_contrast;
         let colors = editor.colors();
         let options = DecorationOptions {
             background: Some(colors.symbol_highlight_background),
             border: colors.symbol_highlight_border,
+            border_style: crate::decorations::dotted_in_high_contrast(high_contrast),
             ..Default::default()
         };
         editor.create_decorations_collection(vec![(range, options)], cx)

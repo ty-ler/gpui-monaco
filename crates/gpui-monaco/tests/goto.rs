@@ -696,6 +696,129 @@ fn definition_links_use_the_link_color(cx: &mut TestAppContext) {
     assert_eq!(styles, vec![(Some(link), link)]);
 }
 
+/// The Cmd/Ctrl+hover link's decorations: (id, byte range).
+fn definition_link(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Vec<(gpui_monaco::DecorationId, std::ops::Range<usize>)> {
+    let id = editor.entity_id();
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, _| {
+        m.all_decorations(Some(id))
+            .into_iter()
+            .filter(|d| d.options.underline.is_some())
+            .map(|d| (d.id, d.range))
+            .collect()
+    })
+}
+
+/// Monaco `startFindDefinition`: the providers are asked at once, and only
+/// when the word under the mouse changes, so the link stays put while the
+/// mouse moves within its word, its last character included.
+#[gpui::test]
+fn definition_links_are_asked_for_once_per_word(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    let cmd = gpui::Modifiers::secondary_key();
+    let requests = || log.borrow().iter().filter(|k| **k == "definition").count();
+    let at = mouse_at(&editor, cx, p(2, 4));
+    cx.simulate_mouse_move(at, None, cmd);
+    cx.run_until_parked();
+    // `add` in `    add(1);`, without waiting.
+    let link = definition_link(&editor, cx);
+    assert_eq!(link.len(), 1);
+    assert_eq!(link[0].1, 34..37);
+    assert_eq!(requests(), 1);
+    // Across the word, up to its end (the right half of the last `d`):
+    // the same decoration throughout, and no new request.
+    for column in [5, 6, 7] {
+        let at = mouse_at(&editor, cx, p(2, column));
+        cx.simulate_mouse_move(at, None, cmd);
+        assert_eq!(definition_link(&editor, cx), link, "column {column}");
+        cx.run_until_parked();
+        assert_eq!(definition_link(&editor, cx), link, "column {column}");
+    }
+    assert_eq!(requests(), 1);
+    // Another word asks again.
+    let at = mouse_at(&editor, cx, p(3, 5));
+    cx.simulate_mouse_move(at, None, cmd);
+    cx.run_until_parked();
+    assert_eq!(requests(), 2);
+    assert_eq!(definition_link(&editor, cx)[0].1, 46..49);
+    // Releasing the modifier forgets the word: the next hover asks again.
+    cx.simulate_mouse_move(at, None, gpui::Modifiers::default());
+    cx.run_until_parked();
+    assert!(definition_link(&editor, cx).is_empty());
+    cx.simulate_mouse_move(at, None, cmd);
+    cx.run_until_parked();
+    assert_eq!(requests(), 3);
+    assert_eq!(definition_link(&editor, cx).len(), 1);
+}
+
+/// Monaco keeps `currentWordAtPosition` when nothing is found too: moving
+/// within a word without a definition asks once.
+#[gpui::test]
+fn words_without_a_definition_are_asked_about_once(cx: &mut TestAppContext) {
+    let fixed = Fixed::default();
+    let log = fixed.log.clone();
+    let (editor, cx) = setup(fixed, cx);
+    let cmd = gpui::Modifiers::secondary_key();
+    for column in [4, 5, 6, 7] {
+        let at = mouse_at(&editor, cx, p(1, column));
+        cx.simulate_mouse_move(at, None, cmd);
+        cx.run_until_parked();
+    }
+    assert_eq!(log.borrow().as_slice(), ["definition"]);
+    assert!(definition_link(&editor, cx).is_empty());
+}
+
+/// Monaco's `.hc-black .symbolHighlight` / `.hc-light .symbolHighlight`:
+/// `border-style: dotted` (dashed in the port's mapping).
+#[gpui::test]
+fn the_jump_highlight_is_dotted_in_high_contrast(cx: &mut TestAppContext) {
+    let fixed = Fixed {
+        definitions: vec![here(0, 3, 6)],
+        ..Default::default()
+    };
+    let (editor, cx) = setup(fixed, cx);
+    let border_styles = |cx: &mut VisualTestContext| {
+        let id = editor.entity_id();
+        let model = editor.read_with(cx, |e, _| e.model().clone());
+        let colors = editor.read_with(cx, |e, _| e.colors().clone());
+        model.update(cx, |m, _| {
+            m.all_decorations(Some(id))
+                .into_iter()
+                .filter(|d| {
+                    d.options.background == Some(colors.symbol_highlight_background)
+                        && d.options.border == colors.symbol_highlight_border
+                        && d.range == (3..6)
+                })
+                .map(|d| d.options.border_style)
+                .collect::<Vec<_>>()
+        })
+    };
+    set_cursor(&editor, cx, p(2, 5));
+    cx.simulate_keystrokes("f12");
+    cx.run_until_parked();
+    assert_eq!(border_styles(cx), vec![gpui::BorderStyle::Solid]);
+
+    editor.update(cx, |e, cx| {
+        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::hc_black()), cx)
+    });
+    cx.executor().advance_clock(Duration::from_millis(400));
+    set_cursor(&editor, cx, p(3, 5));
+    cx.simulate_keystrokes("f12");
+    cx.run_until_parked();
+    // (The word highlight on the target looks the same in HC Black.)
+    let styles = border_styles(cx);
+    assert!(!styles.is_empty());
+    assert!(styles.iter().all(|s| *s == gpui::BorderStyle::Dashed));
+}
+
 #[gpui::test]
 fn peek_focus_option_and_toggle(cx: &mut TestAppContext) {
     let fixed = Fixed {
