@@ -448,6 +448,13 @@ pub struct DecorationOptions {
     /// A diagnostic's decoration (Monaco `isForValidation`), hidden as the
     /// editor's `render_validation_decorations` says.
     pub validation: bool,
+    /// Not drawn while its range lies in comment tokens (Monaco
+    /// `hideInCommentTokens`, as the unicode highlighter's
+    /// `includeComments: false`).
+    pub hide_in_comment_tokens: bool,
+    /// Not drawn while its range lies in string tokens (Monaco
+    /// `hideInStringTokens`).
+    pub hide_in_string_tokens: bool,
     /// A marker of this severity (Monaco's `squiggly-error` and similar
     /// class names): the squiggle, background and overview ruler mark take
     /// the editor theme's `editorError.*`, `editorWarning.*` or

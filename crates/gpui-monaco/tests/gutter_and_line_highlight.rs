@@ -5,14 +5,18 @@
 
 use std::sync::Arc;
 
-use gpui::{Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px};
+use gpui::{
+    AppContext as _, Entity, Focusable, Modifiers, TestAppContext, VisualTestContext, point, px,
+};
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::options::{
     EditorOptions, LineNumbers, RenderFinalNewline, RenderLineHighlight, ShowFoldingControls,
     WordWrap,
 };
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, DecorationOptions, GlyphMarginLane, GlyphMarginOptions, Theme};
+use gpui_monaco::{
+    CodeEditor, DecorationOptions, GlyphMarginLane, GlyphMarginOptions, TextModel, Theme,
+};
 
 fn text(rows: usize) -> String {
     (0..rows)
@@ -596,4 +600,95 @@ fn glyph_margin_widgets_take_a_range(cx: &mut TestAppContext) {
         e.add_glyph_margin_widget(GlyphMarginWidget::new(2, view), cx)
     });
     assert_eq!(drawn(cx)[0], (2, 0));
+}
+
+/// Monaco `GlyphMarginWidgets.prepareRender`: with `glyphMargin: false`
+/// no decoration glyph is drawn.
+#[gpui::test]
+fn no_decoration_glyphs_without_the_glyph_margin(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&text(10), |o| o.glyph_margin = false, cx);
+    decorate(&editor, vec![(p(2, 0)..p(2, 0), glyph(None, 0))], cx);
+    assert!(editor.read_with(cx, |e, _| e.glyphs_for_tests()).is_empty());
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.glyph_margin = true;
+        e.update_options(options, cx);
+    });
+    paint(cx);
+    assert_eq!(editor.read_with(cx, |e, _| e.glyphs_for_tests()), [(2, 0)]);
+}
+
+/// Monaco: only the decorations overlay pulls a `showIfCollapsed` range
+/// ending at a line's start back to the line before; the glyph margin and
+/// the line decorations use the decoration's own range.
+#[gpui::test]
+fn gutter_parts_ignore_the_show_if_collapsed_end(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&text(10), |o| o.glyph_margin = true, cx);
+    let line_height = editor.read_with(cx, |e, _| e.view_metrics_for_tests().unwrap().3);
+    decorate(
+        &editor,
+        vec![(
+            p(2, 0)..p(4, 0),
+            DecorationOptions {
+                show_if_collapsed: true,
+                gutter_bar: Some(gpui::blue()),
+                ..glyph(None, 0)
+            },
+        )],
+        cx,
+    );
+    let drawn = editor.read_with(cx, |e, _| e.glyphs_for_tests());
+    assert_eq!(drawn, vec![(2, 0), (3, 0), (4, 0)]);
+    let bars = editor.read_with(cx, |e, _| e.gutter_bars_for_tests());
+    let rows: Vec<f32> = bars
+        .iter()
+        .map(|(bounds, _)| (bounds.top() / line_height).round())
+        .collect();
+    assert_eq!(rows, [2., 3., 4.]);
+}
+
+/// Monaco `hideInCommentTokens` and `hideInStringTokens`
+/// (`isModelDecorationVisible`): decorations whose range lies in such
+/// tokens aren't drawn.
+#[gpui::test]
+fn decorations_hidden_in_comment_and_string_tokens(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = "// note\nlet s = \"text\";\nlet x = 1;\n";
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(text).with_language("rust"));
+        CodeEditor::new(model, window, cx)
+    });
+    cx.run_until_parked();
+    let bar = |color, comment, string| DecorationOptions {
+        gutter_bar: Some(color),
+        hide_in_comment_tokens: comment,
+        hide_in_string_tokens: string,
+        ..Default::default()
+    };
+    let (red, green, blue, black) = (gpui::red(), gpui::green(), gpui::blue(), gpui::black());
+    decorate(
+        &editor,
+        vec![
+            // In the comment: hidden.
+            (p(0, 3)..p(0, 7), bar(red, true, false)),
+            // In the string: hidden.
+            (p(1, 10)..p(1, 12), bar(green, false, true)),
+            // In the comment, but only hidden in strings: shown.
+            (p(0, 3)..p(0, 7), bar(blue, false, true)),
+            // In code: shown.
+            (p(2, 4)..p(2, 5), bar(black, true, true)),
+        ],
+        cx,
+    );
+    let mut colors: Vec<_> = editor
+        .read_with(cx, |e, _| e.gutter_bars_for_tests())
+        .into_iter()
+        .map(|(_, color)| color)
+        .collect();
+    colors.dedup();
+    assert_eq!(colors.len(), 2, "{colors:?}");
+    assert!(colors.contains(&blue) && colors.contains(&black));
 }

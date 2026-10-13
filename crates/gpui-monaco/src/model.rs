@@ -1285,6 +1285,19 @@ impl TextModel {
     /// (Monaco's tokens that bracket matching skips, `ignoreBracketsInToken`),
     /// from one highlights query.
     pub fn string_and_comment_ranges(&self, range: Range<usize>) -> Vec<Range<usize>> {
+        self.standard_token_spans(range)
+            .into_iter()
+            .map(|(range, _)| range)
+            .collect()
+    }
+
+    /// Byte ranges of strings, comments and regexes intersecting `range`
+    /// with their standard token types, from one highlights query. Text
+    /// between them is [`StandardTokenType::Other`](crate::cursor::StandardTokenType::Other).
+    pub(crate) fn standard_token_spans(
+        &self,
+        range: Range<usize>,
+    ) -> Vec<(Range<usize>, crate::cursor::StandardTokenType)> {
         let Some(syntax) = self.syntax_snapshot() else {
             return Vec::new();
         };
@@ -1310,18 +1323,49 @@ impl TextModel {
                 .highlighter
                 .highlights(&syntax.state, syntax.text.rope(), old_range)
         })
-        .filter(|span| {
-            standard_token_type(&span.highlight.name()) != crate::cursor::StandardTokenType::Other
-        })
-        .filter_map(|span| match &patch {
-            Some(patch) => {
-                let start = patch.transform_offset(span.range.start, text::Bias::Right);
-                let end = patch.transform_offset(span.range.end, text::Bias::Left);
-                (start < end).then_some(start..end)
+        .filter_map(|span| {
+            let kind = standard_token_type(&span.highlight.name());
+            if kind == crate::cursor::StandardTokenType::Other {
+                return None;
             }
-            None => Some(span.range),
+            match &patch {
+                Some(patch) => {
+                    let start = patch.transform_offset(span.range.start, text::Bias::Right);
+                    let end = patch.transform_offset(span.range.end, text::Bias::Left);
+                    (start < end).then_some((start..end, kind))
+                }
+                None => Some((span.range, kind)),
+            }
         })
         .collect()
+    }
+
+    /// Monaco `isModelDecorationVisible`: a decoration with
+    /// `hide_in_comment_tokens` (`hide_in_string_tokens`) whose range lies
+    /// in comment (string) tokens isn't drawn.
+    pub fn is_decoration_visible(&self, decoration: &Decoration) -> bool {
+        use crate::cursor::StandardTokenType;
+        let options = &decoration.options;
+        if !options.hide_in_comment_tokens && !options.hide_in_string_tokens {
+            return true;
+        }
+        let range = decoration.range.clone();
+        // The tokens of the range's whole lines.
+        let rope = self.buffer.rope();
+        let lines = {
+            let (start, end) = (
+                rope.offset_to_point(range.start.min(rope.len())),
+                rope.offset_to_point(range.end.min(rope.len())),
+            );
+            rope.point_to_offset(text::Point::new(start.row, 0))
+                ..rope.point_to_offset(text::Point::new(end.row, rope.line_len(end.row)))
+        };
+        let spans = self.standard_token_spans(lines);
+        let in_tokens = |kind: StandardTokenType| {
+            tokens_in_range_are(self.buffer.rope(), &spans, range.clone(), kind)
+        };
+        !(options.hide_in_comment_tokens && in_tokens(StandardTokenType::Comment)
+            || options.hide_in_string_tokens && in_tokens(StandardTokenType::String))
     }
 
     /// The language at byte `offset` (as Monaco's `getLanguageIdAtPosition`,
@@ -2229,6 +2273,69 @@ pub(crate) fn metadata<T: std::any::Any + Send + Sync>(value: T) -> TransactionM
     Arc::new(value)
 }
 
+/// Monaco `testTokensInRange`: whether every token of the lines `range`
+/// covers that intersects it is of type `kind`, `spans` giving the typed
+/// tokens (text between them is [`StandardTokenType::Other`]). As in
+/// Monaco, a token starting right at the range's end counts, and an empty
+/// line is one `Other` token.
+///
+/// [`StandardTokenType::Other`]: crate::cursor::StandardTokenType::Other
+pub(crate) fn tokens_in_range_are(
+    rope: &Rope,
+    spans: &[(Range<usize>, crate::cursor::StandardTokenType)],
+    range: Range<usize>,
+    kind: crate::cursor::StandardTokenType,
+) -> bool {
+    use crate::cursor::StandardTokenType;
+    let range = range.start.min(rope.len())..range.end.min(rope.len());
+    let (first, last) = (
+        rope.offset_to_point(range.start).row,
+        rope.offset_to_point(range.end).row,
+    );
+    let mut spans: Vec<_> = spans.to_vec();
+    spans.sort_by_key(|(range, _)| range.start);
+    for row in first..=last {
+        let line_start = rope.point_to_offset(text::Point::new(row, 0));
+        let line_end = line_start + rope.line_len(row) as usize;
+        // The line's tokens: the typed spans, `Other` between them.
+        let mut tokens: Vec<(usize, usize, StandardTokenType)> = Vec::new();
+        let mut at = line_start;
+        for (span, span_kind) in &spans {
+            let (start, end) = (span.start.max(at), span.end.min(line_end));
+            if start >= end {
+                continue;
+            }
+            if at < start {
+                tokens.push((at, start, StandardTokenType::Other));
+            }
+            tokens.push((start, end, *span_kind));
+            at = end;
+        }
+        if at < line_end || tokens.is_empty() {
+            tokens.push((at, line_end, StandardTokenType::Other));
+        }
+        // Monaco `findTokenIndexAtOffset`: the token the start is in, else
+        // the last.
+        let first_token = if row == first {
+            tokens
+                .iter()
+                .position(|(_, end, _)| range.start < *end)
+                .unwrap_or(tokens.len() - 1)
+        } else {
+            0
+        };
+        for &(start, _, token_kind) in &tokens[first_token..] {
+            if row == last && start > range.end {
+                break;
+            }
+            if token_kind != kind {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 /// The parts of `range` on lines shorter than `max_line_length`.
 pub(crate) fn tokenized_ranges(
     rope: &Rope,
@@ -2263,4 +2370,43 @@ pub(crate) fn tokenized_ranges(
         }
     }
     ranges
+}
+
+#[cfg(test)]
+mod token_range_tests {
+    use text::Rope;
+
+    use super::tokens_in_range_are;
+    use crate::cursor::StandardTokenType::{Comment, String};
+
+    /// Monaco `testTokensInRange`, as `isModelDecorationInComment` uses it.
+    #[test]
+    fn ranges_in_comment_tokens() {
+        // `a /* bc */ d` then `/* e */`.
+        let rope = Rope::from("a /* bc */ d\n/* e */");
+        let spans = [(2..10, Comment), (13..20, Comment)];
+        let all = |range| tokens_in_range_are(&rope, &spans, range, Comment);
+        // Inside the comment.
+        assert!(all(5..7));
+        // Starting before it, in code.
+        assert!(!all(0..7));
+        // A token starting right at the end counts (Monaco's `>` check).
+        assert!(!all(5..10));
+        assert!(all(5..9));
+        // On a line entirely a comment, up to its end.
+        assert!(all(16..20));
+        // Across lines, the first line's code after the comment counts.
+        assert!(!all(5..16));
+        // Not a string.
+        assert!(!tokens_in_range_are(&rope, &spans, 5..7, String));
+    }
+
+    /// Monaco: an empty line is one `Other` token.
+    #[test]
+    fn empty_lines_are_other_tokens() {
+        let rope = Rope::from("// a\n\n// b");
+        let spans = [(0..4, Comment), (6..10, Comment)];
+        assert!(!tokens_in_range_are(&rope, &spans, 2..8, Comment));
+        assert!(tokens_in_range_are(&rope, &spans, 7..8, Comment));
+    }
 }
