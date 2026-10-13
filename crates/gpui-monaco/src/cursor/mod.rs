@@ -328,14 +328,30 @@ pub trait CursorModel {
         row: u32,
         window: &dyn Fn(u32) -> Range<u32>,
     ) -> (Vec<u16>, Range<u32>) {
-        let max = self.line_max_column(row);
-        let columns = clamp_columns(window(max), max);
-        let units = self
-            .line_slice(row, columns.clone())
-            .encode_utf16()
-            .collect();
-        (units, columns)
+        sliced_line_units_in(self, row, window)
     }
+    /// The rope holding the text, if it's one: scans that visit many rows
+    /// (bracket matching) then read them one after another without
+    /// seeking it per row.
+    fn rope(&self) -> Option<&text::Rope> {
+        None
+    }
+}
+
+/// The default [`CursorModel::line_units_in`]: the row's length, then the
+/// slice.
+fn sliced_line_units_in<M: CursorModel + ?Sized>(
+    model: &M,
+    row: u32,
+    window: &dyn Fn(u32) -> Range<u32>,
+) -> (Vec<u16>, Range<u32>) {
+    let max = model.line_max_column(row);
+    let columns = clamp_columns(window(max), max);
+    let units = model
+        .line_slice(row, columns.clone())
+        .encode_utf16()
+        .collect();
+    (units, columns)
 }
 
 /// `columns` clamped to a row `max` units long.
@@ -358,22 +374,17 @@ fn rope_line_units_in(
         return None;
     }
     let start = rope.point_to_offset(text::Point::new(row, 0));
-    let mut units: Vec<u16> = Vec::new();
-    let mut bytes = 0;
-    'chunks: for chunk in rope.chunks_in_range(start..rope.len()) {
-        let line = match chunk.find('\n') {
-            Some(newline) => &chunk[..newline],
-            None => chunk,
-        };
-        bytes += line.len();
-        if bytes > SHORT_ROW_BYTES {
-            return None;
-        }
-        units.extend(line.encode_utf16());
-        if line.len() < chunk.len() {
-            break 'chunks;
-        }
-    }
+    let (units, _) = read_row_forward("", rope.chunks_in_range(start..rope.len()));
+    window_units(units?, window)
+}
+
+/// The units of a row in the columns `window` picks, given all of them,
+/// else `None` when a picked column falls between a surrogate pair's
+/// halves (the rope clamps those, so the row is sliced instead).
+fn window_units(
+    mut units: Vec<u16>,
+    window: &dyn Fn(u32) -> Range<u32>,
+) -> Option<(Vec<u16>, Range<u32>)> {
     let columns = clamp_columns(window(units.len() as u32), units.len() as u32);
     // A column between a surrogate pair's halves clamps in the rope.
     let splits = |column: u32| {
@@ -387,6 +398,176 @@ fn rope_line_units_in(
     units.truncate(columns.end as usize);
     units.drain(..columns.start.min(columns.end) as usize);
     Some((units, columns))
+}
+
+/// A row read by [`read_row_forward`] or [`read_row_backward`]: its units
+/// (`None` past [`SHORT_ROW_BYTES`]), and the unread text next to it with
+/// the chunks beyond, unless it's the text's first or last row (or too long
+/// to have been read to its other end).
+type ReadRow<'a> = (Option<Vec<u16>>, Option<(&'a str, text::Chunks<'a>)>);
+
+/// The row starting at `rest`, followed by `chunks`, and where the next
+/// row starts.
+fn read_row_forward<'a>(rest: &'a str, mut chunks: text::Chunks<'a>) -> ReadRow<'a> {
+    let mut units: Vec<u16> = Vec::new();
+    let mut bytes = 0;
+    let mut piece = Some(rest);
+    while let Some(text) = piece.take().or_else(|| chunks.next()) {
+        let newline = text.find('\n');
+        let line = &text[..newline.unwrap_or(text.len())];
+        bytes += line.len();
+        if bytes > SHORT_ROW_BYTES {
+            return (None, None);
+        }
+        units.extend(line.encode_utf16());
+        if let Some(newline) = newline {
+            return (Some(units), Some((&text[newline + 1..], chunks)));
+        }
+    }
+    (Some(units), None)
+}
+
+/// The row ending at the end of `rest`, preceded by the reversed `chunks`,
+/// and where the row before it ends.
+fn read_row_backward<'a>(rest: &'a str, mut chunks: text::Chunks<'a>) -> ReadRow<'a> {
+    let mut pieces: Vec<&str> = Vec::new();
+    let mut bytes = 0;
+    let mut piece = Some(rest);
+    let mut before = None;
+    while let Some(text) = piece.take().or_else(|| chunks.next()) {
+        let newline = text.rfind('\n');
+        let line = &text[newline.map_or(0, |newline| newline + 1)..];
+        bytes += line.len();
+        if bytes > SHORT_ROW_BYTES {
+            return (None, None);
+        }
+        pieces.push(line);
+        if let Some(newline) = newline {
+            before = Some(&text[..newline]);
+            break;
+        }
+    }
+    let mut units = Vec::with_capacity(bytes);
+    for piece in pieces.iter().rev() {
+        units.extend(piece.encode_utf16());
+    }
+    (Some(units), before.map(|before| (before, chunks)))
+}
+
+/// Where a [`RowReader`] goes on reading.
+enum NextRow<'a> {
+    None,
+    /// `row` starts at `rest`, followed by `chunks`.
+    Forward {
+        row: u32,
+        rest: &'a str,
+        chunks: text::Chunks<'a>,
+    },
+    /// `row` ends at byte `end`; nothing read there yet.
+    BackwardAt {
+        row: u32,
+        end: usize,
+    },
+    /// `row` ends at the end of `rest`, preceded by the reversed `chunks`.
+    Backward {
+        row: u32,
+        rest: &'a str,
+        chunks: text::Chunks<'a>,
+    },
+}
+
+/// [`CursorModel::line_units_in`] for scans that visit row after row in
+/// one direction (bracket matching): on a rope, a short row is read on from
+/// where the row before it in that direction was read, instead of seeking
+/// the rope for it. Any row can be asked for; one out of sequence is
+/// looked up as usual.
+pub(crate) struct RowReader<'a> {
+    model: &'a dyn CursorModel,
+    backward: bool,
+    next: NextRow<'a>,
+}
+
+impl<'a> RowReader<'a> {
+    /// A reader for rows read downwards, or upwards if `backward`.
+    pub(crate) fn new(model: &'a dyn CursorModel, backward: bool) -> Self {
+        Self {
+            model,
+            backward,
+            next: NextRow::None,
+        }
+    }
+
+    /// [`CursorModel::line_units_in`].
+    pub(crate) fn line_units_in(
+        &mut self,
+        row: u32,
+        window: &dyn Fn(u32) -> Range<u32>,
+    ) -> (Vec<u16>, Range<u32>) {
+        let model = self.model;
+        let Some(rope) = model.rope() else {
+            return model.line_units_in(row, window);
+        };
+        if let Some(units) = self.read(rope, row)
+            && let Some(found) = window_units(units, window)
+        {
+            return found;
+        }
+        sliced_line_units_in(model, row, window)
+    }
+
+    /// All of `row`'s units, or `None` for a long row or one past the end,
+    /// leaving `next` at the row after it in the reader's direction.
+    fn read(&mut self, rope: &'a text::Rope, row: u32) -> Option<Vec<u16>> {
+        let backward = self.backward;
+        let (units, after) = match std::mem::replace(&mut self.next, NextRow::None) {
+            NextRow::Forward {
+                row: next,
+                rest,
+                chunks,
+            } if !backward && next == row => read_row_forward(rest, chunks),
+            NextRow::BackwardAt { row: next, end } if backward && next == row => {
+                read_row_backward("", rope.reversed_chunks_in_range(0..end))
+            }
+            NextRow::Backward {
+                row: next,
+                rest,
+                chunks,
+            } if backward && next == row => read_row_backward(rest, chunks),
+            _ => {
+                if row > rope.max_point().row {
+                    return None;
+                }
+                let start = rope.point_to_offset(text::Point::new(row, 0));
+                let (units, after) = read_row_forward("", rope.chunks_in_range(start..rope.len()));
+                if backward {
+                    // The row above ends before this one's line break, even
+                    // when this one is too long to read.
+                    if row > 0 {
+                        self.next = NextRow::BackwardAt {
+                            row: row - 1,
+                            end: start - 1,
+                        };
+                    }
+                    return units;
+                }
+                (units, after)
+            }
+        };
+        self.next = match after {
+            Some((rest, chunks)) if backward => NextRow::Backward {
+                row: row - 1,
+                rest,
+                chunks,
+            },
+            Some((rest, chunks)) => NextRow::Forward {
+                row: row + 1,
+                rest,
+                chunks,
+            },
+            None => NextRow::None,
+        };
+        units
+    }
 }
 
 impl CursorModel for text::Rope {
@@ -414,15 +595,11 @@ impl CursorModel for text::Rope {
         row: u32,
         window: &dyn Fn(u32) -> Range<u32>,
     ) -> (Vec<u16>, Range<u32>) {
-        rope_line_units_in(self, row, window).unwrap_or_else(|| {
-            let max = self.line_max_column(row);
-            let columns = clamp_columns(window(max), max);
-            let units = self
-                .line_slice(row, columns.clone())
-                .encode_utf16()
-                .collect();
-            (units, columns)
-        })
+        rope_line_units_in(self, row, window)
+            .unwrap_or_else(|| sliced_line_units_in(self, row, window))
+    }
+    fn rope(&self) -> Option<&text::Rope> {
+        Some(self)
     }
     fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
         // A column inside a pair doesn't survive clipping.
@@ -452,6 +629,9 @@ impl CursorModel for text::Buffer {
         window: &dyn Fn(u32) -> Range<u32>,
     ) -> (Vec<u16>, Range<u32>) {
         self.rope().line_units_in(row, window)
+    }
+    fn rope(&self) -> Option<&text::Rope> {
+        Some(text::Buffer::rope(self))
     }
     fn splits_surrogate_pair(&self, row: u32, column: u32) -> bool {
         // A column inside a pair doesn't survive clipping.
@@ -593,7 +773,7 @@ pub(crate) fn value_in_range(model: &dyn CursorModel, range: Range<Position>) ->
 mod line_units_tests {
     use std::ops::Range;
 
-    use super::{CursorModel, Position};
+    use super::{CursorModel, Position, RowReader};
 
     /// The rope's one-pass `line_units_in` matches looking the row's length
     /// up and then slicing it, for every window: short and long rows,
@@ -632,6 +812,70 @@ mod line_units_tests {
                     "row {row}"
                 );
                 assert_eq!(rope.line_slice(row, columns.clone()), slice(row, columns));
+            }
+        }
+    }
+
+    /// Reading rows one after another (either way, from any row) gives
+    /// exactly what looking each row up does: short, empty and long rows,
+    /// surrogate pairs and other non-ASCII text across chunk boundaries,
+    /// CRLF line breaks, a trailing line break, rows past the end, for
+    /// every window, on a rope, a buffer and a model without a rope.
+    #[test]
+    fn row_reader_matches_row_by_row() {
+        let long = "a(".repeat(3000);
+        let wide = "é😀{".repeat(400);
+        let crlf = "x\r\n(\r\n\r\n]";
+        let texts = [
+            String::new(),
+            "\n".to_string(),
+            "(".to_string(),
+            format!("fn a() {{}}\n\n😀x😀(é)\n{long}\n{long}😀\nend"),
+            format!("{wide}\n{long}\n\n{wide}{long}\n{wide}\n😀\n"),
+            format!("{crlf}\n{wide}\r\n{long}\r\n{crlf}"),
+            (0..300)
+                .map(|i| format!("{}😀{}", "é".repeat(i % 7), "(".repeat(i % 5)))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        ];
+        let windows: Vec<Box<dyn Fn(u32) -> Range<u32>>> = vec![
+            Box::new(|max| 0..max),
+            Box::new(|_| 0..3),
+            Box::new(|_| 1..4),
+            Box::new(|_| 0..20_000),
+            Box::new(|max| max.saturating_sub(3)..max),
+            Box::new(|max| max.saturating_sub(5000)..max),
+            Box::new(|_| 4000..9000),
+        ];
+        for text in &texts {
+            let rope = text::Rope::from(text.as_str());
+            let buffer = text::Buffer::new(text);
+            let plain = crate::cursor::movement::DynModel(&rope);
+            let models: [&dyn CursorModel; 3] = [&rope, &buffer, &plain];
+            for model in models {
+                let count = model.line_count();
+                for window in &windows {
+                    // Each row looked up on its own.
+                    let expected = |row: u32| model.line_units_in(row, window);
+                    // From every row to the end, either way.
+                    for first in 0..count {
+                        let mut down = RowReader::new(model, false);
+                        for row in first..count + 2 {
+                            assert_eq!(down.line_units_in(row, window), expected(row));
+                        }
+                        let mut up = RowReader::new(model, true);
+                        for row in (0..=first).rev() {
+                            assert_eq!(up.line_units_in(row, window), expected(row));
+                        }
+                    }
+                    // Out of sequence, and against the reader's direction.
+                    for backward in [false, true] {
+                        let mut reader = RowReader::new(model, backward);
+                        for row in [2, 0, 1, 2, 5, 4, 3, count + 1, count - 1, 1, 0, 1] {
+                            assert_eq!(reader.line_units_in(row, window), expected(row));
+                        }
+                    }
+                }
             }
         }
     }

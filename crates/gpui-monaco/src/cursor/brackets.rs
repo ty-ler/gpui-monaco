@@ -17,7 +17,7 @@ use std::ops::Range;
 
 use syntax::LanguageConfiguration;
 
-use super::{CursorModel, Position, line_units};
+use super::{CursorModel, Position, RowReader};
 
 /// How far [`matching_bracket`] scans in each direction, in UTF-16 units.
 const MAX_SCAN_UNITS: usize = 20_000;
@@ -150,6 +150,11 @@ impl Brackets {
     }
 }
 
+/// All of `row`'s units, read with `reader`.
+fn whole_row(reader: &mut RowReader, row: u32) -> Vec<u16> {
+    reader.line_units_in(row, &|max| 0..max).0
+}
+
 fn found_range(row: u32, found: &Found) -> Range<Position> {
     Position::new(row, found.start)..Position::new(row, found.start + found.len)
 }
@@ -169,8 +174,9 @@ pub(crate) fn has_unmatched_closing_bracket_after(
     }
     let open: Vec<u16> = open.encode_utf16().collect();
     let mut stack: Vec<usize> = Vec::new();
+    let mut reader = RowReader::new(model, false);
     for row in 0..model.line_count() {
-        let line = line_units(model, row);
+        let line = whole_row(&mut reader, row);
         for found in brackets.in_line(&line, &|i| skip(Position::new(row, i))) {
             if found.is_open {
                 stack.push(found.pair);
@@ -211,6 +217,7 @@ pub(crate) fn find_matching_bracket_up(
     }
     let mut depth = 0usize;
     let mut scanned = 0usize;
+    let mut reader = RowReader::new(model, true);
     let mut row = position.row as i64;
     while row >= 0 && scanned <= MAX_SCAN_UNITS * 50 {
         let r = row as u32;
@@ -219,7 +226,7 @@ pub(crate) fn find_matching_bracket_up(
         } else {
             Window::Tail
         };
-        let (found, len) = scan_row(model, brackets, r, window, skip);
+        let (found, len) = scan_row(&mut reader, brackets, r, window, skip);
         scanned += len as usize + 1;
         for f in found.iter().rev() {
             if r == position.row && f.start + f.len > position.column {
@@ -251,7 +258,8 @@ fn found_in(
     columns: Range<u32>,
     skip: &dyn Fn(Position) -> bool,
 ) -> Vec<Found> {
-    scan_row(model, brackets, row, Window::Columns(columns), skip).0
+    let mut reader = RowReader::new(model, false);
+    scan_row(&mut reader, brackets, row, Window::Columns(columns), skip).0
 }
 
 /// Which columns of a row [`scan_row`] scans.
@@ -263,16 +271,16 @@ enum Window {
 }
 
 /// [`found_in`] for `window`, with how many columns it scanned. Reads the
-/// row once ([`CursorModel::line_units_in`]): the scans visit many rows,
-/// and each lookup seeks the rope.
+/// row once, with `reader`: the scans visit many rows one after another,
+/// and a lookup per row would seek the rope for each.
 fn scan_row(
-    model: &dyn CursorModel,
+    reader: &mut RowReader,
     brackets: &Brackets,
     row: u32,
     window: Window,
     skip: &dyn Fn(Position) -> bool,
 ) -> (Vec<Found>, u32) {
-    let (units, columns) = model.line_units_in(row, &|max| match &window {
+    let (units, columns) = reader.line_units_in(row, &|max| match &window {
         Window::Columns(columns) => columns.clone(),
         Window::Tail => max.saturating_sub(WINDOW)..max,
     });
@@ -300,13 +308,14 @@ fn find_close_forward(
     let mut scanned = 0usize;
     let open = brackets.open_text(pair);
     let close = brackets.close_text(pair);
+    let mut reader = RowReader::new(model, false);
     for row in from.row..model.line_count() {
         let window = if row == from.row {
             from.column..from.column.saturating_add(WINDOW)
         } else {
             0..WINDOW
         };
-        let (found, len) = scan_row(model, brackets, row, Window::Columns(window), skip);
+        let (found, len) = scan_row(&mut reader, brackets, row, Window::Columns(window), skip);
         for f in found {
             if row == from.row && f.start < from.column {
                 continue;
@@ -345,13 +354,14 @@ fn find_open_backward(
     let mut scanned = 0usize;
     let open = brackets.open_text(pair);
     let close = brackets.close_text(pair);
+    let mut reader = RowReader::new(model, true);
     for row in (0..=to.row).rev() {
         let window = if row == to.row {
             Window::Columns(to.column.saturating_sub(WINDOW)..to.column)
         } else {
             Window::Tail
         };
-        let (found, len) = scan_row(model, brackets, row, window, skip);
+        let (found, len) = scan_row(&mut reader, brackets, row, window, skip);
         for f in found.iter().rev() {
             if row == to.row && f.start + f.len > to.column {
                 continue;
@@ -509,11 +519,12 @@ fn enclosing_pair(
     let mut pending_closes: Vec<usize> = Vec::new();
     let mut scanned = 0usize;
     let mut row_found = Some(row_found);
+    let mut reader = RowReader::new(model, true);
     for row in (0..=position.row).rev() {
         let (found, len) = match row_found.take() {
             // The cursor's row, scanned up to the cursor.
             Some(found) => (found, position.column.min(WINDOW)),
-            None => scan_row(model, brackets, row, Window::Tail, is_skippable),
+            None => scan_row(&mut reader, brackets, row, Window::Tail, is_skippable),
         };
         for f in found.iter().rev() {
             if row == position.row && f.start + f.len > position.column {
@@ -553,13 +564,20 @@ pub fn next_bracket(
     let model: &dyn CursorModel = model;
     let brackets = Brackets::configured_or_default(config);
     let mut scanned = 0usize;
+    let mut reader = RowReader::new(model, false);
     for row in position.row..model.line_count() {
         let window = if row == position.row {
             position.column.saturating_sub(WINDOW)..position.column.saturating_add(WINDOW)
         } else {
             0..WINDOW
         };
-        let (found, len) = scan_row(model, &brackets, row, Window::Columns(window), is_skippable);
+        let (found, len) = scan_row(
+            &mut reader,
+            &brackets,
+            row,
+            Window::Columns(window),
+            is_skippable,
+        );
         for f in found {
             if row == position.row && f.start + f.len <= position.column {
                 continue;
@@ -597,8 +615,9 @@ pub fn bracket_selection_ranges(
         vec![Default::default(); brackets.pairs.len()];
     let mut counts = vec![0i64; brackets.pairs.len()];
     let last_row = (position.row + MAX_BALANCE_LINES).min(line_count.saturating_sub(1));
+    let mut reader = RowReader::new(model, false);
     for row in position.row..=last_row {
-        let line = line_units(model, row);
+        let line = whole_row(&mut reader, row);
         for found in brackets.in_line(&line, &|i| skip(Position::new(row, i))) {
             if row == position.row && found.start < position.column {
                 continue;
@@ -617,11 +636,12 @@ pub fn bracket_selection_ranges(
     let mut ranges = Vec::new();
     let mut counts = vec![0i64; brackets.pairs.len()];
     let first_row = position.row.saturating_sub(MAX_BALANCE_LINES);
+    let mut reader = RowReader::new(model, true);
     'rows: for row in (first_row..=position.row).rev() {
         if closings.iter().all(|c| c.is_empty()) {
             break;
         }
-        let line = line_units(model, row);
+        let line = whole_row(&mut reader, row);
         let found = brackets.in_line(&line, &|i| skip(Position::new(row, i)));
         for found in found.iter().rev() {
             if row == position.row && found.start + found.len > position.column {
