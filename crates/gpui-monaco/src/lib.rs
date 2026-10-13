@@ -62,7 +62,8 @@ pub use diff_editor::{
 pub use multi_diff_editor::{
     DiffEditorViewMode, MultiDiffDocState, MultiDiffDocument, MultiDiffDocumentEditorOptions,
     MultiDiffDocumentKey, MultiDiffEditor, MultiDiffEditorEvent, MultiDiffEditorVariant,
-    MultiDiffEditorViewState, MultiDiffFileAction, MultiDiffFileHandler, MultiDiffLayoutOptions,
+    MultiDiffEditorViewState, MultiDiffFileAction, MultiDiffFileActionToggle, MultiDiffFileHandler,
+    MultiDiffLayoutOptions, MultiDiffOptionsOverride,
 };
 mod dnd;
 mod drop_paste;

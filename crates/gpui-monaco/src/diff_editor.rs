@@ -2443,7 +2443,7 @@ pub struct DiffHunkContext {
 }
 
 /// `text` with its `$(name)` codicons drawn as icons.
-fn label_with_icons(text: &str) -> Vec<gpui::AnyElement> {
+pub(crate) fn label_with_icons(text: &str) -> Vec<gpui::AnyElement> {
     crate::codicons::parse_label_with_icons(text)
         .into_iter()
         .map(|part| match part {
@@ -5568,6 +5568,16 @@ impl DiffEditor {
             .iter_mut()
             .for_each(UnchangedRegion::show_all);
         self.apply_unchanged(cx);
+    }
+
+    /// Monaco `allUnchangedRegionsShown`: whether every unchanged region
+    /// (the whole-file one included) shows all its lines; true with none,
+    /// as before the first diff. A multi-diff file's header tests it as
+    /// `multiDiffEditorItemAllUnchangedRegionsShown`.
+    pub fn all_unchanged_regions_shown(&self) -> bool {
+        self.unchanged_regions()
+            .iter()
+            .all(|r| r.visible_top + r.visible_bottom >= r.line_count)
     }
 
     /// The modified editor's hidden unchanged lines (1-based, end
