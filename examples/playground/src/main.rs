@@ -748,6 +748,7 @@ fn main() {
                 .open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        focus: !in_background(),
                         ..Default::default()
                     },
                     |window, cx| {
@@ -775,7 +776,9 @@ fn main() {
                     },
                 )
                 .expect("failed to open window");
-            cx.activate(true);
+            if !in_background() {
+                cx.activate(true);
+            }
             screenshot::capture_if_requested(window.into(), cx);
             return;
         }
@@ -799,6 +802,7 @@ fn main() {
                 .open_window(
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
+                        focus: !in_background(),
                         ..Default::default()
                     },
                     |window, cx| {
@@ -888,7 +892,9 @@ fn main() {
                     },
                 )
                 .expect("failed to open window");
-            cx.activate(true);
+            if !in_background() {
+                cx.activate(true);
+            }
             screenshot::capture_if_requested(window.into(), cx);
             return;
         }
@@ -896,15 +902,31 @@ fn main() {
             .open_window(
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    focus: !in_background(),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Playground::new(window, cx)),
             )
             .expect("failed to open window");
-        cx.activate(true);
+        if !in_background() {
+            cx.activate(true);
+        }
         screenshot::capture_if_requested(window.into(), cx);
         perf::run_if_requested(started, window, cx);
     });
+}
+
+/// Whether to open without taking focus: for scripted runs (perf mode,
+/// screenshots) or `PLAYGROUND_BACKGROUND=1`, so the window opens behind
+/// whatever app is in front instead of stealing the keyboard.
+fn in_background() -> bool {
+    [
+        "PLAYGROUND_BACKGROUND",
+        "PLAYGROUND_PERF",
+        "PLAYGROUND_SCREENSHOT",
+    ]
+    .iter()
+    .any(|var| std::env::var_os(var).is_some())
 }
 
 /// A small label view for demo widgets.
