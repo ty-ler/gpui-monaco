@@ -16,6 +16,7 @@ What keeps them responsive:
 - **Monaco's long-line limits:**
   - `stop_rendering_line_after` (10 000 by default) draws a "Show more" chip instead of the rest of the line.
   - `max_tokenization_line_length` (20 000, a `ModelOptions` field) leaves longer lines unhighlighted, so they count as plain text for brackets and indentation.
+  - Like Monaco (`canBuildAST`), a document longer than 5 000 000 UTF-16 units gets no bracket pairs: no bracket colors and no bracket pair guides, so no whole-document pass, and each shown line shapes as one run instead of being cut at every colored bracket.
 - **Chunked shaping:** long lines are shaped in chunks of a few hundred bytes ending at delimiters, so an edit reshapes one chunk and GPUI's layout cache keeps the rest. The cuts are content-defined (a rolling hash of the bytes before a cut picks it, not the distance from the previous cut), so the chunks after an edit come back with the same text; with cuts counted from the previous one, a shifted cut moved every cut after it and a keystroke could reshape most of the line.
 - **Windowed scans:** bracket matching only scans 20 000 units each way on a line. Cursor validation and the line queries cursor commands use slice the rope instead of copying whole lines.
 - **One computation at a time:** fold ranges and bracket pairs run one whole-document pass at a time and catch up when it finishes, instead of piling up a pass per keystroke.

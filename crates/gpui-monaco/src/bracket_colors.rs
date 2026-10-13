@@ -6,6 +6,10 @@
 //! once the syntax state matches the text (so brackets in strings,
 //! comments and regexes are skipped), and shifted through newer edits until the next
 //! pass lands.
+//!
+//! Like Monaco (`BracketPairsTextModelPart.canBuildAST`), documents longer
+//! than [`MAX_SUPPORTED_DOCUMENT_LENGTH`] have no bracket pairs: no colors
+//! and no bracket pair guides.
 
 use std::ops::Range;
 use std::sync::Arc;
@@ -18,6 +22,16 @@ use crate::view::bracket_pairs::{
     BracketPair, BracketToken, bracket_pairs, colorize_brackets, language_bracket_kinds,
 };
 use crate::view::guides::GuidePair;
+
+/// Monaco's `maxSupportedDocumentLength` (50,000 lines of 100 columns), in
+/// [`TextModel::value_length`](crate::model::TextModel::value_length) units: past
+/// it, Monaco builds no bracket pair tree.
+pub(crate) const MAX_SUPPORTED_DOCUMENT_LENGTH: usize = 50_000 * 100;
+
+/// Monaco `BracketPairsTextModelPart.canBuildAST`.
+fn can_build_ast(model: &crate::model::TextModel) -> bool {
+    model.value_length() <= MAX_SUPPORTED_DOCUMENT_LENGTH
+}
 
 #[derive(Default)]
 pub(crate) struct BracketColors {
@@ -51,7 +65,9 @@ impl CodeEditor {
             .map(|language| language_bracket_kinds(&language.config));
         let guides = self.options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
         let Some(pairs) = pairs.filter(|p| {
-            !p.is_empty() && (self.options.bracket_pair_colorization.enabled || guides)
+            !p.is_empty()
+                && (self.options.bracket_pair_colorization.enabled || guides)
+                && can_build_ast(model)
         }) else {
             self.bracket_colors = BracketColors::default();
             return;
@@ -148,6 +164,20 @@ impl CodeEditor {
         self.bracket_colors_in(0..len, cx)
     }
 
+    /// The opening brackets (UTF-16 ranges) of the bracket pairs
+    /// intersecting `rows`, for bracket pair guides (for tests).
+    #[doc(hidden)]
+    pub fn bracket_pairs_for_tests(
+        &self,
+        rows: Range<u32>,
+        cx: &App,
+    ) -> Vec<Range<text::PointUtf16>> {
+        self.bracket_pairs_in_rows(rows, cx)
+            .into_iter()
+            .map(|pair| pair.open)
+            .collect()
+    }
+
     /// Bracket colors for byte `range` of the current text.
     pub(crate) fn bracket_colors_in(
         &self,
@@ -157,7 +187,8 @@ impl CodeEditor {
         let Some(version) = self.bracket_colors.version else {
             return Vec::new();
         };
-        if !self.options.bracket_pair_colorization.enabled {
+        let model = self.model().read(cx);
+        if !self.options.bracket_pair_colorization.enabled || !can_build_ast(model) {
             return Vec::new();
         }
         let independent = self
@@ -165,7 +196,7 @@ impl CodeEditor {
             .bracket_pair_colorization
             .independent_color_pool_per_bracket_type;
         let tokens = &self.bracket_colors.tokens;
-        let buffer = self.model().read(cx).buffer();
+        let buffer = model.buffer();
         let patch = (version != buffer.version()).then(|| buffer.edits_since(version));
         // The range in the tokens' (older) coordinates.
         let old_range = match &patch {
@@ -209,7 +240,11 @@ impl CodeEditor {
         let Some(version) = self.bracket_colors.version else {
             return Vec::new();
         };
-        let buffer = self.model().read(cx).buffer();
+        let model = self.model().read(cx);
+        if !can_build_ast(model) {
+            return Vec::new();
+        }
+        let buffer = model.buffer();
         let rope = buffer.rope();
         let patch = (version != buffer.version()).then(|| buffer.edits_since(version));
         let start = rope.point_to_offset(text::Point::new(rows.start, 0));
