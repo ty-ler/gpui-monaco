@@ -4182,8 +4182,21 @@ impl CodeEditor {
                     let offset = rope.point_utf16_to_offset(PointUtf16::new(p.row, p.column - 1));
                     model.token_type_at(offset)
                 };
+                // Embedded languages (Monaco's tokens' language ids), each
+                // row's found once per operation.
+                let scopes: std::cell::RefCell<Vec<(u32, Vec<cursor::LanguageScope>)>> =
+                    Default::default();
+                let language_runs = |row: u32| {
+                    if let Some((_, found)) = scopes.borrow().iter().find(|(r, _)| *r == row) {
+                        return found.clone();
+                    }
+                    let found = model.language_scopes(row);
+                    scopes.borrow_mut().push((row, found.clone()));
+                    found
+                };
                 let context = cursor::LanguageContext::new(&language.config, &token_type)
-                    .with_max_tokenization_line_length(model.tokenization_line_limit());
+                    .with_max_tokenization_line_length(model.tokenization_line_limit())
+                    .with_language_runs(&language_runs);
                 f(&config, rope, &self.cursors, Some(&context))
             }
             None => f(&config, rope, &self.cursors, None),

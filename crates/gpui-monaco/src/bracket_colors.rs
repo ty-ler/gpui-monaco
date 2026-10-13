@@ -14,7 +14,9 @@ use std::time::Duration;
 use gpui::{App, Context, Hsla, Task};
 
 use crate::editor::CodeEditor;
-use crate::view::bracket_pairs::{BracketPair, BracketToken, bracket_pairs, colorize_brackets};
+use crate::view::bracket_pairs::{
+    BracketPair, BracketToken, bracket_pairs, colorize_brackets, language_bracket_kinds,
+};
 use crate::view::guides::GuidePair;
 
 #[derive(Default)]
@@ -42,13 +44,11 @@ impl CodeEditor {
     /// Recomputes bracket nesting if the text or its syntax changed.
     pub(crate) fn refresh_bracket_colors(&mut self, cx: &mut Context<Self>) {
         let model = self.model().read(cx);
-        let pairs = model.language().map(|language| {
-            let config = &language.config;
-            config
-                .colorized_bracket_pairs
-                .clone()
-                .unwrap_or_else(|| config.brackets().to_vec())
-        });
+        // Monaco pairs every bracket of the language and colors only the
+        // colorized ones (`LanguageBracketsConfiguration`).
+        let pairs = model
+            .language()
+            .map(|language| language_bracket_kinds(&language.config));
         let guides = self.options.guides.bracket_pairs != crate::options::BracketPairGuides::Off;
         let Some(pairs) = pairs.filter(|p| {
             !p.is_empty() && (self.options.bracket_pair_colorization.enabled || guides)

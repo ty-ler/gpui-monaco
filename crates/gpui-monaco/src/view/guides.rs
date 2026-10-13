@@ -475,9 +475,9 @@ mod tests {
 
     fn guide_pairs(text: &str) -> Vec<GuidePair> {
         let rope = Rope::from(text);
-        let pairs: Vec<(String, String)> = [("(", ")"), ("{", "}")]
+        let pairs: Vec<_> = [("(", ")"), ("{", "}")]
             .iter()
-            .map(|(a, b)| (a.to_string(), b.to_string()))
+            .map(|(a, b)| crate::view::bracket_pairs::BracketKind::colorized(a, b))
             .collect();
         let (_, found) = crate::view::bracket_pairs::bracket_pairs(&rope, &pairs, &[], 4);
         found
