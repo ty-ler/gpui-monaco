@@ -192,9 +192,13 @@ pub fn score(selector: &LanguageSelector, target: &ProviderTarget) -> u32 {
 /// What a provider sees about the model it's asked about.
 #[derive(Clone)]
 pub struct ProviderContext {
-    /// The model's uri, if the host gave it one (Monaco models always have
-    /// one); LSP bridges use it to identify the document.
+    /// The model's uri, if the host gave it one, as given.
     pub uri: Option<SharedString>,
+    /// The model's uri as Monaco has it (`model.uri.toString()`): the
+    /// [`TextModel::resource`](crate::TextModel::resource), normalized, or
+    /// `inmemory://model/N` for a model without a uri. LSP bridges identify
+    /// the document by it.
+    pub resource: SharedString,
     /// The model's [language id](crate::TextModel::language_id):
     /// `plaintext` for a model without one.
     pub language_id: Option<SharedString>,

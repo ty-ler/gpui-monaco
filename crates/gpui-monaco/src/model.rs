@@ -858,6 +858,7 @@ impl TextModel {
     pub fn provider_context(&self) -> crate::providers::ProviderContext {
         crate::providers::ProviderContext {
             uri: self.uri.clone(),
+            resource: self.resource.clone(),
             language_id: self.language_id.clone(),
             snapshot: self.buffer.snapshot(),
         }

@@ -23,7 +23,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `URI.parse(s).toString()` | `normalize_uri(s)`; a model's `resource()` is its uri in this form |
 | `monaco.editor.getModels()`, `getEditors()`, `getDiffEditors()` | `models(cx)`, `editors(cx)`, `diff_editors(cx)` (the editor's own inputs, such as find's, aren't listed, as Monaco's are DOM inputs) |
 | `monaco.editor.setModelLanguage(model, id)` | `model.set_language(Some(id.into()), cx)` (`None` for plain text) |
-| `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)` |
+| `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)`, or `set_markers_for_uri(cx, owner, uri, markers)` for a uri without a model (Monaco's `IMarkerService.changeOne`) |
 | `monaco.editor.getModelMarkers({ owner, resource, take })` | `model_markers(cx, &MarkerFilter { owner, resource, take })` |
 | `monaco.editor.removeAllMarkers(owner)` | `remove_all_markers(cx, owner)` |
 | `monaco.editor.defineTheme(name, data)` | `define_theme(cx, Theme::define(name, &base, inherit, rules, &colors))`, or a theme from `Theme::from_vscode_json` |

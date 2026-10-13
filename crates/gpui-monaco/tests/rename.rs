@@ -825,3 +825,84 @@ fn workspace_edits_move_markers_past_their_text(cx: &mut TestAppContext) {
         assert_eq!(model.decoration(marker).unwrap().range, 10..10);
     });
 }
+
+/// Monaco compares `URI.toString()`s: an edit naming the editor's document
+/// another way (`%20` for a space) is for this editor, so a single snippet
+/// edit starts a snippet session here.
+#[gpui::test]
+fn workspace_edits_find_this_document_by_its_normalized_uri(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new("fn x() {}").with_uri("file:///my main.rs"));
+        CodeEditor::new(model, window, cx)
+    });
+    draw(cx);
+    let edit = WorkspaceEdit {
+        snippet_edits: vec![WorkspaceSnippetEdit {
+            uri: Some("file:///my%20main.rs".into()),
+            range: p(0, 3)..p(0, 4),
+            snippet: "${1:name}".into(),
+            keep_whitespace: false,
+        }],
+        ..Default::default()
+    };
+    apply(&editor, edit, cx).unwrap();
+    assert_eq!(text(&editor, cx), "fn name() {}");
+    assert!(editor.read_with(cx, |e, _| e.in_snippet_mode()));
+}
+
+/// Monaco `IBulkEditService.apply` without an editor, as
+/// `workspace/applyEdit` uses it: edits go to the models found by uri,
+/// and an edit that needs confirmation goes through the preview handler.
+#[gpui::test]
+fn workspace_edits_apply_without_an_editor(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = cx
+        .update(|cx| gpui_monaco::create_model(cx, "a b", None, Some("file:///C:/x y.rs")))
+        .unwrap();
+    let run = |edit: WorkspaceEdit, cx: &mut TestAppContext| {
+        let task = cx.update(|cx| gpui_monaco::apply_workspace_edit(cx, edit));
+        let result = Rc::new(RefCell::new(None));
+        let out = result.clone();
+        cx.update(|cx| {
+            cx.spawn(async move |_| *out.borrow_mut() = Some(task.await))
+                .detach()
+        });
+        cx.run_until_parked();
+        result.borrow_mut().take().expect("applied")
+    };
+    let edit = |uri: Option<&str>| WorkspaceEdit {
+        edits: vec![(
+            uri.map(|uri| uri.to_string().into()),
+            vec![(p(0, 0)..p(0, 1), "c".into())],
+        )],
+        ..Default::default()
+    };
+    // The server's spelling of the uri finds the model.
+    assert!(run(edit(Some("file:///c%3A/x%20y.rs")), cx).unwrap());
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "c b");
+    // Without an editor, every edit needs a document.
+    assert!(run(edit(None), cx).is_err());
+    assert!(run(edit(Some("file:///missing.rs")), cx).is_err());
+
+    // A cancelled preview applies nothing.
+    let previewed = Rc::new(RefCell::new(Vec::new()));
+    let seen = previewed.clone();
+    let _handler = cx.update(|cx| {
+        gpui_monaco::set_workspace_edit_preview_handler(cx, move |_, label, _| {
+            seen.borrow_mut().push(label.to_string());
+            Task::ready(Ok(None))
+        })
+    });
+    let confirm = WorkspaceEdit {
+        metadata: Some(WorkspaceEditMetadata {
+            needs_confirmation: true,
+            label: "Fix".into(),
+            description: None,
+        }),
+        ..edit(Some("file:///C:/x y.rs"))
+    };
+    assert!(!run(confirm, cx).unwrap());
+    assert_eq!(*previewed.borrow(), vec!["Fix".to_string()]);
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "c b");
+}

@@ -358,7 +358,7 @@ impl LspFeatures {
         position: PointUtf16,
         cx: &mut App,
     ) -> Option<(Connection, lsp::TextDocumentPositionParams)> {
-        let uri = context.uri.as_ref()?;
+        let uri = &context.resource;
         let client = self.client.upgrade()?;
         let (connection, text_document) =
             client.update(cx, |client, cx| client.prepare_request(uri, cx))?;
@@ -856,16 +856,17 @@ impl CodeActionProvider for LspFeatures {
         let Some((connection, position)) = self.prepare(context, range.start, cx) else {
             return Task::ready(Ok(Vec::new()));
         };
+        let diagnostics = self.client.upgrade().map_or_else(Vec::new, |client| {
+            client
+                .read(cx)
+                .lsp_diagnostics(&context.resource, &action_context.markers)
+        });
         let request =
             connection.request::<lsp::request::CodeActionRequest>(lsp::CodeActionParams {
                 text_document: position.text_document,
                 range: convert::lsp_range(&range),
                 context: lsp::CodeActionContext {
-                    diagnostics: action_context
-                        .markers
-                        .iter()
-                        .map(convert::diagnostic)
-                        .collect(),
+                    diagnostics,
                     only: action_context
                         .only
                         .as_ref()

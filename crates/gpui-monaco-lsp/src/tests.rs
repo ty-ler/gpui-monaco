@@ -44,6 +44,28 @@ impl Server {
             .collect()
     }
 
+    /// The client's response to the server's request `id`.
+    fn response(&self, id: u32) -> Value {
+        self.responses()
+            .into_iter()
+            .find(|m| m["id"] == id)
+            .unwrap_or(Value::Null)
+    }
+
+    /// Sends the client a notification.
+    fn notify(&self, method: &str, params: Value) {
+        self.push
+            .try_send(json!({ "jsonrpc": "2.0", "method": method, "params": params }))
+            .unwrap();
+    }
+
+    /// Sends the client a request.
+    fn request(&self, id: u32, method: &str, params: Value) {
+        self.push
+            .try_send(json!({ "jsonrpc": "2.0", "id": id, "method": method, "params": params }))
+            .unwrap();
+    }
+
     fn responses(&self) -> Vec<Value> {
         self.log
             .lock()
@@ -674,10 +696,9 @@ async fn diagnostics_and_server_requests(cx: &mut TestAppContext) {
         }))
         .unwrap();
     cx.run_until_parked();
-    let responses = server.responses();
-    assert_eq!(responses[0]["result"], json!([42, null]));
-    assert_eq!(responses[1]["result"]["applied"], true);
-    assert_eq!(responses[2]["error"]["code"], -32601);
+    assert_eq!(server.response(1)["result"], json!([42, null]));
+    assert_eq!(server.response(2)["result"]["applied"], true);
+    assert_eq!(server.response(3)["error"]["code"], -32601);
     assert_eq!(
         model.read_with(cx, |m, _| m.text()),
         "let _x = 1;\nlet _y = 2;\n"
@@ -836,4 +857,365 @@ async fn shutdown_and_exit(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(*exited.lock().unwrap());
     assert!(!client.read_with(cx, |client, _| client.is_running()));
+}
+
+fn range(start: (u32, u32), end: (u32, u32)) -> Value {
+    json!({
+        "start": { "line": start.0, "character": start.1 },
+        "end": { "line": end.0, "character": end.1 },
+    })
+}
+
+/// Monaco-languageclient identifies documents by `model.uri.toString()`:
+/// a path with a space or a drive letter is sent normalized, and the
+/// server's uris are compared normalized (`vscode-uri` writes `C:` as
+/// `c%3A`).
+#[gpui::test]
+async fn documents_are_identified_by_normalized_uris(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |method, params| {
+        let uri = params["textDocument"]["uri"].as_str().unwrap_or_default();
+        match method {
+            "textDocument/hover" => Some(json!({ "contents": format!("hover {uri}") })),
+            // The server writes the drive letter its own way.
+            "textDocument/definition" => Some(json!([
+                { "uri": "file:///C:/proj/a.rs", "range": range((0, 0), (0, 1)) },
+                { "uri": "file:///c%3A/proj/b.rs", "range": range((0, 0), (0, 1)) },
+            ])),
+            _ => None,
+        }
+    })
+    .await;
+    let spaced = cx.new(|_| {
+        TextModel::new("fn main() {}\n")
+            .with_uri("file:///project/my project/main.rs")
+            .with_language("rust")
+    });
+    let drive = cx.new(|_| {
+        TextModel::new("let x = 1;\n")
+            .with_uri("file:///C:/proj/a.rs")
+            .with_language("rust")
+    });
+    let unnamed = cx.new(|_| TextModel::new("x").with_language("rust"));
+    for model in [&spaced, &drive, &unnamed] {
+        client
+            .update(cx, |client, cx| client.attach(model, cx))
+            .unwrap();
+        assert!(client.read_with(cx, |client, cx| client.is_attached(model, cx)));
+    }
+    cx.run_until_parked();
+    let unnamed_uri = unnamed.read_with(cx, |m, _| m.resource().to_string());
+    assert!(unnamed_uri.starts_with("inmemory://model/"));
+    let opened: Vec<_> = server
+        .messages("textDocument/didOpen")
+        .iter()
+        .map(|m| m["params"]["textDocument"]["uri"].clone())
+        .collect();
+    assert_eq!(
+        opened,
+        vec![
+            json!("file:///project/my%20project/main.rs"),
+            json!("file:///c%3A/proj/a.rs"),
+            json!(unnamed_uri),
+        ]
+    );
+
+    // Requests name the documents the same way, a model without a uri too.
+    let features =
+        cx.update(|cx| LspFeatures::new(client.downgrade(), client.read(cx).capabilities()));
+    for (model, uri) in [
+        (&spaced, "file:///project/my%20project/main.rs"),
+        (&unnamed, unnamed_uri.as_str()),
+    ] {
+        let context = model.read_with(cx, |m, _| m.provider_context());
+        let hover = cx.update(|cx| features.provide_hover(&context, p(0, 0), cx));
+        cx.run_until_parked();
+        let hover = hover.await.unwrap().unwrap();
+        assert_eq!(hover.contents[0].value.as_ref(), format!("hover {uri}"));
+    }
+
+    // A location in the queried document has no uri, however the server
+    // writes it; others are normalized.
+    let context = drive.read_with(cx, |m, _| m.provider_context());
+    let definition = cx.update(|cx| features.provide_definition(&context, p(0, 4), cx));
+    cx.run_until_parked();
+    let definition = definition.await.unwrap();
+    assert_eq!(definition[0].uri, None);
+    assert_eq!(definition[1].uri.as_deref(), Some("file:///c%3A/proj/b.rs"));
+
+    // Diagnostics published for the server's form reach the model.
+    server.notify(
+        "textDocument/publishDiagnostics",
+        json!({
+            "uri": "file:///c%3A/proj/a.rs",
+            "diagnostics": [{ "range": range((0, 4), (0, 5)), "message": "unused x" }],
+        }),
+    );
+    server.notify(
+        "textDocument/publishDiagnostics",
+        json!({
+            "uri": "file:///project/my%20project/main.rs",
+            "diagnostics": [{ "range": range((0, 3), (0, 7)), "message": "main" }],
+        }),
+    );
+    cx.run_until_parked();
+    assert_eq!(
+        drive.read_with(cx, |m, _| m.markers())[0].message,
+        "unused x"
+    );
+    assert_eq!(spaced.read_with(cx, |m, _| m.markers())[0].message, "main");
+
+    // Edits sync and close with the same uri.
+    drive.update(cx, |m, cx| m.edit([(0..0, "// ")], cx).unwrap());
+    client.update(cx, |client, cx| client.detach(&drive, cx));
+    cx.run_until_parked();
+    assert_eq!(
+        server.messages("textDocument/didChange")[0]["params"]["textDocument"]["uri"],
+        "file:///c%3A/proj/a.rs"
+    );
+    assert_eq!(
+        server.messages("textDocument/didClose")[0]["params"]["textDocument"]["uri"],
+        "file:///c%3A/proj/a.rs"
+    );
+}
+
+/// `vscode-languageclient` writes diagnostics into a collection keyed by
+/// uri, which reaches the marker service whether or not the document is
+/// open.
+#[gpui::test]
+async fn diagnostics_reach_documents_that_are_not_attached(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |_, _| None).await;
+    cx.update(gpui_monaco::init);
+    let owner = client.read_with(cx, |client, _| client.markers_owner());
+    server.notify(
+        "textDocument/publishDiagnostics",
+        json!({
+            "uri": "file:///project/other%20file.rs",
+            "diagnostics": [{ "range": range((1, 0), (1, 3)), "message": "elsewhere" }],
+        }),
+    );
+    cx.run_until_parked();
+    let listed = cx.update(|cx| {
+        gpui_monaco::model_markers(
+            cx,
+            &gpui_monaco::MarkerFilter {
+                owner: Some(owner.clone()),
+                ..Default::default()
+            },
+        )
+    });
+    assert_eq!(listed.len(), 1);
+    assert_eq!(
+        listed[0].resource.as_ref(),
+        "file:///project/other%20file.rs"
+    );
+
+    // A model opened later is decorated at once.
+    let model = cx
+        .update(|cx| {
+            gpui_monaco::create_model(
+                cx,
+                "a\nfoo\n",
+                Some("rust"),
+                Some("file:///project/other file.rs"),
+            )
+        })
+        .unwrap();
+    let markers = model.read_with(cx, |m, _| m.markers());
+    assert_eq!(markers.len(), 1);
+    assert_eq!(markers[0].range, p(1, 0)..p(1, 3));
+
+    // An empty publish clears them.
+    server.notify(
+        "textDocument/publishDiagnostics",
+        json!({ "uri": "file:///project/other%20file.rs", "diagnostics": [] }),
+    );
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.markers()).is_empty());
+}
+
+/// `workspace/applyEdit` goes through the bulk edit service: file
+/// operations go to the host, documents that aren't attached are edited,
+/// failures say why, and stale versions aren't applied.
+#[gpui::test]
+async fn apply_edit_goes_through_the_bulk_edit_service(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |_, _| None).await;
+    cx.update(gpui_monaco::init);
+    let model = model(cx, "let x = 1;\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let other = cx
+        .update(|cx| {
+            gpui_monaco::create_model(cx, "b\n", Some("rust"), Some("file:///project/b c.rs"))
+        })
+        .unwrap();
+    cx.run_until_parked();
+
+    // A file operation without a handler fails, with the reason.
+    let create = json!({ "edit": { "documentChanges": [
+        { "kind": "create", "uri": "file:///project/new.rs" },
+        { "textDocument": { "uri": "file:///project/b%20c.rs", "version": null },
+          "edits": [{ "range": range((0, 0), (0, 0)), "newText": "// " }] },
+    ] } });
+    server.request(1, "workspace/applyEdit", create.clone());
+    cx.run_until_parked();
+    let response = server.response(1)["result"].clone();
+    assert_eq!(response["applied"], false);
+    assert!(
+        response["failureReason"]
+            .as_str()
+            .unwrap()
+            .contains("file edit handler")
+    );
+    assert_eq!(other.read_with(cx, |m, _| m.text()), "b\n");
+
+    // With one, the file is created and the document that isn't attached
+    // (and that the server names with `%20`) is edited.
+    let created = Arc::new(Mutex::new(Vec::new()));
+    let sink = created.clone();
+    let _handler = cx.update(|cx| {
+        gpui_monaco::set_workspace_file_edit_handler(cx, move |edits, _| {
+            sink.lock().unwrap().extend(edits);
+            Task::ready(Ok(()))
+        })
+    });
+    server.request(2, "workspace/applyEdit", create);
+    cx.run_until_parked();
+    assert_eq!(server.response(2)["result"]["applied"], true);
+    assert_eq!(
+        created.lock().unwrap()[0].new_uri.as_deref(),
+        Some("file:///project/new.rs")
+    );
+    assert_eq!(other.read_with(cx, |m, _| m.text()), "// b\n");
+
+    // An edit that fails isn't reported as applied.
+    server.request(
+        3,
+        "workspace/applyEdit",
+        json!({ "edit": { "changes": { "file:///project/main.rs": [
+            { "range": range((0, 0), (0, 5)), "newText": "a" },
+            { "range": range((0, 2), (0, 7)), "newText": "b" },
+        ] } } }),
+    );
+    // A document nobody has fails as Monaco's "model not found".
+    server.request(
+        4,
+        "workspace/applyEdit",
+        json!({ "edit": { "changes": { "file:///project/missing.rs": [
+            { "range": range((0, 0), (0, 0)), "newText": "a" },
+        ] } } }),
+    );
+    // An edit for a version of an attached document the server no longer
+    // has isn't applied (`vscode-languageclient`).
+    server.request(
+        5,
+        "workspace/applyEdit",
+        json!({ "edit": { "documentChanges": [
+            { "textDocument": { "uri": "file:///project/main.rs", "version": 7 },
+              "edits": [{ "range": range((0, 0), (0, 0)), "newText": "a" }] },
+        ] } }),
+    );
+    cx.run_until_parked();
+    for id in [3, 4, 5] {
+        assert_eq!(server.response(id)["result"]["applied"], false, "{id}");
+    }
+    assert!(
+        server.response(4)["result"]["failureReason"]
+            .as_str()
+            .unwrap()
+            .contains("model not found")
+    );
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "let x = 1;\n");
+
+    // The current version is applied.
+    server.request(
+        6,
+        "workspace/applyEdit",
+        json!({ "edit": { "documentChanges": [
+            { "textDocument": { "uri": "file:///project/main.rs", "version": 0 },
+              "edits": [{ "range": range((0, 4), (0, 5)), "newText": "y" }] },
+        ] } }),
+    );
+    cx.run_until_parked();
+    assert_eq!(server.response(6)["result"]["applied"], true);
+    assert_eq!(model.read_with(cx, |m, _| m.text()), "let y = 1;\n");
+}
+
+/// Code action requests send the diagnostics as the server published
+/// them (`vscode-languageclient` keeps them in its collection): numeric
+/// codes stay numbers, and related information and data go along.
+#[gpui::test]
+async fn code_actions_send_the_published_diagnostics(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |method, _| {
+        (method == "textDocument/codeAction").then(|| json!([]))
+    })
+    .await;
+    let model = model(cx, "let x = 1;\nlet y = 2;\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let published = json!({
+        "range": range((1, 4), (1, 5)),
+        "severity": 1,
+        "code": 2304,
+        "source": "ts",
+        "message": "Cannot find name 'y'.",
+        "relatedInformation": [{
+            "location": { "uri": "file:///project/lib.rs", "range": range((0, 0), (0, 1)) },
+            "message": "declared here",
+        }],
+        "data": { "fix": 1 },
+    });
+    server.notify(
+        "textDocument/publishDiagnostics",
+        json!({ "uri": "file:///project/main.rs", "diagnostics": [published.clone()] }),
+    );
+    cx.run_until_parked();
+    // The marker moves with an edit before the request.
+    model.update(cx, |m, cx| m.edit([(0..0, "\n")], cx).unwrap());
+    let markers = model.read_with(cx, |m, _| m.markers());
+    assert_eq!(markers[0].range, p(2, 4)..p(2, 5));
+    let features =
+        cx.update(|cx| LspFeatures::new(client.downgrade(), client.read(cx).capabilities()));
+    let context = model.read_with(cx, |m, _| m.provider_context());
+    let actions = cx.update(|cx| {
+        features.provide_code_actions(
+            &context,
+            p(2, 4)..p(2, 4),
+            &CodeActionContext {
+                only: None,
+                trigger: CodeActionTrigger::Invoke,
+                markers: markers.clone(),
+            },
+            cx,
+        )
+    });
+    cx.run_until_parked();
+    actions.await.unwrap();
+    let request = &server.messages("textDocument/codeAction")[0]["params"];
+    assert_eq!(request["context"]["diagnostics"], json!([published]));
+
+    // A marker the server didn't publish keeps its related information.
+    let marker = gpui_monaco::Marker {
+        message: "mine".into(),
+        range: p(0, 0)..p(0, 1),
+        code: Some("7".into()),
+        related_information: vec![gpui_monaco::RelatedInformation {
+            uri: Some("file:///project/lib.rs".into()),
+            range: p(1, 0)..p(1, 2),
+            message: "there".into(),
+        }],
+        ..Default::default()
+    };
+    let diagnostics = client.read_with(cx, |client, _| {
+        client.lsp_diagnostics("file:///project/main.rs", &[marker])
+    });
+    assert_eq!(
+        serde_json::to_value(&diagnostics[0]).unwrap()["relatedInformation"],
+        json!([{
+            "location": { "uri": "file:///project/lib.rs", "range": range((1, 0), (1, 2)) },
+            "message": "there",
+        }])
+    );
+    assert_eq!(serde_json::to_value(&diagnostics[0]).unwrap()["code"], "7");
 }
