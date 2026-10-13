@@ -632,10 +632,14 @@ pub struct TextModel {
     skip_spans: std::cell::RefCell<SkipSpans>,
 }
 
-/// Rows per block of [`SkipSpans`].
-pub(crate) const SKIP_BLOCK_ROWS: u32 = 64;
-/// More blocks than this and [`SkipSpans`] starts over.
-const MAX_SKIP_BLOCKS: usize = 1024;
+/// Rows per block of [`SkipSpans`]. A parse in a small file follows each
+/// keystroke, and the bracket highlight then queries the block it dropped
+/// again: smaller blocks make that query cheaper, while the scans that
+/// visit many blocks (Page Down, a far enclosing pair) cost about the same
+/// at 16 rows as at 64 (8 gains nothing more).
+pub(crate) const SKIP_BLOCK_ROWS: u32 = 16;
+/// More blocks than this (65,536 rows' worth) and [`SkipSpans`] starts over.
+const MAX_SKIP_BLOCKS: usize = (65_536 / SKIP_BLOCK_ROWS) as usize;
 
 /// The strings, comments and regexes of a syntax state's text, by block of
 /// [`SKIP_BLOCK_ROWS`] rows of that text: bracket matching asks for the
@@ -2792,11 +2796,14 @@ mod bracket_skip_tests {
 
     use super::TextModel;
 
-    /// Rust with strings and comments, block comments across the 64-row
-    /// blocks, a few hundred rows.
+    /// Rows per block.
+    const B: u32 = super::SKIP_BLOCK_ROWS;
+
+    /// Rust with strings and comments, block comments across the blocks,
+    /// more than four blocks' worth of rows.
     fn text() -> String {
         let mut text = String::new();
-        for i in 0..60 {
+        for i in 0..60.max(B) {
             text.push_str(&format!("fn f{i}() {{ let s = \"({i}\"; }} // ) {i}\n"));
             if i % 7 == 3 {
                 text.push_str("/* (\n  [\n*/ let r = b\"{\";\n");
@@ -2816,17 +2823,17 @@ mod bracket_skip_tests {
         model
     }
 
-    /// The model's 64-row blocks, as bracket matching asks for them.
+    /// The model's blocks of [`B`] rows, as bracket matching asks for them.
     fn blocks(model: &TextModel) -> Vec<Range<usize>> {
         let rope = model.buffer().rope();
         let max_row = rope.max_point().row;
-        (0..=max_row / 64)
+        (0..=max_row / B)
             .map(|block| {
-                let start = rope.point_to_offset(text::Point::new(block * 64, 0));
-                let end = if (block + 1) * 64 > max_row {
+                let start = rope.point_to_offset(text::Point::new(block * B, 0));
+                let end = if (block + 1) * B > max_row {
                     rope.len()
                 } else {
-                    rope.point_to_offset(text::Point::new((block + 1) * 64, 0))
+                    rope.point_to_offset(text::Point::new((block + 1) * B, 0))
                 };
                 start..end
             })
@@ -2841,9 +2848,11 @@ mod bracket_skip_tests {
     #[gpui::test]
     fn cached_blocks_match_one_query_per_block(cx: &mut TestAppContext) {
         let mut lines: Vec<String> = text().lines().map(str::to_string).collect();
+        assert!(lines.len() > 4 * B as usize);
         // A string across the boundary between blocks 0 and 1.
+        let first = B as usize - 2;
         lines.splice(
-            62..67,
+            first..first + 5,
             ["let m = \"", "(a", "[b", "{c", "\";"].map(str::to_string),
         );
         let model = rust_model(cx, &(lines.join("\n") + "\n"));
@@ -2872,26 +2881,25 @@ mod bracket_skip_tests {
             check(model);
         });
         type Edit = fn(&TextModel) -> Vec<(Range<usize>, &'static str)>;
+        /// The offset of `row`, `column`, the column clipped to the row.
         fn at(model: &TextModel, row: u32, column: u32) -> usize {
-            model
-                .buffer()
-                .rope()
-                .point_to_offset(text::Point::new(row, column))
+            let rope = model.buffer().rope();
+            rope.point_to_offset(text::Point::new(row, column.min(rope.line_len(row))))
         }
         // Edits the parse hasn't caught up with, checked after each.
         let edits: [Edit; 7] = [
             // Typing within a block.
-            |m| vec![(at(m, 100, 4)..at(m, 100, 4), "x(")],
+            |m| vec![(at(m, B + B / 2 + 4, 4)..at(m, B + B / 2 + 4, 4), "x(")],
             // At block boundaries: in the string across one, and at the
             // start and end of others.
-            |m| vec![(at(m, 64, 0)..at(m, 64, 0), "(")],
-            |m| vec![(at(m, 128, 0)..at(m, 128, 0), "\"{")],
-            |m| vec![(at(m, 192, 0) - 1..at(m, 192, 0) - 1, "/*")],
+            |m| vec![(at(m, B, 0)..at(m, B, 0), "(")],
+            |m| vec![(at(m, 2 * B, 0)..at(m, 2 * B, 0), "\"{")],
+            |m| vec![(at(m, 3 * B, 0) - 1..at(m, 3 * B, 0) - 1, "/*")],
             // Line breaks inserted and removed, so later blocks shift.
-            |m| vec![(at(m, 10, 4)..at(m, 10, 4), "\n\n(\n")],
-            |m| vec![(at(m, 63, 2)..at(m, 65, 1), "")],
+            |m| vec![(at(m, B / 4, 4)..at(m, B / 4, 4), "\n\n(\n")],
+            |m| vec![(at(m, B - 1, 2)..at(m, B + 1, 1), "")],
             // Text removed across a boundary.
-            |m| vec![(at(m, 127, 3)..at(m, 129, 2), "]")],
+            |m| vec![(at(m, 2 * B - 1, 3)..at(m, 2 * B + 1, 2), "]")],
         ];
         for edit in edits {
             model.update(cx, |model, cx| {
@@ -2940,7 +2948,7 @@ mod bracket_skip_tests {
         });
         cx.run_until_parked();
         model.read_with(cx, |model, _| {
-            let last = model.buffer().rope().max_point().row / 64;
+            let last = model.buffer().rope().max_point().row / B;
             assert_eq!(cached(model), (0..last).collect::<Vec<_>>());
             check(model);
         });
@@ -2975,7 +2983,7 @@ mod bracket_skip_tests {
                 let len = rope.len();
                 // Near block boundaries often.
                 let at = if next(3) == 0 {
-                    let row = (next(rope.max_point().row as usize / 64 + 1) * 64) as u32;
+                    let row = next((rope.max_point().row / B) as usize + 1) as u32 * B;
                     rope.point_to_offset(text::Point::new(row.min(rope.max_point().row), 0))
                 } else {
                     next(len + 1)
