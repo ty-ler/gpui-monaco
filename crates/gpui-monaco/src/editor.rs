@@ -1328,9 +1328,11 @@ impl CodeEditor {
     }
 
     fn set_model_inner(&mut self, model: Entity<TextModel>, detach: bool, cx: &mut Context<Self>) {
+        // Monaco `model?.uri || null`: the model's uri, `inmemory://model/N`
+        // for one created without, `None` only for no model.
         let change = ModelChange {
-            old_uri: self.model.read(cx).uri().cloned(),
-            new_uri: model.read(cx).uri().cloned(),
+            old_uri: (!self.detached).then(|| self.model.read(cx).resource().clone()),
+            new_uri: (!detach).then(|| model.read(cx).resource().clone()),
         };
         cx.emit(CodeEditorEvent::WillChangeModel(change.clone()));
         crate::model::register_model(cx, &model);

@@ -144,7 +144,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `onDidFocusEditorText` / `onDidBlurEditorText` | `Focused` / `Blurred` |
 | `onMouseDown`, `onMouseUp`, `onMouseMove`, `onMouseLeave`, `onContextMenu` | `MouseDown`, `MouseUp`, `MouseMove`, `MouseLeave`, `ContextMenu` (with `EditorMouseEvent`; `MouseLeave` with a `PartialEditorMouseEvent`) |
 | `onDidAttemptReadOnlyEdit` | `ReadOnlyEditAttempt` |
-| `onWillChangeModel` / `onDidChangeModel` | `WillChangeModel` / `ModelChanged` (`ModelChange { old_uri, new_uri }`) |
+| `onWillChangeModel` / `onDidChangeModel` | `WillChangeModel` / `ModelChanged` (`ModelChange { old_uri, new_uri }`, each the model's `resource()`, `None` for no model) |
 | `onDidChangeModelLanguage` | `ModelLanguageChanged { old_language, new_language, source }` |
 | `onDidChangeLineHeight`, `onDidChangeFont` | `LineHeightChanged(changes)`, `FontChanged(changes)` (the decorations this editor shows) |
 | `onDropIntoEditor`, `onWillTriggerEditorOperationEvent` | `DropIntoEditor(DropIntoEditorEvent { position, data })`, `WillTriggerEditorOperation(TriggerEditorOperationEvent { source, handler_id, payload })` |

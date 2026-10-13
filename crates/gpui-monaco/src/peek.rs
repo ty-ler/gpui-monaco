@@ -259,14 +259,33 @@ fn peek_title(uri: Option<&str>) -> (String, String) {
     }
 }
 
-/// The last path segment of `uri` and the folder before it.
+/// The last path segment of `uri` (Monaco `basenameOrAuthority`) and the
+/// label of the folder before it (`getUriLabel(dirname(uri))`, which the
+/// standalone label service makes a `file` uri's `fsPath` and any other
+/// uri's `path`: `/` for `inmemory://model/1`).
 fn uri_label(uri: &str) -> (String, String) {
-    let path = uri.split_once("://").map_or(uri, |(_, rest)| rest);
-    let path = path.trim_end_matches('/');
-    match path.rsplit_once('/') {
-        Some((dir, name)) => (percent_decode(name), percent_decode(dir)),
-        None => (percent_decode(path), String::new()),
-    }
+    let Some((scheme, rest)) = uri.split_once("://") else {
+        return (percent_decode(uri), String::new());
+    };
+    let (authority, path) = match rest.find('/') {
+        Some(ix) => rest.split_at(ix),
+        None => (rest, ""),
+    };
+    // Monaco `posix.basename` and `posix.dirname` ignore a trailing slash.
+    let trimmed = path.trim_end_matches('/');
+    let (dir, name) = match trimmed.rsplit_once('/') {
+        Some(("", name)) => ("/", name),
+        Some((dir, name)) => (dir, name),
+        // `dirname` keeps a uri without a path as it is.
+        None => (path, trimmed),
+    };
+    let name = if name.is_empty() { authority } else { name };
+    let description = if scheme == "file" {
+        fs_path(&format!("file://{authority}{dir}"))
+    } else {
+        percent_decode(dir)
+    };
+    (percent_decode(name), description)
 }
 
 /// Monaco `URI.fsPath`: the path, after the authority (kept for a `file`
@@ -539,12 +558,11 @@ impl PeekView {
         selected: usize,
         cx: &mut gpui::App,
     ) -> (Vec<Group>, (usize, usize)) {
-        let main_uri = main_model.read(cx).uri().cloned();
         let mut groups: Vec<Group> = Vec::new();
         let mut selected_pos = (0, 0);
         for (ix, location) in locations.into_iter().enumerate() {
             if groups.last().is_none_or(|g| g.uri != location.uri) {
-                let model = if location.uri.is_none() || location.uri == main_uri {
+                let model = if main_model.read(cx).is_at(location.uri.as_deref()) {
                     Some(main_model.clone())
                 } else {
                     location
@@ -579,8 +597,8 @@ impl PeekView {
         locations: Vec<Location>,
         cx: &mut Context<Self>,
     ) {
-        let uri = main_model.read(cx).uri().cloned();
-        let selected = nearest(&locations, uri.as_ref(), self.anchor);
+        let uri = main_model.read(cx).resource().clone();
+        let selected = nearest(&locations, Some(&uri), self.anchor);
         let (groups, selected) = Self::groups(main_model, locations, selected, cx);
         self.focus_pending = !groups.is_empty();
         self.groups = groups;
@@ -1780,8 +1798,8 @@ impl CodeEditor {
             return;
         }
         let anchor = self.cursors.primary().selection().start();
-        let uri = self.model().read(cx).uri().cloned();
-        let selected = selected.unwrap_or_else(|| nearest(&locations, uri.as_ref(), anchor));
+        let uri = self.model().read(cx).resource().clone();
+        let selected = selected.unwrap_or_else(|| nearest(&locations, Some(&uri), anchor));
         self.show_peek(kind, anchor, locations, selected, peek_mode, false, cx);
     }
 
@@ -1897,7 +1915,7 @@ impl CodeEditor {
             true,
             cx,
         );
-        let uri = model.read(cx).uri().cloned();
+        let uri = model.read(cx).resource().clone();
         self.peek.task = Some(cx.spawn(async move |this, cx| {
             let mut locations = Vec::new();
             for task in tasks {
@@ -1906,7 +1924,7 @@ impl CodeEditor {
                     Err(err) => log::warn!("finding references failed: {err:#}"),
                 }
             }
-            let locations = crate::goto::sorted_locations(locations, uri.as_ref());
+            let locations = crate::goto::sorted_locations(locations, &uri);
             this.update(cx, |this, cx| {
                 // Monaco drops the results of a request whose view closed.
                 if this.peek.view.as_ref() != Some(&view) {
@@ -2088,8 +2106,8 @@ impl CodeEditor {
         if count == 0 {
             return;
         }
-        let uri = self.model().read(cx).uri().cloned();
-        let source = nearest(&results.locations, uri.as_ref(), results.anchor);
+        let uri = self.model().read(cx).resource().clone();
+        let source = nearest(&results.locations, Some(&uri), results.anchor);
         let target = (source as isize + delta).rem_euclid(count as isize) as usize;
         self.peek_go_to_reference(results, target, focus, cx);
     }
@@ -2221,6 +2239,24 @@ mod tests {
         assert_eq!(
             uri_label("file:///home/me/my%20project/src/main.rs"),
             ("main.rs".to_string(), "/home/me/my project/src".to_string())
+        );
+        // Monaco `getUriLabel(dirname(uri))`: a `file` uri's `fsPath` (a
+        // UNC path keeps its server), any other uri's `path`.
+        assert_eq!(
+            uri_label("inmemory://model/1"),
+            ("1".to_string(), "/".to_string())
+        );
+        assert_eq!(
+            uri_label("file:///main.rs"),
+            ("main.rs".to_string(), "/".to_string())
+        );
+        assert_eq!(
+            uri_label("file://server/share/a.rs"),
+            ("a.rs".to_string(), "//server/share".to_string())
+        );
+        assert_eq!(
+            uri_label("untitled://host/notes/a%20b.txt"),
+            ("a b.txt".to_string(), "/notes".to_string())
         );
         let here = SharedString::from("file:///b.rs");
         let at = |uri: &str, row: u32| Location {
