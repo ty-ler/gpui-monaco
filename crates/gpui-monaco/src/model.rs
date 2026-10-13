@@ -640,12 +640,82 @@ const MAX_SKIP_BLOCKS: usize = 1024;
 /// The strings, comments and regexes of a syntax state's text, by block of
 /// [`SKIP_BLOCK_ROWS`] rows of that text: bracket matching asks for the
 /// same rows on every cursor move, and while typing the syntax text lags
-/// the model's, so the blocks outlive edits until the next parse.
+/// the model's, so the blocks outlive edits, and a parse keeps the ones
+/// it leaves alone ([`SkipSpans::carry_over`]).
 #[derive(Default)]
 struct SkipSpans {
     /// The syntax generation and tokenized line length the blocks are for.
     key: (u64, u32),
     blocks: std::collections::HashMap<u32, Vec<Range<usize>>>,
+    /// Ranges of the syntax text that aren't one block, by start and end:
+    /// a model block after an inserted or removed line break while the
+    /// syntax lags. Dropped at each parse.
+    shifted: std::collections::HashMap<(usize, usize), Vec<Range<usize>>>,
+}
+
+impl SkipSpans {
+    /// Moves the blocks of syntax generation `generation`, for the text
+    /// `old`, over to the parse `key` of `new` (`patch` being the edits
+    /// from `old` to `new`), where they stay exactly what a query of the
+    /// new syntax would give: a block and its spans that no edit touches,
+    /// that is the same block of rows of `new`, on rows whose tokens the
+    /// parse didn't change (`changed_rows`, rows of `new`). Typing in a
+    /// small file reparses after every keystroke, and bracket matching
+    /// would otherwise query every block it visits again each time.
+    fn carry_over(
+        &mut self,
+        generation: u64,
+        key: (u64, u32),
+        old: &Rope,
+        new: &Rope,
+        patch: &Patch,
+        changed_rows: &[RangeInclusive<u32>],
+    ) {
+        self.shifted.clear();
+        if self.key != (generation, key.1) {
+            self.key = key;
+            self.blocks.clear();
+            return;
+        }
+        self.key = key;
+        let edits = patch.edits();
+        self.blocks.retain(|&block, spans| {
+            let Some(range) = block_range(old, block) else {
+                return false;
+            };
+            // The block and its spans, which may reach past it.
+            let hull = spans.iter().fold(range.clone(), |hull, span| {
+                hull.start.min(span.start)..hull.end.max(span.end)
+            });
+            if edits
+                .iter()
+                .any(|edit| edit.old.start <= hull.end && edit.old.end >= hull.start)
+            {
+                return false;
+            }
+            let delta: isize = edits
+                .iter()
+                .take_while(|edit| edit.old.end < hull.start)
+                .map(|edit| edit.new.len() as isize - edit.old.len() as isize)
+                .sum();
+            let shift = |offset: usize| offset.saturating_add_signed(delta);
+            if skip_block(new, &(shift(range.start)..shift(range.end))) != Some(block) {
+                return false;
+            }
+            let rows = new.offset_to_point(shift(hull.start)).row
+                ..=new.offset_to_point(shift(hull.end).min(new.len())).row;
+            if changed_rows
+                .iter()
+                .any(|changed| changed.start() <= rows.end() && rows.start() <= changed.end())
+            {
+                return false;
+            }
+            for span in spans.iter_mut() {
+                *span = shift(span.start)..shift(span.end);
+            }
+            true
+        });
+    }
 }
 
 /// The line heights and fonts a decorations change changes (Monaco's
@@ -1320,9 +1390,10 @@ impl TextModel {
     /// same in every state: a range that is (or, while the syntax lags
     /// the text, maps back to exactly) one block of [`SKIP_BLOCK_ROWS`]
     /// rows of the syntax text takes that block's strings and comments,
-    /// kept until the syntax changes. Typing within a block leaves every
-    /// block mapping back to one; inserted or removed line breaks shift
-    /// the later ones until the next parse, which are queried each time.
+    /// kept while a parse leaves them alone (see [`SkipSpans::carry_over`]).
+    /// Typing within a block leaves every block mapping back to one;
+    /// inserted or removed line breaks shift the later ones until the next
+    /// parse, which are kept by the range they map back to until then.
     pub(crate) fn bracket_skip_ranges(&self, range: Range<usize>) -> Vec<Range<usize>> {
         let Some(syntax) = self.syntax_snapshot() else {
             return Vec::new();
@@ -1352,20 +1423,25 @@ impl TextModel {
             }
         };
         let rope = syntax.text.rope();
-        let Some(block) = skip_block(rope, &old_range) else {
-            return map(&mut old_token_spans(&syntax, old_range, limit).map(|(range, _)| range));
-        };
         let mut cache = self.skip_spans.borrow_mut();
         let key = (self.syntax_generation, limit);
-        if cache.key != key || cache.blocks.len() > MAX_SKIP_BLOCKS {
+        if cache.key != key || cache.blocks.len() + cache.shifted.len() > MAX_SKIP_BLOCKS {
             cache.key = key;
             cache.blocks.clear();
+            cache.shifted.clear();
         }
-        let spans = cache.blocks.entry(block).or_insert_with(|| {
-            old_token_spans(&syntax, old_range, limit)
+        let query = || {
+            old_token_spans(&syntax, old_range.clone(), limit)
                 .map(|(range, _)| range)
                 .collect()
-        });
+        };
+        let spans = match skip_block(rope, &old_range) {
+            Some(block) => cache.blocks.entry(block).or_insert_with(query),
+            None => cache
+                .shifted
+                .entry((old_range.start, old_range.end))
+                .or_insert_with(query),
+        };
         map(&mut spans.iter().cloned())
     }
 
@@ -1689,6 +1765,10 @@ impl TextModel {
             let patch = self.buffer.edits_since(text.version());
             (state, text, patch)
         });
+        // To carry the bracket matching blocks the parse leaves alone over.
+        let carry = previous
+            .as_ref()
+            .map(|(_, text, patch)| (self.syntax_generation, text.rope().clone(), patch.clone()));
         syntax.task = Some(cx.spawn(async move |this, cx| {
             let parse_snapshot = snapshot.clone();
             let (state, ranges) = cx
@@ -1707,10 +1787,22 @@ impl TextModel {
                 let Some(syntax) = this.syntax.as_mut() else {
                     return;
                 };
+                let rope = snapshot.rope().clone();
                 syntax.latest = Some((state, snapshot));
                 syntax.task = None;
-                this.syntax_generation += 1;
                 let dirty = std::mem::take(&mut syntax.dirty);
+                this.syntax_generation += 1;
+                if let Some((generation, old, patch)) = &carry {
+                    let key = (this.syntax_generation, this.tokenization_line_limit());
+                    this.skip_spans.get_mut().carry_over(
+                        *generation,
+                        key,
+                        old,
+                        &rope,
+                        patch,
+                        &ranges,
+                    );
+                }
                 cx.emit(TextModelEvent::SyntaxUpdated { ranges });
                 cx.notify();
                 // Embedded languages the tokenizer met (Monaco's lexer
@@ -2441,13 +2533,26 @@ fn skip_block(rope: &Rope, range: &Range<usize>) -> Option<u32> {
     if start.column != 0 || !start.row.is_multiple_of(SKIP_BLOCK_ROWS) {
         return None;
     }
-    let end_row = start.row + SKIP_BLOCK_ROWS;
-    let end = if end_row > rope.max_point().row {
+    let block = start.row / SKIP_BLOCK_ROWS;
+    (block_range(rope, block)? == *range).then_some(block)
+}
+
+/// The byte range of `block` of [`SKIP_BLOCK_ROWS`] rows of `rope`, if
+/// it has any rows.
+fn block_range(rope: &Rope, block: u32) -> Option<Range<usize>> {
+    let first = block.checked_mul(SKIP_BLOCK_ROWS)?;
+    let max_row = rope.max_point().row;
+    if first > max_row {
+        return None;
+    }
+    let start = rope.point_to_offset(text::Point::new(first, 0));
+    let end_row = first + SKIP_BLOCK_ROWS;
+    let end = if end_row > max_row {
         rope.len()
     } else {
         rope.point_to_offset(text::Point::new(end_row, 0))
     };
-    (range.end == end).then_some(start.row / SKIP_BLOCK_ROWS)
+    Some(start..end)
 }
 
 /// The strings, comments and regexes of `syntax`'s text in `range` (of
@@ -2802,6 +2907,95 @@ mod bracket_skip_tests {
         // And once the parse catches up.
         cx.run_until_parked();
         model.read_with(cx, |model, _| check(model));
+    }
+
+    /// The blocks a parse leaves alone are carried over to it, and every
+    /// block stays exactly what one uncached query gives after each of
+    /// many edits and parses: typing, brackets, quotes and comment markers
+    /// that change the strings and comments of later blocks, line breaks
+    /// inserted and removed, edits at block boundaries.
+    #[gpui::test]
+    fn cached_blocks_carry_over_parses(cx: &mut TestAppContext) {
+        let model = rust_model(cx, &text());
+        let check = |model: &TextModel| {
+            for block in blocks(model) {
+                let expected = model.string_and_comment_ranges(block.clone());
+                assert_eq!(
+                    model.bracket_skip_ranges(block.clone()),
+                    expected,
+                    "{block:?}"
+                );
+            }
+        };
+        let cached = |model: &TextModel| {
+            let mut blocks: Vec<u32> = model.skip_spans.borrow().blocks.keys().copied().collect();
+            blocks.sort();
+            blocks
+        };
+        // Typing in the last block leaves the others cached.
+        model.read_with(cx, |model, _| check(model));
+        model.update(cx, |model, cx| {
+            let end = model.buffer().len();
+            model.edit([(end - 3..end - 3, "x")], cx).unwrap();
+        });
+        cx.run_until_parked();
+        model.read_with(cx, |model, _| {
+            let last = model.buffer().rope().max_point().row / 64;
+            assert_eq!(cached(model), (0..last).collect::<Vec<_>>());
+            check(model);
+        });
+        // A line break shifts the later blocks, kept by the range of the
+        // parsed text they map to until the parse.
+        model.update(cx, |model, cx| model.edit([(3..3, "\n")], cx).unwrap());
+        model.read_with(cx, |model, _| {
+            check(model);
+            assert!(!model.skip_spans.borrow().shifted.is_empty());
+            check(model);
+        });
+        cx.run_until_parked();
+        model.read_with(cx, |model, _| {
+            assert!(model.skip_spans.borrow().shifted.is_empty());
+            check(model);
+        });
+        // A small deterministic generator for the edits.
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let insertions = [
+            "x", "(", ")", "{", "}", "[", "]", "\"", "'", "/*", "*/", "//", "\n", "\n\n", "r#\"",
+            "\"#", "\\", " ",
+        ];
+        for step in 0..120 {
+            model.update(cx, |model, cx| {
+                let rope = model.buffer().rope();
+                let len = rope.len();
+                // Near block boundaries often.
+                let at = if next(3) == 0 {
+                    let row = (next(rope.max_point().row as usize / 64 + 1) * 64) as u32;
+                    rope.point_to_offset(text::Point::new(row.min(rope.max_point().row), 0))
+                } else {
+                    next(len + 1)
+                };
+                let at = rope.clip_offset(at, text::Bias::Left);
+                let end = if next(4) == 0 {
+                    rope.clip_offset((at + next(40)).min(len), text::Bias::Right)
+                } else {
+                    at
+                };
+                let text = insertions[next(insertions.len())];
+                model.edit([(at..end, text)], cx).unwrap();
+            });
+            // While the parse lags, then once it has caught up.
+            model.read_with(cx, |model, _| check(model));
+            if step % 3 != 2 {
+                cx.run_until_parked();
+                model.read_with(cx, |model, _| check(model));
+            }
+        }
     }
 
     /// A parse starts the cache over.
