@@ -7498,7 +7498,7 @@ impl Render for CodeEditor {
                 let content = (!accessibility_off).then(|| self.screen_reader_content());
                 let announcement = self.announcement();
                 let rows = self.a11y_rows.clone();
-                let (read_only, required) = (self.options.read_only, self.options.aria_required);
+                let (read_only, required) = (aria.read_only, self.options.aria_required);
                 let active_descendant = self.aria_options.active_descendant;
                 let (role_description, auto_complete) = (aria.role_description, aria.auto_complete);
                 let editor = cx.entity().downgrade();

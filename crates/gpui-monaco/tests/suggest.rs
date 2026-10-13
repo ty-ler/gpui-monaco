@@ -2121,10 +2121,11 @@ fn suggestion_memories_per_window_unless_shared(cx: &mut TestAppContext) {
     assert_eq!(remembered(true, cx).as_deref(), Some("abb"));
 }
 
-/// Screen readers read the focused suggestion (Monaco's list aria label),
-/// and the list's messages.
+/// Screen readers hear the list's messages (Monaco `status`); the focused
+/// suggestion is read as the editor's active descendant, not alerted
+/// (#492).
 #[gpui::test]
-fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
+fn screen_readers_hear_the_suggest_messages(cx: &mut TestAppContext) {
     let (editor, cx) = setup(
         "",
         |o| o.word_based_suggestions = WordBasedSuggestions::Off,
@@ -2145,10 +2146,9 @@ fn screen_readers_hear_the_focused_suggestion(cx: &mut TestAppContext) {
     };
     cx.simulate_input("f");
     settle(cx);
-    assert_eq!(heard(cx).as_deref(), Some("fizz, Variable"));
-    assert!(!editor.read_with(cx, |e, _| e.last_announcement_is_status_for_tests()));
+    assert_eq!(heard(cx), None);
     cx.simulate_keystrokes("down");
-    assert_eq!(heard(cx).as_deref(), Some("foo, Variable"));
+    assert_eq!(heard(cx), None);
     cx.simulate_keystrokes("escape");
     // An explicit request with nothing: "No suggestions.".
     cx.simulate_input(" ");

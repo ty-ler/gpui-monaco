@@ -259,7 +259,7 @@ pub(crate) struct Session {
     item_providers: Vec<Option<usize>>,
     providers: Vec<Arc<dyn CompletionProvider>>,
     /// Items resolved.
-    resolved: Vec<bool>,
+    pub(crate) resolved: Vec<bool>,
     /// Items whose provider resolves them (Monaco's
     /// `provider.resolveCompletionItem`), known once one was asked to.
     resolvable: Vec<bool>,
@@ -310,10 +310,11 @@ pub(crate) struct SuggestState {
     overtyped: Vec<(String, bool)>,
     /// What `$SELECTION` falls back to while a suggestion is inserted.
     pub(crate) snippet_overtyped: Option<Vec<(String, bool)>>,
-    /// What screen readers last read for the widget (Monaco reads the
-    /// focused row as the list's active descendant), so it isn't read again
-    /// on every keystroke.
-    announced: Option<String>,
+    /// The widget's message screen readers last read, so it isn't read
+    /// again on every keystroke.
+    announced: Option<&'static str>,
+    /// Whether the widget's focused row is the editor's active descendant.
+    active_descendant: bool,
     /// Monaco `LineSuffix`, set on each request: what follows the cursor
     /// on its line, for the `suffixDelta` accepting adds.
     line_suffix: Option<LineSuffix>,
@@ -765,6 +766,7 @@ impl CodeEditor {
         self.suggest.explain_mode = false;
         self.suggest.details_focused = false;
         self.suggest.announced = None;
+        self.suggest.active_descendant = false;
         if let Some((_, id)) = self.suggest.widget.take() {
             self.remove_widget(id, cx);
         }
@@ -1559,33 +1561,31 @@ impl CodeEditor {
         self.announce_suggest_widget(cx);
     }
 
-    /// Has screen readers read what the suggest widget shows when it
-    /// changes: its "Loading..." or "No suggestions." status, or the focused
-    /// suggestion (Monaco's list `getAriaLabel`, read as the editor's active
-    /// descendant), with its docs once resolved while the details panel
-    /// shows.
+    /// Has screen readers read the suggest widget's "Loading..." or "No
+    /// suggestions." message when it shows (Monaco `status`), and notes
+    /// whether its focused row is the editor's active descendant: the
+    /// focused suggestion is read that way, not announced.
     fn announce_suggest_widget(&mut self, cx: &mut Context<Self>) {
         let Some((widget, _)) = &self.suggest.widget else {
             return;
         };
-        let resolved = self.suggest.session.as_ref().is_some_and(|session| {
-            session
-                .model
-                .filtered()
-                .get(session.selected)
-                .is_some_and(|scored| session.resolved[scored.index])
-        });
-        let Some((text, status)) = widget.read(cx).announcement(resolved, cx) else {
-            return;
-        };
-        if self.suggest.announced.as_ref() != Some(&text) {
-            if status {
-                self.announce_status(text.clone(), cx);
-            } else {
-                self.announce(text.clone(), cx);
-            }
-            self.suggest.announced = Some(text);
+        let widget = widget.read(cx);
+        let text = widget.announcement();
+        self.suggest.active_descendant = widget.has_active_descendant();
+        if let Some(text) = text
+            && self.suggest.announced != Some(text)
+        {
+            self.announce_status(text, cx);
         }
+        self.suggest.announced = text;
+    }
+
+    /// Whether the suggest widget's focused row is the editor's active
+    /// descendant (Monaco's suggest widget `setAriaOptions({
+    /// activeDescendant })`), which makes the editor's `aria-autocomplete`
+    /// "list".
+    pub(crate) fn suggest_has_active_descendant(&self) -> bool {
+        self.suggest.active_descendant
     }
 
     /// Shows or hides the details panel (Monaco `toggleSuggestionDetails`,

@@ -1,8 +1,8 @@
 //! What the editor and its widgets tell screen readers (#413): Monaco's
 //! roles, `aria-label`s and ARIA states on the find widget, the rename and
 //! quick inputs, the context and code action menus, the references tree
-//! and the sticky scroll, and the editor's `aria-roledescription` and
-//! `aria-autocomplete`. GPUI's test platform builds no accessibility tree,
+//! the sticky scroll and the suggest list, and the editor's
+//! `aria-roledescription`, `aria-autocomplete` and read-only state. GPUI's test platform builds no accessibility tree,
 //! so the tests read the nodes the widgets rendered.
 
 use std::ops::Range;
@@ -114,6 +114,18 @@ fn the_editor_is_an_editor_with_completions(cx: &mut TestAppContext) {
     let aria = editor.read_with(cx, |e, _| e.aria_for_tests());
     assert_eq!(aria.auto_complete, None);
     assert_eq!(aria.role_description.as_deref(), Some("editor"));
+    // Monaco `_ensureReadOnlyAttribute`: a read-only editor is still an
+    // editable text box to screen readers, unless `domReadOnly` is on too
+    // (#492).
+    assert!(!aria.read_only);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.dom_read_only = true, cx)
+    });
+    assert!(editor.read_with(cx, |e, _| e.aria_for_tests().read_only));
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.read_only = false, cx)
+    });
+    assert!(!editor.read_with(cx, |e, _| e.aria_for_tests().read_only));
 }
 
 /// Monaco's find widget: a "Find / Replace" dialog, "Find" and "Replace"
@@ -445,4 +457,102 @@ fn sticky_lines_are_a_list(cx: &mut TestAppContext) {
         labels(&found, Role::ListItem),
         ["fn main() {", "    if true {"]
     );
+}
+
+/// Items whose docs arrive from a 300ms resolve.
+struct DocsOnResolve;
+
+impl CompletionProvider for DocsOnResolve {
+    fn provide_completions(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: CompletionTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<CompletionList>> {
+        Task::ready(Ok(CompletionList {
+            items: ["alpha", "beta"]
+                .into_iter()
+                .map(|label| CompletionItem::new(label, CompletionItemKind::Function))
+                .collect(),
+            incomplete: false,
+        }))
+    }
+
+    fn resolve_completion_item(
+        &self,
+        item: &CompletionItem,
+        cx: &mut App,
+    ) -> Option<Task<anyhow::Result<CompletionItem>>> {
+        let item = item.clone();
+        let timer = cx
+            .background_executor()
+            .timer(std::time::Duration::from_millis(300));
+        Some(cx.background_executor().spawn(async move {
+            timer.await;
+            Ok(CompletionItem {
+                documentation: Some(format!("Docs for {}.", item.label).into()),
+                ..item
+            })
+        }))
+    }
+}
+
+/// Monaco's suggest list: a "Suggest" listbox of options named by
+/// `getAriaLabel`; the focused one is the editor's active descendant once
+/// it resolves (making the editor's `aria-autocomplete` "list"), not an
+/// alert (#492).
+#[gpui::test]
+fn the_suggest_list_is_a_listbox(cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        register_completion_provider(cx, LanguageSelector::All, DocsOnResolve);
+    });
+    let (editor, cx) = setup("", cx);
+    let auto_complete =
+        |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.aria_for_tests().auto_complete);
+    cx.simulate_keystrokes("ctrl-space");
+    let found = nodes(cx);
+    find(&found, Role::ListBox, "Suggest");
+    let option_role = if cfg!(windows) {
+        Role::ListItem
+    } else {
+        Role::ListBoxOption
+    };
+    assert_eq!(
+        labels(&found, option_role),
+        ["alpha, Function", "beta, Function"]
+    );
+    assert_eq!(find(&found, option_role, "alpha").selected, Some(true));
+    assert_eq!(find(&found, option_role, "beta").selected, Some(false));
+    // Not until it resolves (Monaco `_onListFocus`).
+    assert!(active(&found).is_empty());
+    assert_eq!(auto_complete(cx), Some(AutoComplete::Both));
+
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    assert_eq!(active(&nodes(cx)), ["alpha, Function"]);
+    assert_eq!(auto_complete(cx), Some(AutoComplete::List));
+    // The focused row isn't alerted.
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.last_announcement_for_tests()),
+        None
+    );
+
+    // With the details panel, a resolved row reads its docs.
+    cx.simulate_keystrokes("ctrl-space");
+    assert_eq!(
+        active(&nodes(cx)),
+        ["alpha, Function, docs: Docs for alpha."]
+    );
+    cx.simulate_keystrokes("down");
+    assert!(active(&nodes(cx)).is_empty());
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    assert_eq!(active(&nodes(cx)), ["beta, Function, docs: Docs for beta."]);
+
+    cx.simulate_keystrokes("escape");
+    draw(cx);
+    assert_eq!(auto_complete(cx), Some(AutoComplete::Both));
+    assert!(labels(&nodes(cx), Role::ListBox).is_empty());
 }

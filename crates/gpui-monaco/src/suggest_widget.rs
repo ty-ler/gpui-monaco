@@ -20,11 +20,12 @@ use std::time::Duration;
 use gpui::{
     App, AppContext as _, AvailableSpace, Bounds, Context, DragMoveEvent, FontWeight, Global,
     HighlightStyle, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels,
-    Render, SharedString, Size, StatefulInteractiveElement, Styled, StyledText, Task, WeakEntity,
-    Window, div, point, px, rgb, size,
+    Render, Role, SharedString, Size, StatefulInteractiveElement, Styled, StyledText, Task,
+    WeakEntity, Window, div, point, px, rgb, size,
 };
 use web_time::Instant;
 
+use crate::accessibility::AriaNode;
 use crate::codicons::{Codicon, icon as codicon};
 use crate::completion::Session;
 use crate::editor::CodeEditor;
@@ -85,6 +86,15 @@ pub(crate) enum DetailsScroll {
     Bottom,
 }
 
+/// Monaco's suggest list `getWidgetAriaLabel`.
+const LIST_ARIA_LABEL: &str = "Suggest";
+/// Monaco's suggest list `getRole`: `listitem` on Windows, else `option`.
+const ROW_ROLE: Role = if cfg!(windows) {
+    Role::ListItem
+} else {
+    Role::ListBoxOption
+};
+
 /// The message shown while an explicit request is computing.
 pub const LOADING_MESSAGE: &str = "Loading...";
 /// The message shown when an explicit request found nothing.
@@ -96,6 +106,10 @@ pub const DETAILS_LOADING_MESSAGE: &str = "Loading...";
 /// What the widget shows; rebuilt from the session on each change.
 pub struct SuggestWidgetState {
     rows: Vec<(CompletionItem, Vec<Range<usize>>)>,
+    /// Whether each row's item has resolved (Monaco `isResolved`): its
+    /// label reads its docs while the details panel shows, and the focused
+    /// row becomes the editor's active descendant.
+    resolved: Vec<bool>,
     selected: usize,
     /// Whether `selected` is focused (`suggest.selection_mode` may show
     /// the list without a focused row).
@@ -141,9 +155,16 @@ impl SuggestWidgetState {
                 )
             })
             .collect();
+        let resolved = session
+            .model
+            .filtered()
+            .iter()
+            .map(|scored| session.resolved[scored.index])
+            .collect();
         let (resolving, details_loading) = session.focused_resolving();
         Self {
             rows,
+            resolved,
             selected: session.selected,
             focused: session.focused,
             explanation: None,
@@ -161,6 +182,7 @@ impl SuggestWidgetState {
     pub(crate) fn message(message: &'static str) -> Self {
         Self {
             rows: Vec::new(),
+            resolved: Vec::new(),
             selected: 0,
             focused: false,
             explanation: None,
@@ -191,6 +213,17 @@ impl SuggestWidgetState {
         self.focused
             .then(|| self.rows.get(self.selected).map(|(item, _)| item))
             .flatten()
+    }
+
+    fn is_resolved(&self, ix: usize) -> bool {
+        self.resolved.get(ix).copied().unwrap_or(false)
+    }
+
+    /// Whether the focused row is the editor's active descendant: Monaco
+    /// `_onListFocus` points the textarea's `aria-activedescendant` at it
+    /// once its item resolves, and clears it while no row is focused.
+    pub(crate) fn has_active_descendant(&self) -> bool {
+        self.message.is_none() && self.focused_item().is_some() && self.is_resolved(self.selected)
     }
 }
 
@@ -1052,16 +1085,16 @@ impl SuggestWidget {
         self.force_above
     }
 
-    /// What screen readers read for the widget, and whether it's a polite
-    /// status: its message (Monaco `status`), or the focused suggestion's
-    /// [`aria_label`] (with docs when `resolved` and the details panel
-    /// shows).
-    pub(crate) fn announcement(&self, resolved: bool, cx: &App) -> Option<(String, bool)> {
-        if let Some(message) = self.state.message {
-            return Some((message.to_string(), true));
-        }
-        let item = self.state.focused_item()?;
-        Some((aria_label(item, resolved && self.details_shown(cx)), false))
+    /// What screen readers read for the widget: its "Loading..." or "No
+    /// suggestions." message (Monaco `status`). The focused suggestion is
+    /// read as the editor's active descendant instead.
+    pub(crate) fn announcement(&self) -> Option<&'static str> {
+        self.state.message
+    }
+
+    /// Whether the focused row is the editor's active descendant.
+    pub(crate) fn has_active_descendant(&self) -> bool {
+        self.state.has_active_descendant()
     }
 
     /// Scrolls the details panel (Monaco `SuggestDetailsWidget`'s scroll
@@ -1480,6 +1513,7 @@ impl SuggestWidget {
         let colors = &self.theme.colors;
         let (item, highlights) = &self.state.rows[ix];
         let is_selected = self.state.focused && ix == self.state.selected;
+        let resolved = self.state.is_resolved(ix);
         let item_height = self.metrics.item_height;
         let label: SharedString = item.label.clone();
         // Monaco strikes deprecated items through, dimmed, without match
@@ -1571,8 +1605,13 @@ impl SuggestWidget {
         );
         let editor = self.editor.clone();
         let editor_for_more = self.editor.clone();
-        div()
-            .id(("suggestion", ix))
+        // Monaco's list rows: `option`s (`listitem`s on Windows) named by
+        // `getAriaLabel`, the focused one the editor's active descendant
+        // once it resolves.
+        AriaNode::new(ROW_ROLE, aria_label(item, resolved && show_details))
+            .selected(is_selected)
+            .active_descendant(is_selected && resolved)
+            .apply(div().id(("suggestion", ix)))
             .group("suggest-row")
             .h(item_height)
             .pl(px(2.))
@@ -2257,8 +2296,9 @@ impl Render for SuggestWidget {
             .flex()
             .flex_col()
             .child(
-                div()
-                    .id("suggest-rows")
+                // Monaco's list: a `listbox` named "Suggest".
+                AriaNode::new(Role::ListBox, LIST_ARIA_LABEL)
+                    .apply(div().id("suggest-rows"))
                     .relative()
                     .flex_1()
                     .overflow_hidden()

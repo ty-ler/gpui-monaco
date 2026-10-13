@@ -1924,6 +1924,11 @@ pub struct EditorOptions {
     /// read-only editor. `None` shows "Cannot edit in read-only editor"
     /// ("input" for single-line editors).
     pub read_only_message: Option<SharedString>,
+    /// Monaco `domReadOnly`: report a read-only editor to screen readers
+    /// as read-only (Monaco's textarea `readonly` attribute). Off by
+    /// default, so a read-only editor reads as an editable text box, as in
+    /// Monaco.
+    pub dom_read_only: bool,
     /// Monaco `placeholder`: shown while the model is empty.
     pub placeholder: Option<SharedString>,
     /// Monaco `unusualLineTerminators`: remove LS and PS characters
@@ -2323,6 +2328,7 @@ impl Default for EditorOptions {
             allow_variable_fonts_in_accessibility_mode: false,
             read_only: false,
             read_only_message: None,
+            dom_read_only: false,
             placeholder: None,
             unusual_line_terminators: UnusualLineTerminators::Prompt,
             unicode_highlight: UnicodeHighlightOptions::default(),
