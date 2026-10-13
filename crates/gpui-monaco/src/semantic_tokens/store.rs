@@ -797,7 +797,12 @@ impl SparseMultilineTokens {
 pub(crate) struct SparseTokensStore {
     pieces: Vec<SparseMultilineTokens>,
     is_complete: bool,
+    /// Which tokens were set last (see [`Self::id`]).
+    id: u64,
 }
+
+/// The next [`SparseTokensStore::id`].
+static NEXT_STORE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 impl SparseTokensStore {
     /// An empty, incomplete store.
@@ -811,6 +816,19 @@ impl SparseTokensStore {
     pub(crate) fn clear(&mut self) {
         self.pieces.clear();
         self.is_complete = false;
+        self.renew_id();
+    }
+
+    /// Identifies the tokens last set: new (never seen before) after each
+    /// [`Self::set`], [`Self::set_partial`] or [`Self::clear`], 0 for a new
+    /// store, and kept by edits (which move the tokens with the text). For
+    /// views drawn ahead of time (the minimap) to see when to redraw.
+    pub(crate) fn id(&self) -> u64 {
+        self.id
+    }
+
+    fn renew_id(&mut self) {
+        self.id = NEXT_STORE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Whether the store has no pieces.
@@ -829,6 +847,7 @@ impl SparseTokensStore {
     pub(crate) fn set(&mut self, pieces: Option<Vec<SparseMultilineTokens>>, is_complete: bool) {
         self.pieces = pieces.unwrap_or_default();
         self.is_complete = is_complete;
+        self.renew_id();
     }
 
     /// Replaces the tokens in `range` (extended to cover `pieces`) with
@@ -839,6 +858,7 @@ impl SparseTokensStore {
         range: Range<PointUtf16>,
         pieces: Vec<SparseMultilineTokens>,
     ) -> Range<PointUtf16> {
+        self.renew_id();
         let mut line_range = LineRange::from_points(&range);
         if let (Some(first), Some(last)) = (pieces.first(), pieces.last()) {
             let (Some(first_range), Some(last_range)) = (first.line_range(), last.line_range())

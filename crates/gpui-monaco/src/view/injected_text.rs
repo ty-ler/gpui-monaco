@@ -61,7 +61,7 @@ pub struct Injection {
 
 /// Text injected into a model line (Monaco `LineInjectedText`): a
 /// decoration's `before` or `after` text, as the view lines see it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LineInjectedText {
     /// The UTF-16 column of the model line it's injected at.
     pub column: u32,
@@ -69,6 +69,10 @@ pub struct LineInjectedText {
     pub content: SharedString,
     /// Where the cursor may stop around it.
     pub cursor_stops: InjectedTextCursorStops,
+    /// Token styles over parts of the text (Monaco's injected text
+    /// `tokens`, which the minimap draws it in), as in
+    /// [`InjectedText::tokens`](crate::InjectedText::tokens).
+    pub tokens: Option<crate::decorations::InjectedTextTokens>,
 }
 
 impl LineInjectedText {
@@ -819,6 +823,7 @@ mod tests {
             column,
             content: content.to_string().into(),
             cursor_stops: InjectedTextCursorStops::Both,
+            tokens: None,
         };
         assert_eq!(
             LineInjectedText::apply("just some text", &[text(7, "bar"), text(7, "bz")]),

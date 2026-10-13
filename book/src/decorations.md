@@ -125,7 +125,7 @@ Overview ruler and minimap colors are `DecorationColor`s: a resolved `Hsla` (`.i
 
 `before` and `after` (`InjectedText`) show text at the range's start and end that isn't part of the model. On an empty range they show only with `show_if_collapsed`, as in Monaco.
 
-- `style` colors the text, and `tokens` styles parts of it (Monaco's internal `tokens`, as ghost text uses), by byte ranges of `content`.
+- `style` colors the text, and `tokens` styles parts of it (Monaco's internal `tokens`, as ghost text uses), by byte ranges of `content`. The minimap shows the text too, as Monaco's does, in its `tokens` colors or the default text color.
 - `font_family`, `font_size`, `background`, `swatch` and `text_box` (margins, padding and corners) shape and box it, as inlay hints and color decorators do.
 - `attached_data` (`AttachedData`) is the host's data, read back from the mouse target over the text (`MouseTarget::injected_text`) and from `injected_text_decorations`.
 - `cursor_stops` (`InjectedTextCursorStops`, Monaco `cursorStops`) says where the cursor may show around the text. The cursor never stops inside it: its model position is the same on both sides. From the model (typing, `set_selections`) the cursor shows before the text. Moving onto the text with Left, Right, Down, End or a click puts the cursor after it with `Both` or `Right`, and before it with `Left` or `None`; Up puts it before it. A click on the text goes to its nearer side the stops allow. Inlay hints stop only after the hint, and inline suggestions only before.

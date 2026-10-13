@@ -492,14 +492,49 @@ impl CodeEditor {
         range: Range<usize>,
         cx: &App,
     ) -> Vec<(Range<usize>, TokenStyle)> {
-        if self.semantic.store.is_empty() || !self.semantic_highlighting_enabled() {
+        if self.semantic_tokens_key() == 0 {
             return highlights;
         }
-        let rope = self.model().read(cx).buffer().rope().clone();
+        let rope = self.model().read(cx).buffer().rope();
         let first = rope.offset_to_point_utf16(range.start).row;
         let last = rope.offset_to_point_utf16(range.end).row;
+        let spans = self.semantic_spans(first..=last, cx);
+        if spans.is_empty() {
+            return highlights;
+        }
+        merge_styles(&highlights, &spans)
+    }
+
+    /// Identifies the semantic tokens coloring the text: 0 when none do
+    /// (none set, or semantic highlighting off), else a new value each
+    /// time they're set. Views drawn ahead (the minimap) redraw when it
+    /// changes.
+    pub(crate) fn semantic_tokens_key(&self) -> u64 {
+        if self.semantic.store.is_empty() || !self.semantic_highlighting_enabled() {
+            0
+        } else {
+            self.semantic.store.id()
+        }
+    }
+
+    /// The semantic token styles on `rows` (ascending), by byte range of
+    /// the current text, in order; empty when semantic tokens don't color
+    /// the text (see [`CodeEditor::semantic_tokens_key`]).
+    pub(crate) fn semantic_spans(
+        &self,
+        rows: impl IntoIterator<Item = u32>,
+        cx: &App,
+    ) -> Vec<(Range<usize>, SemanticStyle)> {
         let mut spans: Vec<(Range<usize>, SemanticStyle)> = Vec::new();
-        for row in first..=last {
+        if self.semantic_tokens_key() == 0 {
+            return spans;
+        }
+        let rope = self.model().read(cx).buffer().rope();
+        let max_row = rope.max_point().row;
+        for row in rows {
+            if row > max_row {
+                break;
+            }
             let line_len = rope.line_len_utf16(row);
             for (start, end, style) in self.semantic.store.line_tokens(row) {
                 let Some(style) = self.semantic.styles.get(style as usize) else {
@@ -516,10 +551,7 @@ impl CodeEditor {
                 ));
             }
         }
-        if spans.is_empty() {
-            return highlights;
-        }
-        merge_styles(&highlights, &spans)
+        spans
     }
 
     /// The semantic tokens of `row` as (UTF-16 columns, style), for tests.
@@ -561,7 +593,7 @@ fn apply_semantic_edits(
 
 /// Overlays `top` (sorted, non-overlapping) on `base`: where a semantic
 /// token is, its set properties override the syntax style.
-fn merge_styles(
+pub(crate) fn merge_styles(
     base: &[(Range<usize>, TokenStyle)],
     top: &[(Range<usize>, SemanticStyle)],
 ) -> Vec<(Range<usize>, TokenStyle)> {

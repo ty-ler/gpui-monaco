@@ -5042,6 +5042,7 @@ impl CodeEditor {
                 column: 0,
                 content: text.content.clone(),
                 cursor_stops: text.cursor_stops,
+                tokens: text.tokens.clone(),
             };
             if let Some(before) = options.before.as_ref().filter(|t| !t.content.is_empty()) {
                 let at = to_point(d.range.start);

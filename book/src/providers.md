@@ -411,7 +411,7 @@ Themes style the tokens:
 - VS Code themes through `semanticTokenColors`, else their TextMate rules, using VS Code's default scope for each token type.
 - Monaco-style themes match `type.modifier` against their rules.
 
-Only the properties a style sets override the syntax highlighting. Semantic coloring is on when `semantic_highlighting` says so: `ConfiguredByTheme` (the default) follows the theme's `semanticHighlighting`, which Monaco's built-in themes leave off.
+Only the properties a style sets override the syntax highlighting, on the text, sticky scroll lines and the minimap alike. Semantic coloring is on when `semantic_highlighting` says so: `ConfiguredByTheme` (the default) follows the theme's `semanticHighlighting`, which Monaco's built-in themes leave off.
 
 ## Links
 

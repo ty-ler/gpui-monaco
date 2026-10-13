@@ -717,3 +717,117 @@ fn autohide_scroll_follows_the_scroll_top_and_height(cx: &mut TestAppContext) {
     });
     assert!(shown(cx));
 }
+
+// ----- #484: injected text -----
+
+/// Adds `before` content `text` at `column` in row 1.
+fn inject(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext, column: u32, text: &str) {
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |model, cx| {
+            let at = model.buffer().rope().point_to_offset(Point::new(1, column));
+            model.delta_decorations(
+                None,
+                &[],
+                vec![(
+                    at..at,
+                    DecorationOptions {
+                        before: Some(gpui_monaco::InjectedText {
+                            content: text.to_string().into(),
+                            ..Default::default()
+                        }),
+                        show_if_collapsed: true,
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            );
+        })
+    });
+    paint(cx);
+}
+
+/// Monaco's minimap draws view lines, whose content has the injected text
+/// (inlay hints, `before`/`after` content) in the default token color and
+/// shifts the rest of the line: the same pixels as the text typed in.
+#[gpui::test]
+fn minimap_lines_show_injected_text(cx: &mut TestAppContext) {
+    let typed = {
+        let (editor, cx) = setup("fn a() {\n    call(hint: value);\n}\n", |_| {}, cx);
+        editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests())
+    };
+    let (editor, cx) = setup("fn a() {\n    call(value);\n}\n", |_| {}, cx);
+    let bare = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    assert_ne!(bare, typed);
+    // Added after the tile was drawn: the line is drawn again.
+    inject(&editor, cx, 9, "hint: ");
+    let injected = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    assert_eq!(injected, typed);
+}
+
+/// Wrapped, the injected text wraps with the line and each view line shows
+/// its part, as typed text would.
+#[gpui::test]
+fn minimap_lines_wrap_injected_text(cx: &mut TestAppContext) {
+    let wrap = |o: &mut EditorOptions| {
+        o.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+        o.word_wrap_column = 20;
+    };
+    let typed = {
+        let (editor, cx) = setup(
+            "fn a() {\n    call(first, second, third, fourth);\n}\n",
+            wrap,
+            cx,
+        );
+        editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests())
+    };
+    let (editor, cx) = setup("fn a() {\n    call(first, third, fourth);\n}\n", wrap, cx);
+    inject(&editor, cx, 16, "second, ");
+    let injected = editor.read_with(cx, |e, _| e.minimap_tile_pixels_for_tests());
+    assert_eq!(injected, typed);
+}
+
+/// Injected text with its own `tokens` is drawn in their colors
+/// (`getLineTokensWithInjections`).
+#[gpui::test]
+fn minimap_injected_text_uses_its_tokens(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("fn a() {\n    call(value);\n}\n", |_| {}, cx);
+    let red = gpui::hsla(0., 1., 0.5, 1.);
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |model, cx| {
+            let at = model.buffer().rope().point_to_offset(Point::new(1, 9));
+            model.delta_decorations(
+                None,
+                &[],
+                vec![(
+                    at..at,
+                    DecorationOptions {
+                        after: Some(gpui_monaco::InjectedText {
+                            content: "hint: ".into(),
+                            tokens: Some(std::sync::Arc::from([(
+                                0..4,
+                                gpui_monaco::TokenStyle {
+                                    foreground: Some(red),
+                                    ..Default::default()
+                                },
+                            )])),
+                            ..Default::default()
+                        }),
+                        show_if_collapsed: true,
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            );
+        })
+    });
+    paint(cx);
+    let red_pixel = editor.read_with(cx, |e, _| {
+        e.minimap_tile_pixels_for_tests().iter().any(|(_, pixels)| {
+            pixels.as_chunks::<4>().0.iter().any(|p| {
+                let (b, g, r) = (i32::from(p[0]), i32::from(p[1]), i32::from(p[2]));
+                r > g + 40 && r > b + 40
+            })
+        })
+    });
+    assert!(red_pixel);
+}
