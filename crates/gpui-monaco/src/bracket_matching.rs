@@ -37,7 +37,8 @@ impl CodeEditor {
         let rope = self.snapshot.rope();
         // Strings and comments, queried a block of rows at a time: the search
         // can visit hundreds of brackets, and one query per bracket is slow.
-        const BLOCK_ROWS: u32 = 64;
+        // The model keeps the blocks' tokens until the syntax changes.
+        const BLOCK_ROWS: u32 = crate::model::SKIP_BLOCK_ROWS;
         let blocks: RefCell<HashMap<u32, Vec<Range<usize>>>> = Default::default();
         let skippable = |p: PointUtf16| {
             let block = p.row / BLOCK_ROWS;
@@ -51,7 +52,7 @@ impl CodeEditor {
                 } else {
                     rope.point_to_offset(Point::new(end_row, 0))
                 };
-                model.string_and_comment_ranges(start..end)
+                model.bracket_skip_ranges(start..end)
             });
             if ranges.is_empty() {
                 // Nothing to skip (e.g. plain text): no need to find the

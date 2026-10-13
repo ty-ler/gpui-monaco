@@ -262,9 +262,9 @@ enum Window {
     Tail,
 }
 
-/// [`found_in`] for `window`, with how many columns it scanned. Looks the
-/// row's length up once: the scans visit many rows, and each lookup seeks
-/// the rope.
+/// [`found_in`] for `window`, with how many columns it scanned. Reads the
+/// row once ([`CursorModel::line_units_in`]): the scans visit many rows,
+/// and each lookup seeks the rope.
 fn scan_row(
     model: &dyn CursorModel,
     brackets: &Brackets,
@@ -272,12 +272,11 @@ fn scan_row(
     window: Window,
     skip: &dyn Fn(Position) -> bool,
 ) -> (Vec<Found>, u32) {
-    let max = model.line_max_column(row);
-    let (from, to) = match window {
-        Window::Columns(columns) => (columns.start.min(max), columns.end.min(max)),
-        Window::Tail => (max.saturating_sub(WINDOW), max),
-    };
-    let units: Vec<u16> = model.line_slice(row, from..to).encode_utf16().collect();
+    let (units, columns) = model.line_units_in(row, &|max| match &window {
+        Window::Columns(columns) => columns.clone(),
+        Window::Tail => max.saturating_sub(WINDOW)..max,
+    });
+    let (from, to) = (columns.start, columns.end);
     let mut found = brackets.in_line(&units, &|i| skip(Position::new(row, from + i)));
     for f in &mut found {
         f.start += from;

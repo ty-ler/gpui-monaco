@@ -97,7 +97,7 @@ Each of these was a measured hot spot on large files:
   - Sticky scroll walks fold-range parents instead of scanning every range.
   - The fold gutter uses a binary search.
   - The minimap walks highlights with a cursor and rebuilds in the background; after an edit it draws only the changed lines and keeps the rest of its tiles' pixels.
-  - Bracket matching queries strings and comments a block of rows at a time.
+  - Bracket matching queries strings and comments a block of rows at a time, and the model keeps each block's until the next parse, so cursor moves and keystrokes between parses reuse them (a block that an inserted or removed line break has shifted is queried again until then). It reads each scanned row with one seek, and the rows too long to tokenize are found in one pass over the short rows' text (a long row is measured with a seek and skipped, not read), not with seeks per row.
   - Typing within a line updates only the edited rows' view-line counts.
   - `ViewLines` and `Buffer` are shared, not cloned, each frame.
 - **Per-keystroke work on a line scales with the columns it needs, not the line.** On a long line (minified code), fetching the whole line as a `String`, or encoding it to UTF-16, on every keystroke is most of the cost. `Rope::line_units_utf16` reads only the UTF-16 columns asked for, so ghost text and the suggest preview (`LineSource`), the minimap's decoration offsets (`ViewLines::line_content_prefix`, up to the minimap's width) and indent guides (leading whitespace only) read just that. Bracket matching skips the position-to-offset lookup when a block has no strings or comments, and checks a bracket's first code unit before comparing it.
