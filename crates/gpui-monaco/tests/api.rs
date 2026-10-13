@@ -68,6 +68,38 @@ fn model_helpers(cx: &mut TestAppContext) {
     });
 }
 
+/// Monaco `getWordAtText` on a line longer than its `maxLen` (1000): only
+/// 500 units each side of the 1-based column are searched, so a longer
+/// word is cut to that window.
+#[gpui::test]
+fn word_at_position_on_a_long_line(cx: &mut TestAppContext) {
+    let text = format!(
+        "{} foo {}\n{}",
+        "a".repeat(600),
+        "b".repeat(2000),
+        "x".repeat(3000)
+    );
+    let model = cx.new(|_| TextModel::new(&text));
+    model.read_with(cx, |m, _| {
+        let word = |position| {
+            m.word_at_position(position)
+                .map(|word| (word.word.len(), word.range))
+        };
+        let foo = m.word_at_position(p(0, 603)).unwrap();
+        assert_eq!(
+            (foo.word.as_str(), foo.range),
+            ("foo", p(0, 601)..p(0, 604))
+        );
+        // The `a`s from column 100 (1-based 600 minus 500) on.
+        assert_eq!(word(p(0, 599)), Some((500, p(0, 100)..p(0, 600))));
+        // Column 1500 (1-based 1501): units 1001 up to 2001.
+        assert_eq!(word(p(1, 1500)), Some((1000, p(1, 1001)..p(1, 2001))));
+        // Near the start: up to 500 units past the column.
+        assert_eq!(word(p(1, 10)), Some((511, p(1, 0)..p(1, 511))));
+        assert_eq!(word(p(1, 3000)), Some((499, p(1, 2501)..p(1, 3000))));
+    });
+}
+
 #[gpui::test]
 fn reveal_and_visible_ranges(cx: &mut TestAppContext) {
     let text: Vec<String> = (0..500).map(|i| format!("line {i}")).collect();

@@ -456,6 +456,14 @@ fn leading_whitespace(line: &str) -> &str {
     &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
 }
 
+/// Whether `row`'s leading whitespace is `expected`, reading only as much
+/// of the row as that takes (not a whole long line).
+fn row_has_leading_whitespace(rope: &text::Rope, row: u32, expected: &str) -> bool {
+    let start = rope.point_to_offset(text::Point::new(row, 0));
+    let mut chars = rope.chars_at(start);
+    expected.chars().all(|c| chars.next() == Some(c)) && !matches!(chars.next(), Some(' ' | '\t'))
+}
+
 impl CodeEditor {
     /// Whether the suggest widget is showing.
     pub fn is_suggest_visible(&self) -> bool {
@@ -731,18 +739,13 @@ impl CodeEditor {
     }
 
     fn line_context_at(&self, position: PointUtf16, session_column: u32) -> LineContext {
-        let line = self.snapshot.line(position.row);
-        let mut leading = String::new();
-        let mut column = 0u32;
-        for ch in line.chars() {
-            if column >= position.column {
-                break;
-            }
-            leading.push(ch);
-            column += ch.len_utf16() as u32;
-        }
+        // The row up to `position`, a char split by it included (not the
+        // rest of a long line).
+        let rope = self.snapshot.rope();
+        let start = rope.point_to_offset(text::Point::new(position.row, 0));
+        let end = rope.point_utf16_to_offset(rope.clip_point_utf16(position, text::Bias::Right));
         LineContext {
-            leading_line_content: leading,
+            leading_line_content: rope.text_for_range(start..end.max(start)),
             character_count_delta: position.column.saturating_sub(session_column) as usize,
         }
     }
@@ -1916,9 +1919,12 @@ impl CodeEditor {
         let Some(session) = &self.suggest.session else {
             return;
         };
-        let line = self.snapshot.line(head.row);
         if head.row != session.position.row
-            || leading_whitespace(&line) != session.leading_whitespace
+            || !row_has_leading_whitespace(
+                self.snapshot.rope(),
+                head.row,
+                &session.leading_whitespace,
+            )
         {
             // Another line (Enter), or the word was outdented.
             self.hide_suggest(cx);

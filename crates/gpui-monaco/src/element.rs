@@ -596,10 +596,81 @@ pub(crate) fn grapheme_containing(text: &str, offset: usize) -> Option<Range<usi
     Some(start..end)
 }
 
-/// Long lines are shaped in chunks this big (bytes, ending at a
-/// delimiter): an edit reshapes its chunk, and GPUI's layout cache keeps
+/// Lines longer than this (bytes) are shaped in chunks ending at
+/// delimiters: an edit reshapes its chunk, and GPUI's layout cache keeps
 /// the others.
-const SHAPE_CHUNK: usize = 512;
+const SHAPE_WHOLE_MAX: usize = 1024;
+
+/// The shortest chunk (bytes, before its closing delimiter).
+const SHAPE_CHUNK_MIN: usize = 128;
+
+/// About one byte in this many, past [`SHAPE_CHUNK_MIN`], picks a cut.
+const SHAPE_CHUNK_PICK: usize = 128;
+
+/// The longest run (bytes) without a picked cut before one is forced at
+/// the next delimiter.
+const SHAPE_CHUNK_MAX: usize = 512;
+
+/// Random values per byte for [`shape_chunk_bounds`]' rolling (gear) hash.
+const GEAR: [u64; 256] = {
+    let mut table = [0u64; 256];
+    let mut state = 0x9e37_79b9_7f4a_7c15u64;
+    let mut ix = 0;
+    while ix < 256 {
+        // splitmix64
+        state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+        let mut z = state;
+        z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+        table[ix] = z ^ (z >> 31);
+        ix += 1;
+    }
+    table
+};
+
+/// Where a long line's text is cut into chunks to shape (byte offsets,
+/// from 0 to `display.len()`), each cut just after a delimiter.
+///
+/// The cuts are content-defined: past [`SHAPE_CHUNK_MIN`] bytes, a byte
+/// is picked (about one in [`SHAPE_CHUNK_PICK`]) by a hash of the 64
+/// bytes ending at it, and the cut goes after the first delimiter from
+/// there. A picked byte depends only on the text just before it, not on
+/// where the previous cut fell, so after an edit the cuts fall back into
+/// step within a chunk or two: the chunks after those come back with the
+/// same text, and GPUI's layout cache keeps them. A run with no picked
+/// byte for [`SHAPE_CHUNK_MAX`] bytes is cut at the next delimiter.
+fn shape_chunk_bounds(display: &str) -> Vec<usize> {
+    let mut bounds = vec![0];
+    let len = display.len();
+    if len > SHAPE_WHOLE_MAX {
+        let is_delimiter = |b: u8| matches!(b, b' ' | b';' | b',' | b'}' | b')' | b'>');
+        // The top bits of the gear hash, all clear about one byte in
+        // `SHAPE_CHUNK_PICK`.
+        let mask = !(u64::MAX >> SHAPE_CHUNK_PICK.trailing_zeros());
+        let bytes = display.as_bytes();
+        let mut hash = 0u64;
+        let mut last = 0;
+        // Whether the next delimiter cuts.
+        let mut armed = false;
+        for (ix, &b) in bytes.iter().enumerate() {
+            hash = (hash << 1).wrapping_add(GEAR[b as usize]);
+            let size = ix + 1 - last;
+            if size >= SHAPE_CHUNK_MIN && hash & mask == 0 || size >= SHAPE_CHUNK_MAX {
+                armed = true;
+            }
+            if armed && is_delimiter(b) {
+                armed = false;
+                let end = ix + 1;
+                if end < len {
+                    bounds.push(end);
+                    last = end;
+                }
+            }
+        }
+    }
+    bounds.push(len);
+    bounds
+}
 
 /// A line's text shaped in chunks laid end to end (one chunk for most
 /// lines), with [`ShapedLine`]'s API in display byte offsets.
@@ -640,25 +711,7 @@ impl ChunkedLine {
         runs: &[TextRun],
         window: &mut Window,
     ) -> Self {
-        let mut bounds = vec![0];
-        if display.len() > SHAPE_CHUNK * 2 {
-            // Content-defined: the first delimiter after `SHAPE_CHUNK`
-            // bytes, so chunks after an edit come back unchanged.
-            let bytes = display.as_bytes();
-            let mut at = SHAPE_CHUNK;
-            while at < display.len() {
-                let end = bytes[at..]
-                    .iter()
-                    .position(|b| matches!(b, b' ' | b';' | b',' | b'}' | b')' | b'>'))
-                    .map_or(display.len(), |i| at + i + 1);
-                if end >= display.len() {
-                    break;
-                }
-                bounds.push(end);
-                at = end + SHAPE_CHUNK;
-            }
-        }
-        bounds.push(display.len());
+        let mut bounds = shape_chunk_bounds(&display);
         if !boxes.is_empty() {
             for shape_box in boxes {
                 bounds.extend([shape_box.range.start, shape_box.range.end]);
@@ -1453,6 +1506,24 @@ pub(crate) fn layout_segment<'a>(
 /// The byte offset in `line` (a row's text) of UTF-16 `column`, as
 /// [`Rope::point_utf16_to_offset`] finds it: a column inside a surrogate pair
 /// is the pair's start, and columns past the end are the end.
+/// The start of `row` (byte range `line_range`) through UTF-16 column
+/// `end_column` and a char past it: what column lookups up to
+/// `end_column` see of the whole line, without reading the rest of a long
+/// one.
+fn line_prefix(rope: &Rope, row: u32, line_range: Range<usize>, end_column: u32) -> String {
+    // A line no longer in bytes than `end_column` has no more UTF-16
+    // units either: all of it, without seeking to the column.
+    if line_range.len() <= end_column as usize {
+        return rope.chunks_in_range(line_range).collect();
+    }
+    let past = rope.point_utf16_to_offset(PointUtf16::new(row, end_column.saturating_add(1)));
+    let end = rope
+        .clip_offset(past + 1, text::Bias::Right)
+        .min(line_range.end);
+    rope.chunks_in_range(line_range.start..end.max(line_range.start))
+        .collect()
+}
+
 fn utf16_column_to_byte(line: &str, column: u32) -> usize {
     let mut units = 0u32;
     for (ix, ch) in line.char_indices() {
@@ -1886,6 +1957,22 @@ pub(crate) fn current_highlights(
 #[derive(Default)]
 pub(crate) struct HighlightQueryCache {
     last: Option<HighlightQuery>,
+    /// Reads replaced by a newer one, to drop off the main thread: one may
+    /// hold the last reference to an old parse, and freeing a big file's
+    /// syntax tree takes milliseconds.
+    retired: Vec<HighlightQuery>,
+}
+
+impl HighlightQueryCache {
+    /// Drops the replaced reads on the background executor.
+    pub(crate) fn drop_retired(&mut self, cx: &App) {
+        if !self.retired.is_empty() {
+            let retired = std::mem::take(&mut self.retired);
+            cx.background_executor()
+                .spawn(async move { drop(retired) })
+                .detach();
+        }
+    }
 }
 
 /// Spans read from a parse state.
@@ -2058,12 +2145,13 @@ impl HighlightSource {
                 _ => {
                     let spans: std::sync::Arc<[syntax::HighlightSpan]> =
                         query(old_range.clone()).into();
-                    cache.last = Some(HighlightQuery {
+                    let replaced = cache.last.replace(HighlightQuery {
                         state: syntax.state.clone(),
                         range: old_range,
                         max_line_length: self.max_line_length,
                         spans: spans.clone(),
                     });
+                    cache.retired.extend(replaced);
                     spans
                 }
             },
@@ -4051,6 +4139,7 @@ fn prepaint_editor(
             )
         })
     };
+    editor.highlight_query_cache.drop_retired(cx);
     let highlights = editor.merge_semantic_tokens(highlights, visible_start..visible_end, cx);
     let editor_id = cx.entity_id();
     let decorations = editor.model().update(cx, |model, _| {
@@ -4097,12 +4186,19 @@ fn prepaint_editor(
         window.request_animation_frame();
     }
     // Each shown row's byte range and text, read once (segments are in
-    // row order).
+    // row order); only as far as its segments go, as a long line stops
+    // rendering early.
     let mut row_texts: Vec<(u32, Range<usize>, String)> = Vec::new();
-    for segment in &segments {
+    for (ix, segment) in segments.iter().enumerate() {
         if row_texts.last().map(|(row, _, _)| *row) != Some(segment.row) {
             let range = snapshot.line_range(segment.row);
-            let text = snapshot.chunks_in_range(range.clone()).collect();
+            let end_column = segments[ix..]
+                .iter()
+                .take_while(|s| s.row == segment.row)
+                .map(|s| s.columns.end)
+                .max()
+                .unwrap_or(0);
+            let text = line_prefix(snapshot.rope(), segment.row, range.clone(), end_column);
             row_texts.push((segment.row, range, text));
         }
     }
@@ -5888,7 +5984,15 @@ fn prepaint_editor(
                     continue;
                 }
                 if text_row != Some(line.row) {
-                    text = rope.line(line.row);
+                    // As far as the row's drawn lines go.
+                    let end_column = layout
+                        .lines
+                        .iter()
+                        .filter(|l| l.row == line.row)
+                        .map(|l| l.columns.end)
+                        .max()
+                        .unwrap_or(0);
+                    text = line_prefix(rope, line.row, rope.line_range(line.row), end_column);
                     text_row = Some(line.row);
                 }
                 let top = layout.text_top(line.view_line);
@@ -9740,6 +9844,21 @@ mod highlight_query_cache_tests {
         let parsed = model.read_with(cx, |model, _| check(model, 0..900));
         let again = model.read_with(cx, |model, _| check(model, 0..900));
         assert!(std::sync::Arc::ptr_eq(&parsed, &again));
+        // The replaced reads (older parses among them) wait to be dropped
+        // off the main thread, and only they do.
+        model.read_with(cx, |model, _| {
+            let latest = &model.syntax_snapshot().unwrap().state;
+            assert!(
+                cache
+                    .retired
+                    .iter()
+                    .any(|query| !query.state.ptr_eq(latest))
+            );
+            assert!(cache.last.as_ref().unwrap().state.ptr_eq(latest));
+        });
+        cx.update(|cx| cache.drop_retired(cx));
+        assert!(cache.retired.is_empty());
+        assert!(cache.last.is_some());
     }
 }
 
@@ -9761,5 +9880,75 @@ mod utf16_column_tests {
                 "column {column}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod shape_chunk_tests {
+    use super::{SHAPE_WHOLE_MAX, shape_chunk_bounds};
+
+    fn text(seed: u64, len: usize) -> String {
+        let pieces = [
+            "var ", "a=b+c;", "f(x,y)", "{k:v}", "if(c>9)", "return ", "[1,2]",
+        ];
+        let mut state = seed;
+        let mut text = String::new();
+        while text.len() < len {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            text.push_str(pieces[(state >> 33) as usize % pieces.len()]);
+        }
+        text
+    }
+
+    fn chunks(text: &str) -> Vec<String> {
+        shape_chunk_bounds(text)
+            .windows(2)
+            .map(|pair| text[pair[0]..pair[1]].to_string())
+            .collect()
+    }
+
+    /// Short lines are one chunk; long ones are cut after delimiters.
+    #[test]
+    fn cuts_after_delimiters() {
+        let short = "x;".repeat(SHAPE_WHOLE_MAX / 2);
+        assert_eq!(shape_chunk_bounds(&short), [0, short.len()]);
+        let long = text(1, 20_000);
+        let bounds = shape_chunk_bounds(&long);
+        assert!(bounds.len() > 20);
+        assert_eq!((bounds[0], *bounds.last().unwrap()), (0, long.len()));
+        for pair in bounds.windows(2) {
+            assert!(pair[0] < pair[1]);
+        }
+        for &cut in &bounds[1..bounds.len() - 1] {
+            assert!(b" ;,})>".contains(&long.as_bytes()[cut - 1]));
+        }
+    }
+
+    /// Typing near the start of a long line, or its end moving (as
+    /// `stopRenderingLineAfter` cuts it), leaves all but the chunks next
+    /// to the change with the same text, so they stay in GPUI's layout
+    /// cache.
+    #[test]
+    fn edits_keep_the_other_chunks() {
+        let long = text(2, 20_000);
+        let before = chunks(&long);
+        for at in [0, 3, 100, 1000] {
+            for insert in ["x", "xx", ";", "abc def"] {
+                let mut edited = long.clone();
+                edited.insert_str(at, insert);
+                let after = chunks(&edited);
+                let kept = after.iter().filter(|c| before.contains(c)).count();
+                assert!(
+                    kept + 3 >= after.len(),
+                    "{at} {insert:?}: {kept} of {}",
+                    after.len()
+                );
+            }
+        }
+        let after = chunks(&long[..long.len() - 7]);
+        let kept = after.iter().filter(|c| before.contains(c)).count();
+        assert_eq!(kept + 1, after.len());
     }
 }
