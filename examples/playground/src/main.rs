@@ -749,6 +749,7 @@ fn main() {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         focus: !in_background(),
+                        show: !in_background(),
                         ..Default::default()
                     },
                     |window, cx| {
@@ -803,6 +804,7 @@ fn main() {
                     WindowOptions {
                         window_bounds: Some(WindowBounds::Windowed(bounds)),
                         focus: !in_background(),
+                        show: !in_background(),
                         ..Default::default()
                     },
                     |window, cx| {
@@ -903,6 +905,7 @@ fn main() {
                 WindowOptions {
                     window_bounds: Some(WindowBounds::Windowed(bounds)),
                     focus: !in_background(),
+                    show: !in_background(),
                     ..Default::default()
                 },
                 |window, cx| cx.new(|cx| Playground::new(window, cx)),
@@ -916,9 +919,10 @@ fn main() {
     });
 }
 
-/// Whether to open without taking focus: for scripted runs (perf mode,
-/// screenshots) or `PLAYGROUND_BACKGROUND=1`, so the window opens behind
-/// whatever app is in front instead of stealing the keyboard.
+/// Whether to open hidden and without taking focus: for scripted runs (perf
+/// mode, screenshots) or `PLAYGROUND_BACKGROUND=1`, so the window never
+/// appears on screen or steals the keyboard (`focus: false` alone still
+/// orders it to the front).
 fn in_background() -> bool {
     [
         "PLAYGROUND_BACKGROUND",
