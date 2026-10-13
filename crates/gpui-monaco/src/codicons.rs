@@ -118,6 +118,8 @@ impl Codicon {
             Replace => "⇄",
             ReplaceAll => "⇉",
             KeyboardTab => "⇥",
+            KeyboardTabAbove => "⤒",
+            KeyboardTabBelow => "⤓",
             Discard => "↺",
             Fold | Unfold => "↕",
             Wrench => "🔧",

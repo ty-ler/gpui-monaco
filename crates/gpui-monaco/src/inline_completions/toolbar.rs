@@ -341,18 +341,11 @@ impl Render for InlineToolbar {
             // Clicks stay out of the text behind it.
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             // Monaco's `warningMessage`: above the toolbar, at most 400px
-            // wide.
+            // wide, the message alone (`icon` is the ghost text's).
             .children(warning.map(|warning| {
                 div()
                     .max_w(px(400.))
                     .m(px(4.))
-                    .flex()
-                    .gap(px(4.))
-                    .child(
-                        div()
-                            .text_color(colors.marker_color(crate::MarkerSeverity::Warning))
-                            .child(codicon(warning.icon.unwrap_or(Codicon::Warning))),
-                    )
                     .child(crate::markdown::render_documentation(
                         &warning.message,
                         &markdown_style,

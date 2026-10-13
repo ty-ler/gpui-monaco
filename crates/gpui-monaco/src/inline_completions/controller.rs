@@ -53,7 +53,7 @@ use crate::events::{CursorChangeCause, CursorChangeReason, CursorChangeSource};
 use crate::model::{EditKind, TextModel};
 use crate::options::InlineSuggestMode;
 use crate::providers::{
-    Command, InlineCompletion, InlineCompletionChangeHint, InlineCompletionContext,
+    InlineCompletion, InlineCompletionChangeHint, InlineCompletionCommand, InlineCompletionContext,
     InlineCompletionEndOfLifeReason, InlineCompletionHint, InlineCompletionList,
     InlineCompletionTriggerKind, InlineCompletionsDisposeReason, InlineCompletionsProvider,
     Location, PartialAcceptInfo, PartialAcceptTriggerKind, SelectedSuggestionInfo,
@@ -119,7 +119,7 @@ pub(crate) struct Item {
     /// `InlineSuggestionIdentity`).
     pub(crate) id: u64,
     /// Its list's commands (Monaco `source.inlineSuggestions.commands`).
-    pub(crate) commands: Vec<Command>,
+    pub(crate) commands: Vec<InlineCompletionCommand>,
     /// Where it may show, in the text of `version` (Monaco `showRange`).
     /// (In this model even for a cross-file edit, as of the version given.)
     show_range: Option<(Range<usize>, text::Version)>,
@@ -250,7 +250,7 @@ pub(crate) struct InlineCompletionsState {
     /// The list asked to keep the suggest widget closed.
     suppress_suggestions: bool,
     /// The lists' extra commands for the toolbar (Monaco `commands`).
-    pub(crate) commands: Vec<Command>,
+    pub(crate) commands: Vec<InlineCompletionCommand>,
     /// The always-shown toolbar and where it is (Monaco
     /// `InlineCompletionsHintsWidget`).
     pub(crate) toolbar: Option<(gpui::Entity<super::toolbar::InlineToolbar>, WidgetId)>,

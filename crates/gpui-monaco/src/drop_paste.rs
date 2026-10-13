@@ -1004,11 +1004,26 @@ impl CodeEditor {
             );
             return;
         }
+        // Monaco tracks the first range with a decoration that grows with
+        // text typed at its edges (`paste-line-suffix`), and shows the
+        // button at the end of where it ends up.
+        let tracked = {
+            let buffer = self.model().read(cx).buffer();
+            let range = ranges[0].clone();
+            let range = buffer
+                .point_utf16_to_offset(buffer.clip_point_utf16(range.start, text::Bias::Left))
+                ..buffer
+                    .point_utf16_to_offset(buffer.clip_point_utf16(range.end, text::Bias::Left));
+            buffer.anchor_range(range, text::Stickiness::AlwaysGrowsWhenTypingAtEdges)
+        };
         self.apply_post_edit_once(&ranges, &edits[active].edit, cx);
         if show == crate::options::ShowEditSelector::Never || edits.len() < 2 {
             return;
         }
-        let position = self.cursors.primary().position;
+        let position = {
+            let buffer = self.model().read(cx).buffer();
+            buffer.offset_to_point_utf16(buffer.resolve_range(&tracked).end)
+        };
         let editor = cx.entity().downgrade();
         let view = cx.new(|_| PostEditButton {
             editor,
@@ -1040,6 +1055,21 @@ impl CodeEditor {
     /// Whether the drop or paste options button shows.
     pub fn is_post_edit_widget_visible(&self) -> bool {
         self.drop_paste.post_edit.is_some()
+    }
+
+    /// Where the drop or paste options button is anchored, for tests.
+    #[doc(hidden)]
+    pub fn post_edit_widget_position_for_tests(&self, cx: &App) -> Option<PointUtf16> {
+        let id = self.drop_paste.post_edit.as_ref()?.widget;
+        let anchor = self
+            .widgets
+            .content
+            .iter()
+            .find(|w| w.id == id)?
+            .anchor
+            .as_ref()?;
+        let buffer = self.model().read(cx).buffer();
+        Some(buffer.offset_to_point_utf16(buffer.resolve(anchor)))
     }
 
     /// Monaco `pasteWidgetVisible` and `dropWidgetVisible`.
