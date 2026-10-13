@@ -902,6 +902,51 @@ fn bracket_pair_colorization(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco builds no bracket pair tree for a document longer than
+/// 5,000,000 (`BracketPairsTextModelPart.canBuildAST`): no bracket colors
+/// and no bracket pair guides, and they come back once it's short enough.
+#[gpui::test]
+fn bracket_pair_colorization_off_in_huge_documents(cx: &mut TestAppContext) {
+    const MAX: usize = 50_000 * 100;
+    let code = "fn a() { b(); }\n// ";
+    let padding = "x".repeat(MAX - code.len());
+    let (editor, cx) = rust_editor(&format!("{code}{padding}y"), cx);
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.guides.bracket_pairs = gpui_monaco::options::BracketPairGuides::On;
+        e.update_options(options, cx);
+    });
+    let settle = |cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(200));
+        cx.run_until_parked();
+    };
+    let brackets = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| {
+            (
+                e.bracket_colors_for_tests(cx).len(),
+                e.bracket_pairs_for_tests(0..1, cx).len(),
+            )
+        })
+    };
+    settle(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).value_length()),
+        MAX + 1
+    );
+    assert_eq!(brackets(cx), (0, 0));
+    // At the limit, the brackets are paired.
+    let model = editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.edit([(MAX..MAX + 1, "")], cx).unwrap());
+    settle(cx);
+    assert_eq!(brackets(cx), (6, 3));
+    // Past it again, they aren't.
+    model.update(cx, |m, cx| m.edit([(MAX..MAX, "y")], cx).unwrap());
+    assert_eq!(brackets(cx), (0, 0));
+    settle(cx);
+    assert_eq!(brackets(cx), (0, 0));
+}
+
 #[gpui::test]
 fn cursor_options_from_editor_options(cx: &mut TestAppContext) {
     let (editor, cx) = rust_editor("a\n    b", cx);
