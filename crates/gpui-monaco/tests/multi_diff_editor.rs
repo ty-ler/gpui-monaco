@@ -1999,3 +1999,57 @@ fn only_the_cards_variant_shadows_a_stuck_header(cx: &mut TestAppContext) {
         "not scrolled under its header"
     );
 }
+
+/// Both sides of the stuck file follow a scroll set before the list's
+/// first layout (Monaco `DiffEditorWidget` keeps them in sync) (#465).
+#[gpui::test]
+fn scroll_before_first_layout_keeps_stuck_file_sides_in_sync(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let documents = (0..4)
+            .map(|i| {
+                let original: String = (0..80).map(|l| format!("file {i} line {l}\n")).collect();
+                let modified = original
+                    .replace(
+                        &format!("file {i} line 5\n"),
+                        &format!("file {i} added\nfile {i} added too\nfile {i} line 5\n"),
+                    )
+                    .replace(
+                        &format!("file {i} line 12\n"),
+                        &format!("file {i} changed\n"),
+                    )
+                    .replace(
+                        &format!("file {i} line 20\n"),
+                        &format!("file {i} changed\n"),
+                    );
+                MultiDiffDocument::new(
+                    format!("src/file{i}.rs"),
+                    cx.new(|_| TextModel::new(&original)),
+                    cx.new(|_| TextModel::new(&modified)),
+                )
+            })
+            .collect();
+        let mut multi = MultiDiffEditor::new(documents, window, cx);
+        multi.set_scroll_top(px(300.), cx);
+        multi
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    let (original, modified) = multi.read_with(cx, |m, cx| {
+        let diff = m.diff_editor(0).expect("the stuck file's editor").read(cx);
+        (
+            diff.original_editor().read(cx).scroll_position(),
+            diff.modified_editor().read(cx).scroll_position(),
+        )
+    });
+    // The scroll wins over revealing the first change, which still gets
+    // the cursor (Monaco's "Initialize first change").
+    assert_eq!(scroll_top(&multi, cx), px(300.));
+    assert!(modified.y > px(0.), "{modified:?}");
+    assert_eq!(original, modified);
+    let cursor = multi.read_with(cx, |m, cx| {
+        let diff = m.diff_editor(0).unwrap().read(cx);
+        diff.modified_editor().read(cx).selections()[0].head
+    });
+    assert_eq!(cursor, PointUtf16::new(5, 0));
+}

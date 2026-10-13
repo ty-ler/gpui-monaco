@@ -1643,11 +1643,15 @@ impl MultiDiffEditor {
         self.scroll_top
     }
 
-    /// Scrolls the list at once (clamped when next drawn).
+    /// Scrolls the list at once (clamped when next drawn). It wins over a
+    /// change still waiting to be revealed, such as the first change the
+    /// list goes to when files load: Monaco reveals that at once, so a
+    /// later scroll comes after it.
     pub fn set_scroll_top(&mut self, scroll_top: Pixels, cx: &mut Context<Self>) {
         self.scroll_top = scroll_top.max(px(0.));
         self.smooth_scroll = None;
         self.pending_scroll = None;
+        self.pending_reveal = None;
         cx.notify();
     }
 
