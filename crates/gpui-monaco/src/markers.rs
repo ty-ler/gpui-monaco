@@ -676,6 +676,26 @@ pub fn model_markers(cx: &App, filter: &MarkerFilter) -> Vec<ModelMarker> {
         .collect()
 }
 
+/// Replaces the markers of `owner` for `uri` (Monaco `IMarkerService.changeOne`,
+/// which `vscode-languageclient`'s diagnostic collections write to),
+/// whether or not a model with the uri is open: [`model_markers`] lists
+/// them, live models with the uri are redecorated, and a model with it
+/// created later is decorated at once. `uri` is compared in
+/// [`normalize_uri`](crate::normalize_uri)'s form. Markers without a
+/// message are dropped; empty `markers` removes `owner`'s. See
+/// [`TextModel::set_markers`] for a model's own.
+pub fn set_markers_for_uri(
+    cx: &mut App,
+    owner: impl Into<SharedString>,
+    uri: &str,
+    markers: Vec<Marker>,
+) {
+    let resource: SharedString = crate::normalize_uri(uri).into();
+    if change_one(owner.into(), resource.clone(), markers, cx) {
+        update_models(&[resource], None, cx);
+    }
+}
+
 /// Removes `owner`'s markers everywhere (Monaco `editor.removeAllMarkers`),
 /// with one [`on_did_change_markers`](crate::on_did_change_markers) event
 /// for all of them.

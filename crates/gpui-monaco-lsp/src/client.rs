@@ -16,13 +16,16 @@ use gpui::{
 use gpui_monaco::events::content_changes;
 use gpui_monaco::providers::{LanguageSelector, ProviderRegistration, unregister_provider};
 use gpui_monaco::text::BufferSnapshot;
-use gpui_monaco::{TextModel, TextModelEvent};
+use gpui_monaco::{Marker, TextModel, TextModelEvent};
 use lsp_types as lsp;
 use serde_json::{Value, json};
 
 use crate::convert;
 use crate::features::LspFeatures;
 use crate::rpc::{self, Connection, Incoming, METHOD_NOT_FOUND, ResponseError};
+
+/// JSON-RPC's invalid params error code.
+const INVALID_PARAMS: i64 = -32602;
 
 /// How to run a language server.
 #[derive(Clone, Debug, Default)]
@@ -87,7 +90,12 @@ pub struct LspClient {
     connection: Connection,
     capabilities: lsp::ServerCapabilities,
     server_info: Option<lsp::ServerInfo>,
+    /// The attached documents, by [`TextModel::resource`].
     documents: HashMap<String, Document>,
+    /// The diagnostics last published for each uri (normalized), with
+    /// their markers: code action requests send the server's own back
+    /// (`vscode-languageclient` keeps them in its diagnostic collection).
+    diagnostics: HashMap<String, Vec<(Marker, lsp::Diagnostic)>>,
     registrations: Vec<ProviderRegistration>,
     /// The server's commands, registered with [`gpui_monaco::register_command`].
     commands: Vec<gpui_monaco::Disposable>,
@@ -192,6 +200,7 @@ impl LspClient {
                     capabilities: result.capabilities,
                     server_info: result.server_info,
                     documents: HashMap::new(),
+                    diagnostics: HashMap::new(),
                     registrations: Vec::new(),
                     commands: Vec::new(),
                     running: true,
@@ -230,18 +239,22 @@ impl LspClient {
     }
 
     /// Opens `model` on the server (`textDocument/didOpen`) and keeps it in
-    /// sync until it's released or [`LspClient::detach`]ed. The model needs
-    /// a uri ([`TextModel::with_uri`]); its language id (or `plaintext`) is
-    /// sent as the document's language.
+    /// sync until it's released or [`LspClient::detach`]ed. The document is
+    /// the model's [`TextModel::resource`] (`monaco-languageclient` sends
+    /// `model.uri.toString()`): its uri normalized (`file:///a b.rs` is sent
+    /// as `file:///a%20b.rs`), or `inmemory://model/N` for a model without
+    /// one. The model is [registered](gpui_monaco::register_model), as
+    /// Monaco's model service has every model, and its language id (or
+    /// `plaintext`) is sent as the document's language.
     pub fn attach(&mut self, model: &Entity<TextModel>, cx: &mut Context<Self>) -> Result<()> {
-        let model_ref = model.read(cx);
-        let uri = model_ref
-            .uri()
-            .context("attaching a model needs a uri (TextModel::with_uri)")?
-            .to_string();
+        let uri = model.read(cx).resource().to_string();
         if self.documents.contains_key(&uri) {
             return Ok(());
         }
+        // Monaco's model service has every model: `workspace/applyEdit`
+        // and the server's locations find this one by its uri.
+        gpui_monaco::register_model(cx, model);
+        let model_ref = model.read(cx);
         let language_id = model_ref
             .language_id()
             .map_or_else(|| "plaintext".to_string(), |id| id.to_string());
@@ -276,11 +289,10 @@ impl LspClient {
     /// Closes `model` on the server (`textDocument/didClose`) and clears
     /// its diagnostics.
     pub fn detach(&mut self, model: &Entity<TextModel>, cx: &mut Context<Self>) {
-        let Some(uri) = model.read(cx).uri().map(|uri| uri.to_string()) else {
-            return;
-        };
+        let uri = model.read(cx).resource().to_string();
         if self.documents.contains_key(&uri) {
             self.close(&uri);
+            self.diagnostics.remove(&uri);
             let owner = self.markers_owner();
             model.update(cx, |model, cx| model.set_markers(owner, Vec::new(), cx));
         }
@@ -288,18 +300,14 @@ impl LspClient {
 
     /// Whether `model` is attached.
     pub fn is_attached(&self, model: &Entity<TextModel>, cx: &App) -> bool {
-        model
-            .read(cx)
-            .uri()
-            .is_some_and(|uri| self.documents.contains_key(uri.as_ref()))
+        self.documents
+            .contains_key(model.read(cx).resource().as_ref())
     }
 
     /// Tells the server `model` was saved (`textDocument/didSave`), if it
     /// wants to know.
     pub fn did_save(&mut self, model: &Entity<TextModel>, cx: &mut Context<Self>) {
-        let Some(uri) = model.read(cx).uri().map(|uri| uri.to_string()) else {
-            return;
-        };
+        let uri = model.read(cx).resource().to_string();
         self.sync(&uri, cx);
         let save = match &self.capabilities.text_document_sync {
             Some(lsp::TextDocumentSyncCapability::Options(options)) => options.save.clone(),
@@ -344,8 +352,9 @@ impl LspClient {
         })
     }
 
-    /// Brings the server's copy of `uri` up to date and returns what a
-    /// request about it needs, or `None` if it isn't attached.
+    /// Brings the server's copy of `uri` (a [`TextModel::resource`]) up to
+    /// date and returns what a request about it needs, or `None` if it
+    /// isn't attached.
     pub(crate) fn prepare_request(
         &mut self,
         uri: &str,
@@ -357,6 +366,42 @@ impl LspClient {
         self.sync(uri, cx);
         let uri = lsp::Uri::from_str(uri).ok()?;
         Some((self.connection.clone(), lsp::TextDocumentIdentifier { uri }))
+    }
+
+    /// The diagnostics a code action request sends for `markers` of `uri`
+    /// (a [`TextModel::resource`]): the server's own as it published them
+    /// (`vscode-languageclient` sends its collection's, numeric codes and
+    /// related information included), else [`convert::diagnostic`]'s.
+    /// Markers move with edits, so one whose range changed still finds its
+    /// diagnostic by the rest.
+    pub(crate) fn lsp_diagnostics(&self, uri: &str, markers: &[Marker]) -> Vec<lsp::Diagnostic> {
+        let published = self.diagnostics.get(uri).map_or(&[][..], Vec::as_slice);
+        let mut used = vec![false; published.len()];
+        markers
+            .iter()
+            .map(|marker| {
+                let unused = |ix: &usize| !used[*ix];
+                let found = (0..published.len())
+                    .filter(unused)
+                    .find(|&ix| published[ix].0 == *marker)
+                    .or_else(|| {
+                        (0..published.len()).filter(unused).find(|&ix| {
+                            let candidate = &published[ix].0;
+                            Marker {
+                                range: marker.range.clone(),
+                                ..candidate.clone()
+                            } == *marker
+                        })
+                    });
+                match found {
+                    Some(ix) => {
+                        used[ix] = true;
+                        published[ix].1.clone()
+                    }
+                    None => convert::diagnostic(marker),
+                }
+            })
+            .collect()
     }
 
     fn sync_kind(&self) -> lsp::TextDocumentSyncKind {
@@ -521,6 +566,33 @@ impl LspClient {
             Incoming::Notification { method, params } => {
                 self.handle_notification(&method, params, cx)
             }
+            Incoming::Request { id, method, params }
+                if method
+                    == <lsp::request::ApplyWorkspaceEdit as lsp::request::Request>::METHOD =>
+            {
+                // Applying may wait for the host's file operations or
+                // preview, so the response comes when it's done.
+                let params = match rpc::params::<lsp::ApplyWorkspaceEditParams>(params) {
+                    Ok(params) => params,
+                    Err(err) => {
+                        let error = ResponseError {
+                            code: INVALID_PARAMS,
+                            message: err.to_string(),
+                        };
+                        self.connection.respond(id, Err(error)).ok();
+                        return;
+                    }
+                };
+                let response = self.apply_workspace_edit(params.edit, cx);
+                let connection = self.connection.clone();
+                cx.background_executor()
+                    .spawn(async move {
+                        let response = response.await;
+                        let result = serde_json::to_value(response).unwrap_or(Value::Null);
+                        connection.respond(id, Ok(result)).ok();
+                    })
+                    .detach();
+            }
             Incoming::Request { id, method, params } => {
                 let result = self.handle_request(&method, params, cx);
                 self.connection.respond(id, result).ok();
@@ -535,20 +607,29 @@ impl LspClient {
                 let Ok(params) = rpc::params::<lsp::PublishDiagnosticsParams>(params) else {
                     return;
                 };
-                let Some(model) = self
-                    .documents
-                    .get(params.uri.as_str())
-                    .and_then(|document| document.model.upgrade())
-                else {
-                    return;
-                };
-                let markers = params
+                // Servers may write uris another way than the client
+                // (`vscode-uri` turns `C:` into `c%3A`).
+                let uri = convert::uri(&params.uri).to_string();
+                let published: Vec<(Marker, lsp::Diagnostic)> = params
                     .diagnostics
                     .into_iter()
-                    .map(convert::marker)
+                    .map(|diagnostic| (convert::marker(diagnostic.clone()), diagnostic))
                     .collect();
+                let markers = published.iter().map(|(marker, _)| marker.clone()).collect();
+                if published.is_empty() {
+                    self.diagnostics.remove(&uri);
+                } else {
+                    self.diagnostics.insert(uri.clone(), published);
+                }
                 let owner = self.markers_owner();
-                model.update(cx, |model, cx| model.set_markers(owner, markers, cx));
+                // Documents that aren't attached get them too, as
+                // `vscode-languageclient`'s diagnostic collection does.
+                match self.documents.get(&uri).and_then(|d| d.model.upgrade()) {
+                    Some(model) => {
+                        model.update(cx, |model, cx| model.set_markers(owner, markers, cx))
+                    }
+                    None => gpui_monaco::set_markers_for_uri(cx, owner, &uri, markers),
+                }
             }
             ShowMessage::METHOD => {
                 if let Ok(params) = rpc::params::<lsp::ShowMessageParams>(params) {
@@ -580,12 +661,12 @@ impl LspClient {
         cx: &mut Context<Self>,
     ) -> Result<Value, ResponseError> {
         use lsp::request::{
-            ApplyWorkspaceEdit, InlayHintRefreshRequest, RegisterCapability, Request as _,
-            ShowMessageRequest, UnregisterCapability, WorkDoneProgressCreate,
-            WorkspaceConfiguration, WorkspaceFoldersRequest,
+            InlayHintRefreshRequest, RegisterCapability, Request as _, ShowMessageRequest,
+            UnregisterCapability, WorkDoneProgressCreate, WorkspaceConfiguration,
+            WorkspaceFoldersRequest,
         };
         let invalid = |err: anyhow::Error| ResponseError {
-            code: -32602,
+            code: INVALID_PARAMS,
             message: err.to_string(),
         };
         match method {
@@ -620,11 +701,6 @@ impl LspClient {
                 Ok(Value::Null)
             }
             WorkspaceFoldersRequest::METHOD => Ok(json!(workspace_folders(&self.options))),
-            ApplyWorkspaceEdit::METHOD => {
-                let params: lsp::ApplyWorkspaceEditParams = rpc::params(params).map_err(invalid)?;
-                let response = self.apply_workspace_edit(params.edit, cx);
-                Ok(serde_json::to_value(response).unwrap_or(Value::Null))
-            }
             _ => Err(ResponseError {
                 code: METHOD_NOT_FOUND,
                 message: format!("unhandled method {method}"),
@@ -632,78 +708,73 @@ impl LspClient {
         }
     }
 
-    /// Applies `edit` to attached models (`workspace/applyEdit`). Edits to
-    /// documents that aren't attached, and file operations, fail it.
+    /// Applies `edit` (`workspace/applyEdit`) through gpui-monaco's bulk
+    /// edit service ([`gpui_monaco::apply_workspace_edit`]), as
+    /// `vscode-languageclient` hands it to `workspace.applyEdit`: text edits
+    /// go to any document [`gpui_monaco::model_for_uri`] finds, attached or
+    /// not, each as one undo step; file operations go to the host's
+    /// [file edit handler](gpui_monaco::set_workspace_file_edit_handler);
+    /// and change annotations that need confirmation go through the
+    /// [preview handler](gpui_monaco::set_workspace_edit_preview_handler).
+    ///
+    /// As in `vscode-languageclient`, an edit for a version of an attached
+    /// document the server no longer has isn't applied. Otherwise the
+    /// response says whether it was, with the bulk edit service's error as
+    /// the `failureReason`.
     pub fn apply_workspace_edit(
         &mut self,
         edit: lsp::WorkspaceEdit,
         cx: &mut Context<Self>,
-    ) -> lsp::ApplyWorkspaceEditResponse {
-        let mut by_uri: Vec<(String, Vec<lsp::TextEdit>)> = Vec::new();
-        if let Some(changes) = edit.document_changes {
-            let edits = match changes {
-                lsp::DocumentChanges::Edits(edits) => edits,
-                lsp::DocumentChanges::Operations(operations) => {
-                    let mut edits = Vec::new();
-                    for operation in operations {
-                        match operation {
-                            lsp::DocumentChangeOperation::Edit(edit) => edits.push(edit),
-                            lsp::DocumentChangeOperation::Op(_) => {
-                                return failed("file operations aren't supported");
-                            }
-                        }
-                    }
-                    edits
-                }
-            };
-            for edit in edits {
-                let text_edits = edit
-                    .edits
-                    .into_iter()
-                    .map(|edit| match edit {
-                        lsp::OneOf::Left(edit) => edit,
-                        lsp::OneOf::Right(annotated) => annotated.text_edit,
-                    })
-                    .collect();
-                by_uri.push((edit.text_document.uri.as_str().to_string(), text_edits));
-            }
-        } else if let Some(changes) = edit.changes {
-            by_uri.extend(
-                changes
-                    .into_iter()
-                    .map(|(uri, edits)| (uri.as_str().to_string(), edits)),
-            );
-        }
-        let mut models = Vec::new();
-        for (uri, edits) in by_uri {
-            let Some(model) = self.documents.get(&uri).and_then(|d| d.model.upgrade()) else {
-                return failed(&format!("{uri} isn't open"));
-            };
-            models.push((model, edits));
-        }
-        for (model, edits) in models {
-            model.update(cx, |model, cx| {
-                let mut edits: Vec<_> = edits
-                    .into_iter()
-                    .map(|edit| {
-                        let range = convert::range(edit.range);
-                        (
-                            model.offset_at(range.start)..model.offset_at(range.end),
-                            edit.new_text,
-                        )
-                    })
-                    .collect();
-                // LSP edits may come in any order; inserts at one position
-                // keep theirs.
-                edits.sort_by_key(|(range, _)| range.start);
-                model.edit(edits, cx).log_err();
+    ) -> Task<lsp::ApplyWorkspaceEditResponse> {
+        if self.version_mismatch(&edit, cx) {
+            return Task::ready(lsp::ApplyWorkspaceEditResponse {
+                applied: false,
+                failure_reason: None,
+                failed_change: None,
             });
         }
-        lsp::ApplyWorkspaceEditResponse {
-            applied: true,
-            failure_reason: None,
-            failed_change: None,
-        }
+        let edit = match convert::workspace_edit(edit) {
+            Ok(edit) => edit,
+            Err(err) => return Task::ready(failed(&err.to_string())),
+        };
+        let apply = gpui_monaco::apply_workspace_edit(cx, edit);
+        cx.background_executor().spawn(async move {
+            match apply.await {
+                Ok(applied) => lsp::ApplyWorkspaceEditResponse {
+                    applied,
+                    failure_reason: None,
+                    failed_change: None,
+                },
+                Err(err) => failed(&err.to_string()),
+            }
+        })
+    }
+
+    /// `vscode-languageclient`'s `handleApplyWorkspaceEdit` check: whether
+    /// a versioned document edit is for an attached document whose version
+    /// on the server is another.
+    fn version_mismatch(&mut self, edit: &lsp::WorkspaceEdit, cx: &mut Context<Self>) -> bool {
+        let document_edits: Vec<&lsp::TextDocumentEdit> = match &edit.document_changes {
+            Some(lsp::DocumentChanges::Edits(edits)) => edits.iter().collect(),
+            Some(lsp::DocumentChanges::Operations(operations)) => operations
+                .iter()
+                .filter_map(|operation| match operation {
+                    lsp::DocumentChangeOperation::Edit(edit) => Some(edit),
+                    lsp::DocumentChangeOperation::Op(_) => None,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        document_edits.into_iter().any(|edit| {
+            let Some(version) = edit.text_document.version.filter(|v| *v >= 0) else {
+                return false;
+            };
+            let uri = convert::uri(&edit.text_document.uri).to_string();
+            self.sync(&uri, cx);
+            self.documents
+                .get(&uri)
+                .is_some_and(|document| document.version != version)
+        })
     }
 }
 

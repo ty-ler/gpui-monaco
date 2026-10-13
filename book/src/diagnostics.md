@@ -22,6 +22,8 @@ model.update(cx, |model, cx| {
 });
 ```
 
+Markers belong to the model's uri, not the model: they outlive it and decorate the next model with the uri. `set_markers_for_uri(cx, owner, uri, markers)` sets them for a uri that has no model yet (Monaco's `IMarkerService.changeOne`), as the LSP bridge does for diagnostics of files that aren't open; `model_markers` lists them, and a model opened later shows them at once.
+
 Markers are rendered as:
 
 - **Squiggles:** red for errors, yellow for warnings and blue for info, in the theme's `editorError.foreground` and the like. High contrast themes also draw Monaco's double underline (`editorError.border`, `editorWarning.border`, `editorInfo.border`).

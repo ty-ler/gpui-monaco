@@ -1,6 +1,9 @@
 //! Conversions between LSP types and gpui-monaco's (the role of
 //! `monaco-languageclient`'s protocol converters). Positions need no
-//! conversion: both use 0-based lines and UTF-16 columns.
+//! conversion: both use 0-based lines and UTF-16 columns. Uris from the
+//! server come out in [`normalize_uri`](gpui_monaco::normalize_uri)'s form,
+//! as `asUri` parses them into Monaco `URI`s (`file:///C:/a.ts` and
+//! `file:///c%3A/a.ts` are the same document).
 
 use std::ops::Range;
 
@@ -17,6 +20,13 @@ use gpui_monaco::providers::{
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{Marker, MarkerSeverity, MarkerTag, RelatedInformation};
 use lsp_types as lsp;
+
+/// A server's uri in [`normalize_uri`](gpui_monaco::normalize_uri)'s form
+/// (`p2c.asUri(value).toString()`), the form of
+/// [`TextModel::resource`](gpui_monaco::TextModel::resource).
+pub fn uri(uri: &lsp::Uri) -> SharedString {
+    gpui_monaco::normalize_uri(uri.as_str()).into()
+}
 
 /// An LSP position as a gpui-monaco one.
 pub fn point(position: lsp::Position) -> PointUtf16 {
@@ -330,15 +340,13 @@ fn parse_dollar(chars: &[char], i: &mut usize, out: &mut String) {
     }
 }
 
-/// Definition results: `None` for locations in the queried document.
-/// `LocationLink`s keep their origin and target selection ranges (Monaco
-/// `LocationLink`).
+/// Definition results: `None` for locations in the `queried` document (a
+/// normalized uri). `LocationLink`s keep their origin and target selection
+/// ranges (Monaco `LocationLink`).
 pub fn locations(response: lsp::GotoDefinitionResponse, queried: &str) -> Vec<Location> {
-    let location = |uri: lsp::Uri, target: lsp::Range| {
-        Location::new(
-            (uri.as_str() != queried).then(|| uri.as_str().to_string().into()),
-            range(target),
-        )
+    let location = |target_uri: lsp::Uri, target: lsp::Range| {
+        let target_uri = uri(&target_uri);
+        Location::new((target_uri != queried).then_some(target_uri), range(target))
     };
     match response {
         lsp::GotoDefinitionResponse::Scalar(l) => vec![location(l.uri, l.range)],
@@ -447,7 +455,9 @@ pub fn lsp_signature_help(help: &SignatureHelp) -> lsp::SignatureHelp {
     }
 }
 
-/// A diagnostic as a marker.
+/// A diagnostic as a marker. A numeric code becomes its decimal text, as
+/// Monaco shows it; [`diagnostic`] can't tell it from a string again, so
+/// the bridge keeps the server's diagnostics to send back.
 pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
     Marker {
         severity: match diagnostic.severity {
@@ -481,7 +491,7 @@ pub fn marker(diagnostic: lsp::Diagnostic) -> Marker {
             .unwrap_or_default()
             .into_iter()
             .map(|related| RelatedInformation {
-                uri: Some(related.location.uri.to_string().into()),
+                uri: Some(uri(&related.location.uri)),
                 range: range(related.location.range),
                 message: related.message.into(),
             })
@@ -515,7 +525,7 @@ pub fn workspace_edit(edit: lsp::WorkspaceEdit) -> anyhow::Result<WorkspaceEdit>
             description: annotation.description.clone().map(Into::into),
         })
     };
-    let uri = |uri: &lsp::Uri| Some(SharedString::from(uri.as_str().to_string()));
+    let uri = |value: &lsp::Uri| Some(uri(value));
     let mut result = WorkspaceEdit::default();
     if let Some(changes) = edit.document_changes {
         let mut edits = Vec::new();
@@ -614,14 +624,16 @@ pub fn workspace_edit(edit: lsp::WorkspaceEdit) -> anyhow::Result<WorkspaceEdit>
         for (uri, edits) in changes {
             result
                 .edits
-                .push((Some(uri.as_str().to_string().into()), text_edits(edits)));
+                .push((Some(self::uri(&uri)), text_edits(edits)));
         }
     }
     Ok(result)
 }
 
-/// A marker as the diagnostic a server sent (servers match the diagnostics
-/// in a code action request against their own).
+/// A marker as a diagnostic, with its related information in other
+/// documents. The bridge sends the server's own diagnostics back in code
+/// action requests (servers match them against theirs), and this only for
+/// markers it didn't publish: a code is always a string here.
 pub fn diagnostic(marker: &Marker) -> lsp::Diagnostic {
     lsp::Diagnostic {
         range: lsp_range(&marker.range),
@@ -652,7 +664,22 @@ pub fn diagnostic(marker: &Marker) -> lsp::Diagnostic {
                 })
                 .collect()
         }),
-        ..Default::default()
+        related_information: (!marker.related_information.is_empty()).then(|| {
+            marker
+                .related_information
+                .iter()
+                .filter_map(|related| {
+                    Some(lsp::DiagnosticRelatedInformation {
+                        location: lsp::Location {
+                            uri: related.uri.as_deref()?.parse().ok()?,
+                            range: lsp_range(&related.range),
+                        },
+                        message: related.message.to_string(),
+                    })
+                })
+                .collect()
+        }),
+        data: None,
     }
 }
 
@@ -707,7 +734,7 @@ fn tooltip(tooltip: lsp::InlayHintTooltip) -> Documentation {
 }
 
 /// An inlay hint, with its label parts and text edits. Part locations in
-/// the `queried` document have no uri.
+/// the `queried` document (a normalized uri) have no uri.
 pub fn inlay_hint(hint: lsp::InlayHint, queried: &str) -> InlayHint {
     InlayHint {
         position: point(hint.position),
@@ -726,8 +753,7 @@ pub fn inlay_hint(hint: lsp::InlayHint, queried: &str) -> InlayHint {
                         }
                     }),
                     location: part.location.map(|location| Location {
-                        uri: (location.uri.as_str() != queried)
-                            .then(|| location.uri.as_str().to_string().into()),
+                        uri: Some(uri(&location.uri)).filter(|uri| uri != queried),
                         range: range(location.range),
                         ..Default::default()
                     }),

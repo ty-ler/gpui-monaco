@@ -17,12 +17,12 @@
 
 use std::rc::Rc;
 
-use gpui::{App, Context, Global, SharedString, Task};
+use gpui::{App, Context, Entity, Global, SharedString, Task};
 use text::PointUtf16;
 
 use crate::api::SingleEditOperation;
 use crate::editor::CodeEditor;
-use crate::model::model_for_uri;
+use crate::model::{TextModel, model_for_uri};
 use crate::providers::{TextEdit, WorkspaceEdit, WorkspaceFileEdit};
 use crate::registry::Disposable;
 use crate::snippet::parser::SnippetParser;
@@ -146,6 +146,118 @@ fn offset_after(offset: usize, edits: &[(std::ops::Range<usize>, usize)]) -> usi
     shifted.max(0) as usize
 }
 
+/// Applies `edits` to `model` as one undo step, moving the decorations at
+/// their edges past their text (Monaco `pushEditOperations` with
+/// `EditOperation.replaceMove`).
+fn edit_model(model: &Entity<TextModel>, edits: Vec<TextEdit>, cx: &mut App) -> anyhow::Result<()> {
+    model
+        .update(cx, |model, cx| {
+            let mut edits: Vec<_> = edits
+                .into_iter()
+                .map(|(range, text)| {
+                    (
+                        model.offset_at(range.start)..model.offset_at(range.end),
+                        text,
+                    )
+                })
+                .collect();
+            edits.sort_by_key(|(range, _)| range.start);
+            model.force_move_markers_on_next_edit(
+                edits.iter().map(|(range, _)| range.clone()).collect(),
+            );
+            let result = model.edit(edits, cx).map(|_| ());
+            model.force_move_markers_on_next_edit(Vec::new());
+            result
+        })
+        .map_err(|err| anyhow::anyhow!("bad edit - {err}"))
+}
+
+/// Applies `edit` without an editor (Monaco `IBulkEditService.apply`, as
+/// `workspace/applyEdit` reaches it): an edit whose metadata [needs
+/// confirmation](WorkspaceEdit::needs_confirmation) goes through the
+/// [preview handler](set_workspace_edit_preview_handler) first, if one is
+/// set; then its [file operations](WorkspaceEdit::file_edits) go through the
+/// [file edit handler](set_workspace_file_edit_handler), and its text edits
+/// to the documents [`model_for_uri`](crate::model_for_uri) finds, each as
+/// one undo step (snippet edits insert their plain text). The task says
+/// whether the edit was applied (`false` if the preview was cancelled).
+///
+/// Fails without applying text edits if a document can't be found (Monaco's
+/// "bad edit - model not found"; every edit needs a uri here) or changed
+/// since its [version](WorkspaceEdit::versions), or if there are file
+/// operations and no handler.
+pub fn apply_workspace_edit(cx: &mut App, edit: WorkspaceEdit) -> Task<anyhow::Result<bool>> {
+    let handler = edit
+        .needs_confirmation()
+        .then(|| preview_handler(cx))
+        .flatten();
+    let Some(handler) = handler else {
+        let apply = apply_to_models(cx, edit);
+        return cx.spawn(async move |_| apply.await.map(|_| true));
+    };
+    let label = edit
+        .metadata
+        .as_ref()
+        .map(|metadata| metadata.label.clone())
+        .unwrap_or_default();
+    let previewed = handler(edit, label, cx);
+    cx.spawn(async move |cx| {
+        let Some(edit) = previewed.await? else {
+            return Ok(false);
+        };
+        cx.update(|cx| apply_to_models(cx, edit)).await?;
+        Ok(true)
+    })
+}
+
+/// [`apply_workspace_edit`] after the preview.
+fn apply_to_models(cx: &mut App, mut edit: WorkspaceEdit) -> Task<anyhow::Result<()>> {
+    let file_edits = std::mem::take(&mut edit.file_edits);
+    if file_edits.is_empty() {
+        return Task::ready(apply_text_edits_to_models(cx, edit));
+    }
+    let Some(handler) = file_edit_handler(cx) else {
+        return Task::ready(Err(anyhow::anyhow!(
+            "bad edit - file operations need a file edit handler"
+        )));
+    };
+    let done = handler(file_edits, cx);
+    cx.spawn(async move |cx| {
+        done.await?;
+        cx.update(|cx| apply_text_edits_to_models(cx, edit))
+    })
+}
+
+/// Monaco `StandaloneBulkEditService.apply`'s text edits.
+fn apply_text_edits_to_models(cx: &mut App, edit: WorkspaceEdit) -> anyhow::Result<()> {
+    let find = |cx: &mut App, target: Option<&SharedString>| {
+        let target = target.ok_or_else(|| anyhow::anyhow!("bad edit - model not found"))?;
+        model_for_uri(cx, target)
+            .ok_or_else(|| anyhow::anyhow!("bad edit - model not found: {target}"))
+    };
+    for (target, version) in &edit.versions {
+        if find(cx, target.as_ref())?.read(cx).version() != *version {
+            anyhow::bail!("bad state - model changed in the meantime");
+        }
+    }
+    let mut by_model: Vec<(Entity<TextModel>, Vec<TextEdit>)> = Vec::new();
+    let snippets = edit.snippet_edits.into_iter().map(|snippet| {
+        let text = snippet_text(&snippet.snippet);
+        (snippet.uri, vec![(snippet.range, text)])
+    });
+    for (target, edits) in edit.edits.into_iter().chain(snippets) {
+        let model = find(cx, target.as_ref())?;
+        match by_model.iter_mut().find(|(m, _)| *m == model) {
+            Some((_, existing)) => existing.extend(edits),
+            None => by_model.push((model, edits)),
+        }
+    }
+    for (model, edits) in by_model {
+        edit_model(&model, edits, cx)?;
+    }
+    Ok(())
+}
+
 impl CodeEditor {
     /// Monaco `IBulkEditService.apply` with `showPreview`: with `preview`
     /// (or an edit that [needs
@@ -217,9 +329,14 @@ impl CodeEditor {
         edit: WorkspaceEdit,
         cx: &mut Context<Self>,
     ) -> anyhow::Result<()> {
-        let uri = self.model().read(cx).uri().cloned();
-        let is_here =
-            |target: &Option<SharedString>| target.is_none() || target.as_ref() == uri.as_ref();
+        // Monaco compares `URI.toString()`s: `file:///a%20b` is the model of
+        // `file:///a b`.
+        let resource = self.model().read(cx).resource().clone();
+        let is_here = |target: &Option<SharedString>| {
+            target.as_deref().is_none_or(|target| {
+                target == resource.as_ref() || crate::normalize_uri(target) == resource
+            })
+        };
         // Monaco checks every version before applying anything.
         for (target, version) in &edit.versions {
             let model = if is_here(target) {
@@ -233,7 +350,7 @@ impl CodeEditor {
             }
         }
         let mut here: Vec<TextEdit> = Vec::new();
-        let mut elsewhere: Vec<(gpui::Entity<crate::TextModel>, Vec<TextEdit>)> = Vec::new();
+        let mut elsewhere: Vec<(Entity<TextModel>, Vec<TextEdit>)> = Vec::new();
         let mut add = |cx: &mut Context<Self>,
                        target: Option<SharedString>,
                        edits: Vec<TextEdit>|
@@ -272,27 +389,7 @@ impl CodeEditor {
             add(cx, snippet.uri, vec![(snippet.range, text)])?;
         }
         for (model, edits) in elsewhere {
-            model
-                .update(cx, |model, cx| {
-                    let mut edits: Vec<_> = edits
-                        .into_iter()
-                        .map(|(range, text)| {
-                            (
-                                model.offset_at(range.start)..model.offset_at(range.end),
-                                text,
-                            )
-                        })
-                        .collect();
-                    edits.sort_by_key(|(range, _)| range.start);
-                    // Monaco `EditOperation.replaceMove`.
-                    model.force_move_markers_on_next_edit(
-                        edits.iter().map(|(range, _)| range.clone()).collect(),
-                    );
-                    let result = model.edit(edits, cx).map(|_| ());
-                    model.force_move_markers_on_next_edit(Vec::new());
-                    result
-                })
-                .map_err(|err| anyhow::anyhow!("{err:?}"))?;
+            edit_model(&model, edits, cx)?;
         }
         if here.is_empty() && session.is_none() {
             return Ok(());
