@@ -109,6 +109,52 @@ fn markdown_injects_fenced_rust_and_inline() {
     );
 }
 
+/// `injected_languages` lists each visible injected language once, and
+/// follows reparses (Rust in Rust macros, Markdown's fenced Rust).
+#[test]
+fn injected_languages_are_listed_once_per_parse() {
+    let registry = registry();
+    let ids = |syntax: &SyntaxSnapshot| {
+        let mut ids: Vec<String> = syntax
+            .injected_languages()
+            .iter()
+            .map(|l| l.id.to_string())
+            .collect();
+        ids.sort();
+        ids
+    };
+    let rust = registry.language_for_id("rust").unwrap();
+    let mut buffer = Buffer::new("fn main() {}\n");
+    let old = buffer.snapshot();
+    let syntax = SyntaxSnapshot::parse(rust, &old, &registry);
+    assert!(ids(&syntax).is_empty());
+    buffer
+        .edit([(12..12, "\nfn g() { a!(x); b!(y); }")])
+        .unwrap();
+    let new = buffer.snapshot();
+    let patch = buffer.edits_since(old.version());
+    let syntax = syntax.reparse(old.rope(), &new, &patch, &registry);
+    assert_eq!(ids(&syntax), ["rust"]);
+
+    let markdown = registry.language_for_path("README.md".as_ref()).unwrap();
+    let buffer = Buffer::new("# T\n\n*a* b\n\n```rust\nfn main() {}\n```\n");
+    let syntax = SyntaxSnapshot::parse(markdown, &buffer.snapshot(), &registry);
+    let visible: Vec<String> = {
+        let mut ids: Vec<String> = syntax
+            .layers()
+            .iter()
+            .skip(1)
+            .filter(|l| !l.language.hidden)
+            .map(|l| l.language.id.to_string())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    };
+    assert!(visible.contains(&"rust".to_string()), "{visible:?}");
+    assert_eq!(ids(&syntax), visible);
+}
+
 proptest! {
     #![proptest_config(ProptestConfig { cases: 128, max_global_rejects: 4096, ..ProptestConfig::default() })]
     /// Incremental reparse produces the same highlights as a fresh parse.

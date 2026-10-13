@@ -2689,3 +2689,192 @@ fn the_details_scroll_to_the_top_when_the_item_resolves(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(scroll(cx), Some(gpui::px(8.)));
 }
+
+/// `setup` in `css`, whose words (Monaco's CSS `wordPattern`) include `-`.
+fn setup_css<'a>(
+    text: &str,
+    options: impl FnOnce(&mut EditorOptions),
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    use gpui_monaco::syntax::{Language, LanguageConfiguration, LanguageRegistry, Pattern};
+    let registry = std::sync::Arc::new(LanguageRegistry::new());
+    registry.register(
+        Language::new("css", "CSS").with_config(LanguageConfiguration {
+            word_pattern: Some(Pattern::new(
+                r"(#?-?\d*\.\d\w*%?)|((::|[@#.!:])?[\w\-?]+%?)|::|[@#.!:]",
+                "",
+            )),
+            ..Default::default()
+        }),
+    );
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, registry);
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| {
+            TextModel::new(&text)
+                .with_language("css")
+                .with_uri("file:///main.css")
+        });
+        CodeEditor::new(model, window, cx)
+    });
+    editor.update(cx, |editor, cx| {
+        let mut opts = editor.options().clone();
+        options(&mut opts);
+        editor.update_options(opts, cx);
+    });
+    cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+    cx.run_until_parked();
+    (editor, cx)
+}
+
+/// Monaco takes the default ranges, quick suggestions and word-based
+/// items' ranges from the language's `wordPattern` (`getWordAtPosition`),
+/// so in CSS `font-w` is one word and typing `-` keeps suggesting (#470).
+#[gpui::test]
+fn suggest_words_follow_the_language_word_pattern(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_css("font-weight\n", |_| {}, cx);
+    move_to(&editor, cx, 1, 0);
+    cx.simulate_input("font-");
+    settle(cx);
+    assert_eq!(labels(&editor, cx), Some(vec!["font-weight".to_string()]));
+    cx.simulate_input("w");
+    settle(cx);
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "font-weight\nfont-weight");
+}
+
+/// A provider's item without a range replaces the language's word: in CSS
+/// all of `font-w` (#470).
+#[gpui::test]
+fn default_ranges_follow_the_language_word_pattern(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_css("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![CompletionItem::new(
+            "font-weight",
+            CompletionItemKind::Property,
+        )]
+    });
+    cx.simulate_input("font-w");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "font-weight");
+}
+
+/// Monaco's default `wordPattern` treats `$` as a separator, so an item
+/// without a range replaces only what follows it (#470).
+#[gpui::test]
+fn default_ranges_stop_at_a_dollar_by_default(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![CompletionItem::new("bar", CompletionItemKind::Property)]
+    });
+    cx.simulate_input("foo$ba");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "foo$bar");
+}
+
+/// Monaco's `atEndOfWord` and `insertBestCompletion` use the language's
+/// `wordPattern`: in CSS, Tab after `font-` completes (#470).
+#[gpui::test]
+fn tab_completion_follows_the_language_word_pattern(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_css(
+        "font-weight\n",
+        |o| {
+            o.tab_completion = gpui_monaco::options::TabCompletion::On;
+            o.quick_suggestions = QuickSuggestions::OFF;
+        },
+        cx,
+    );
+    move_to(&editor, cx, 1, 0);
+    cx.simulate_input("font-");
+    cx.simulate_keystrokes("tab");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "font-weight\nfont-weight");
+}
+
+/// Inline quick suggestions find the word by the language's `wordPattern`
+/// too (#470).
+#[gpui::test]
+fn inline_quick_suggestions_follow_the_language_word_pattern(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_css("", |o| o.quick_suggestions = QuickSuggestions::INLINE, cx);
+    provide(cx, |_| {
+        vec![CompletionItem::new(
+            "font-weight",
+            CompletionItemKind::Property,
+        )]
+    });
+    cx.simulate_input("font-");
+    settle_inline(cx);
+    assert_eq!(ghost(&editor, cx).as_deref(), Some("weight"));
+    cx.simulate_keystrokes("tab");
+    assert_eq!(text(&editor, cx), "font-weight");
+}
+
+/// Monaco `getOverwriteInfo` adds the `LineSuffix` delta: after moving
+/// right inside the word without typing, accepting in replace mode
+/// overwrites only the rest of the word (#470).
+#[gpui::test]
+fn accepting_after_moving_right_keeps_the_text_after_the_word(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "foobar = 1",
+        |o| {
+            o.quick_suggestions = QuickSuggestions::OFF;
+            o.suggest.insert_mode = SuggestInsertMode::Replace;
+        },
+        cx,
+    );
+    provide(cx, |_| {
+        vec![CompletionItem::new("foobar", CompletionItemKind::Variable)]
+    });
+    move_to(&editor, cx, 0, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("right right");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["foobar".to_string()]));
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "foobar = 1");
+    assert_eq!(cursor(&editor, cx), PointUtf16::new(0, 6));
+
+    // Typing at the cursor moves the suffix along: the rest of the word is
+    // still replaced.
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("fobar = 1", cx))
+    });
+    move_to(&editor, cx, 0, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_input("o");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "foobar = 1");
+}
+
+/// Monaco's commit characters accept only while the list isn't frozen
+/// (`suggestCommitCharacters.ts`) (#470).
+#[gpui::test]
+fn commit_characters_do_nothing_while_frozen(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        vec![CompletionItem {
+            commit_characters: vec!['.'],
+            ..CompletionItem::new("foo", CompletionItemKind::Variable)
+        }]
+    });
+    cx.simulate_input("fo");
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_input("x");
+    cx.run_until_parked();
+    // Frozen on `foo`.
+    assert_eq!(labels(&editor, cx), Some(vec!["foo".to_string()]));
+    cx.simulate_input(".");
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "fox.");
+}

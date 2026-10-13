@@ -314,6 +314,31 @@ pub(crate) struct SuggestState {
     /// focused row as the list's active descendant), so it isn't read again
     /// on every keystroke.
     announced: Option<String>,
+    /// Monaco `LineSuffix`, set on each request: what follows the cursor
+    /// on its line, for the `suffixDelta` accepting adds.
+    line_suffix: Option<LineSuffix>,
+}
+
+/// Monaco `LineSuffix`: the request's row and how many UTF-16 units of
+/// its line followed the cursor. Monaco tracks a decoration on the
+/// character after the request (or the line end), which typing at the
+/// cursor pushes along; the same text after it stays this long.
+#[derive(Clone, Copy)]
+struct LineSuffix {
+    row: u32,
+    len: u32,
+}
+
+impl LineSuffix {
+    /// Monaco `LineSuffix.delta`: the marker's column minus `position`'s
+    /// (negative once the cursor moved right without typing), 0 on another
+    /// line.
+    fn delta(&self, line_len: u32, position: PointUtf16) -> i64 {
+        if position.row != self.row {
+            return 0;
+        }
+        i64::from(line_len.saturating_sub(self.len)) - i64::from(position.column)
+    }
 }
 
 /// A quick suggestion waiting for inline completions to settle before
@@ -428,10 +453,6 @@ impl Session {
 
 fn leading_whitespace(line: &str) -> &str {
     &line[..line.len() - line.trim_start_matches([' ', '\t']).len()]
-}
-
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_' || ch == '$'
 }
 
 impl CodeEditor {
@@ -686,39 +707,26 @@ impl CodeEditor {
         ))
     }
 
-    /// Start column of the word ending at the cursor (Monaco
-    /// `getWordUntilPosition`).
-    pub(crate) fn word_start_at(&self, position: PointUtf16) -> u32 {
-        let line = self.snapshot.line(position.row);
-        let mut column = 0u32;
-        let mut start = 0u32;
-        for ch in line.chars() {
-            if column >= position.column {
-                break;
-            }
-            column += ch.len_utf16() as u32;
-            if !is_word_char(ch) {
-                start = column;
-            }
-        }
-        start
+    /// The word at `position` by the language's `wordPattern` (Monaco
+    /// `getWordAtPosition`), as start and end columns; `position` itself
+    /// when there's none.
+    fn word_columns_at(&self, position: PointUtf16, cx: &gpui::App) -> (u32, u32) {
+        self.model()
+            .read(cx)
+            .word_at_position(position)
+            .filter(|word| word.range.start.row == position.row)
+            .map_or((position.column, position.column), |word| {
+                (
+                    word.range.start.column.min(position.column),
+                    word.range.end.column.max(position.column),
+                )
+            })
     }
 
-    /// End column of the word continuing after `position`.
-    fn word_end_at(&self, position: PointUtf16) -> u32 {
-        let line = self.snapshot.line(position.row);
-        let mut column = 0u32;
-        let mut end = position.column;
-        for ch in line.chars() {
-            if column >= position.column {
-                if !is_word_char(ch) {
-                    break;
-                }
-                end = column + ch.len_utf16() as u32;
-            }
-            column += ch.len_utf16() as u32;
-        }
-        end
+    /// Start column of the word ending at the cursor (Monaco
+    /// `getWordUntilPosition`), by the language's `wordPattern`.
+    pub(crate) fn word_start_at(&self, position: PointUtf16, cx: &gpui::App) -> u32 {
+        self.word_columns_at(position, cx).0
     }
 
     fn line_context_at(&self, position: PointUtf16, session_column: u32) -> LineContext {
@@ -810,6 +818,15 @@ impl CodeEditor {
             return;
         }
         let position = self.cursors.primary().position;
+        // Monaco `onDidTrigger` sets the `LineSuffix`.
+        self.suggest.line_suffix = Some(LineSuffix {
+            row: position.row,
+            len: self
+                .snapshot
+                .rope()
+                .line_len_utf16(position.row)
+                .saturating_sub(position.column),
+        });
         let context = self.model().read(cx).provider_context();
         // Monaco's snippet controller registers its choice provider as
         // exclusive while a choice is active, so it's the only one asked,
@@ -832,8 +849,7 @@ impl CodeEditor {
             .position(|reused| reused.provider.is_none())
             .map(|ix| options.reuse.remove(ix).items);
         let has_providers = !groups.is_empty();
-        let word_start = self.word_start_at(position);
-        let word_end = self.word_end_at(position);
+        let (word_start, word_end) = self.word_columns_at(position, cx);
         // Monaco `offWithInlineSuggestions`: off while an inline
         // completions provider serves this language and they're enabled.
         let words_enabled = choice.is_none()
@@ -1117,11 +1133,10 @@ impl CodeEditor {
     /// Returns false if it didn't apply (no word ends at the cursor).
     pub(crate) fn insert_best_completion(&mut self, cx: &mut Context<Self>) -> bool {
         let head = self.cursors.primary().position;
-        if self.options.read_only
-            || self.is_suggest_visible()
-            || self.word_start_at(head) == head.column
-            || self.word_end_at(head) != head.column
-        {
+        if self.options.read_only || self.is_suggest_visible() || {
+            let (start, end) = self.word_columns_at(head, cx);
+            start == head.column || end != head.column
+        } {
             return false;
         }
         self.hide_suggest(cx);
@@ -1268,7 +1283,7 @@ impl CodeEditor {
         }
         let (_, regex) = self.word_sources(cx);
         // The word being typed doesn't count.
-        let word_start = self.word_start_at(position);
+        let word_start = self.word_start_at(position, cx);
         let current: String = self
             .snapshot
             .line(position.row)
@@ -1302,10 +1317,11 @@ impl CodeEditor {
             .read(cx)
             .language_id()
             .map_or_else(|| "plaintext".to_string(), |l| l.to_string());
+        let word_start = self.word_start_at(head, cx);
         let word_until: String = line
             .encode_utf16()
-            .skip(self.word_start_at(head) as usize)
-            .take(head.column.saturating_sub(self.word_start_at(head)) as usize)
+            .skip(word_start as usize)
+            .take(head.column.saturating_sub(word_start) as usize)
             .map(|u| char::from_u32(u as u32).unwrap_or('\u{fffd}'))
             .collect();
         (language, line, head.column, word_until)
@@ -1744,18 +1760,18 @@ impl CodeEditor {
         }
         if self.suggest.task.is_some() {
             // Still computing: the results are filtered by what's typed
-            // then, unless the word ended.
-            if !is_word_char(ch) {
+            // then, unless the word (by the language's `wordPattern`)
+            // ended.
+            let head = self.cursors.primary().position;
+            if self.word_start_at(head, cx) == head.column {
                 self.hide_suggest(cx);
             }
             return;
         }
-        if !is_word_char(ch) {
-            return;
-        }
-        // Monaco quick suggestions: after `quick_suggestions_delay`, if the
-        // cursor ends a word (or its first character) and the token type
-        // allows it.
+        // Monaco quick suggestions, after any typing: after
+        // `quick_suggestions_delay`, if the cursor ends a word by the
+        // language's `wordPattern` (or its first character) and the token
+        // type allows it (`quick_suggest`).
         let delay = self.options.quick_suggestions_delay;
         if delay.is_zero() {
             self.quick_suggest(cx);
@@ -1773,10 +1789,9 @@ impl CodeEditor {
 
     /// Monaco `LineContext.shouldAutoTrigger`: a word ends at the cursor (or
     /// the cursor is one character into it) and isn't a number.
-    fn should_auto_trigger(&self, _cx: &gpui::App) -> bool {
+    fn should_auto_trigger(&self, cx: &gpui::App) -> bool {
         let head = self.cursors.primary().position;
-        let start = self.word_start_at(head);
-        let end = self.word_end_at(head);
+        let (start, end) = self.word_columns_at(head, cx);
         if start == head.column || (end != head.column && start + 1 != head.column) {
             return false;
         }
@@ -1910,7 +1925,7 @@ impl CodeEditor {
             return;
         }
         let (auto, trigger_character) = (session.auto, session.trigger_character);
-        let word_start = self.word_start_at(head);
+        let word_start = self.word_start_at(head, cx);
         let on_word = word_start < head.column;
         if head.column < session.position.column {
             // Moved left of the request: ask again while on a word.
@@ -2560,7 +2575,13 @@ impl CodeEditor {
                 .map_or(position.column, |r| r.end.column)
         };
         let overwrite_before = head.column.saturating_sub(start);
-        let overwrite_after = end.saturating_sub(position.column);
+        // Monaco adds the `LineSuffix` delta: after moving right without
+        // typing, the text the cursor passed isn't overwritten again.
+        let suffix_delta = self.suggest.line_suffix.map_or(0, |suffix| {
+            suffix.delta(self.snapshot.rope().line_len_utf16(head.row), head)
+        });
+        let overwrite_after = (i64::from(end) - i64::from(position.column) + suffix_delta)
+            .clamp(0, i64::from(u32::MAX)) as u32;
         // Monaco inserts every item as a snippet (plain text escaped), after
         // its additional edits, as one undo step.
         self.model().update(cx, |model, _| {
@@ -2702,7 +2723,13 @@ impl CodeEditor {
         if !self.options.accept_suggestion_on_commit_character {
             return false;
         }
-        let Some(session) = self.suggest.session.as_ref().filter(|s| s.focused) else {
+        // Monaco accepts only while the widget isn't frozen.
+        let Some(session) = self
+            .suggest
+            .session
+            .as_ref()
+            .filter(|s| s.focused && !s.frozen)
+        else {
             return false;
         };
         let Some(scored) = session.model.filtered().get(session.selected) else {

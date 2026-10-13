@@ -1047,7 +1047,7 @@ impl CodeEditor {
         let rope = self.model().read(cx).buffer().rope().clone();
         let own_uri = self.model().read(cx).uri().cloned();
         let line = rope.line_len_utf16(position.row);
-        let word_start = self.word_start_at(position);
+        let word_start = self.word_start_at(position, cx);
         self.inline.suppress_suggestions = false;
         self.inline.commands.clear();
         let include_inline_edits = self.options.inline_suggest.edits.enabled;
@@ -1368,7 +1368,7 @@ impl CodeEditor {
     ) -> bool {
         let rope = self.model().read(cx).buffer().rope().clone();
         let line = rope.line_len_utf16(position.row);
-        let word_start = self.word_start_at(position);
+        let word_start = self.word_start_at(position, cx);
         let line_text = |row: u32| self.snapshot.line(row);
         lists.iter().flat_map(|list| &list.list.items).any(|item| {
             if item.is_snippet || item.is_inline_edit {

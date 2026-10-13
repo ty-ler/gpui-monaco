@@ -67,7 +67,7 @@ The `language-configuration.json` keys behave as they do in VS Code:
 - `brackets`: bracket matching and bracket-based indentation.
 - `autoClosingPairs`, `autoCloseBefore` and `surroundingPairs`: auto-closing and auto-surround. Without `autoClosingPairs` the brackets auto-close; an empty list closes nothing. The deprecated `__electricCharacterSupport.docComment` auto-closes too, as in Monaco.
 - `indentationRules` and `onEnterRules`: auto-indent on Enter, typing and paste.
-- `wordPattern`: word movement, double-click and completion words.
+- `wordPattern`: word movement, double-click, and completion words, ranges and quick suggestions.
 - `folding.markers`: region markers, added to syntax folding ranges too.
 - `comments`: which tokens count as comments, for auto-close and quick suggestions.
 - `folding.markers` and `folding.offSide`: indentation-based folding with `#region` markers.

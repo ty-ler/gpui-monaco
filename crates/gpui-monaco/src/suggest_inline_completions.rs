@@ -145,46 +145,6 @@ pub(crate) struct SuggestInlineCompletions {
     last: Arc<Mutex<Option<Results>>>,
 }
 
-fn is_word_char(ch: char) -> bool {
-    ch.is_alphanumeric() || ch == '_' || ch == '$'
-}
-
-/// The word around `column` on `line` (Monaco `getWordAtPosition`), as
-/// UTF-16 start and end columns; empty when there's none.
-fn word_at(line: &str, column: u32) -> (u32, u32) {
-    let units: Vec<(u32, char)> = {
-        let mut at = 0;
-        line.chars()
-            .map(|ch| {
-                let start = at;
-                at += ch.len_utf16() as u32;
-                (start, ch)
-            })
-            .collect()
-    };
-    let mut start = column;
-    for &(at, ch) in units.iter().rev() {
-        if at >= column {
-            continue;
-        }
-        if !is_word_char(ch) {
-            break;
-        }
-        start = at;
-    }
-    let mut end = column;
-    for &(at, ch) in &units {
-        if at < column {
-            continue;
-        }
-        if !is_word_char(ch) {
-            break;
-        }
-        end = at + ch.len_utf16() as u32;
-    }
-    (start, end)
-}
-
 impl SuggestInlineCompletions {
     fn new() -> Self {
         Self {
@@ -236,14 +196,22 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
         let Some(model) = config.model.upgrade() else {
             return empty();
         };
-        let (line, token) = {
+        let (line, token, word) = {
             let model = model.read(cx);
             let rope = model.buffer().rope();
             let offset =
                 rope.point_utf16_to_offset(rope.clip_point_utf16(position, text::Bias::Left));
+            // Monaco `getWordAtPosition`: by the language's `wordPattern`.
+            let word = model
+                .word_at_position(position)
+                .filter(|word| word.range.start.row == position.row)
+                .map_or((position.column, position.column), |word| {
+                    (word.range.start.column, word.range.end.column)
+                });
             (
                 rope.line(position.row),
                 model.token_type_at(offset.saturating_sub(1)),
+                word,
             )
         };
         if config.quick_suggestions.value_for(token) != QuickSuggestionsValue::Inline {
@@ -254,7 +222,7 @@ impl InlineCompletionsProvider for SuggestInlineCompletions {
         let all_providers = completion_providers(cx, target.clone());
         // A word, or else a trigger character (word characters win over
         // trigger characters).
-        let mut word = word_at(&line, position.column);
+        let mut word = word;
         let mut trigger = None;
         if word.0 == word.1 {
             trigger = Self::trigger_character_providers(&line, position.column, &all_providers);
@@ -538,13 +506,5 @@ mod tests {
             editor.update_options(options, cx);
             assert!(editor.editor_inline_completions_providers(cx).is_empty());
         });
-    }
-
-    #[test]
-    fn words_around_a_column() {
-        assert_eq!(word_at("he", 2), (0, 2));
-        assert_eq!(word_at("he", 1), (0, 2));
-        assert_eq!(word_at("a.b", 2), (2, 3));
-        assert_eq!(word_at("a. b", 2), (2, 2));
     }
 }
