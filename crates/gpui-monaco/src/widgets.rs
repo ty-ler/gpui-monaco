@@ -668,6 +668,13 @@ pub(crate) struct GlyphWidgetState {
     pub z_index: i32,
 }
 
+/// A view zone's views.
+pub(crate) struct ZoneViews {
+    pub view: AnyView,
+    /// Monaco `marginDomNode`.
+    pub margin_view: Option<AnyView>,
+}
+
 /// Stored view zone: `after_line` tracked with an anchor.
 #[derive(Clone)]
 pub(crate) struct ZoneState {
@@ -683,9 +690,9 @@ pub(crate) struct ZoneState {
     pub ordinal: i64,
     pub suppress_mouse_down: bool,
     pub height: ZoneHeight,
-    pub view: AnyView,
-    /// Monaco `marginDomNode`.
-    pub margin_view: Option<AnyView>,
+    /// Its views, shared so each frame's layout holds them cheaply (an
+    /// editor can have thousands of zones).
+    pub views: Rc<ZoneViews>,
     /// Spans the gutter too, like Monaco's zone widgets (peek views).
     pub full_width: bool,
     /// The wheel over the zone doesn't scroll the editor: Monaco's zone
@@ -781,6 +788,43 @@ pub(crate) struct WidgetPositions {
 /// text version and the zones generation.
 pub(crate) type ZoneRowsKey = (u64, text::Version, u64);
 
+/// What a [`ZoneFrame`] was laid out for: the zones' rows, their sizes and
+/// the line height and top padding.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ZoneFrameKey {
+    pub rows: ZoneRowsKey,
+    pub sizes_generation: u64,
+    pub line_height: Pixels,
+    pub padding_top: Pixels,
+}
+
+/// The shown zones in layout order and their layout, kept across frames.
+#[derive(Clone)]
+pub(crate) struct ZoneFrame {
+    pub key: ZoneFrameKey,
+    pub specs: Rc<Vec<crate::element::ZoneSpec>>,
+    /// Without variable line heights.
+    pub layout: crate::element::ZoneLayout,
+    /// The widest zone minimum width.
+    pub min_width: Pixels,
+}
+
+/// Each zone's model row at a text version, so the rows at the next version
+/// come from the edits in between (Monaco's whitespaces move with
+/// `onLinesInserted` / `onLinesDeleted`) instead of every zone's row being
+/// looked up again after each keystroke.
+#[derive(Clone)]
+pub(crate) struct ZoneModelRows {
+    /// The model they're for.
+    pub model: gpui::EntityId,
+    pub zones_generation: u64,
+    pub version: text::Version,
+    /// The text at `version`.
+    pub rope: text::Rope,
+    /// Per zone, its anchor's row (0 without an anchor).
+    pub rows: Vec<u32>,
+}
+
 /// All embedded views of one editor.
 #[derive(Clone, Default)]
 pub(crate) struct Widgets {
@@ -803,6 +847,12 @@ pub(crate) struct Widgets {
     /// (`view_lines`, text version, `zones_generation`): editors can have
     /// thousands of zones (code lenses).
     pub zone_rows: Option<(ZoneRowsKey, Vec<Option<i64>>)>,
+    /// Each zone's model row, the last time they were computed.
+    pub zone_model_rows: Option<ZoneModelRows>,
+    /// Bumped when a zone's height, minimum width or wheel capture changes.
+    pub zone_sizes_generation: u64,
+    /// The last frame's zones.
+    pub zone_frame: Option<ZoneFrame>,
 }
 
 impl Widgets {
@@ -850,6 +900,7 @@ impl Widgets {
     pub fn set_zone_captures_wheel(&mut self, id: WidgetId) {
         if let Some(zone) = self.zones.iter_mut().find(|z| z.id == id) {
             zone.captures_wheel = true;
+            self.zone_sizes_generation += 1;
         }
     }
 
@@ -931,6 +982,8 @@ impl Widgets {
         self.zone_callbacks = 0;
         self.zones_generation += 1;
         self.zone_rows = None;
+        self.zone_model_rows = None;
+        self.zone_frame = None;
         true
     }
 }

@@ -714,6 +714,8 @@ pub struct CodeEditor {
     pub(crate) scroll_top: Pixels,
     pub(crate) scroll_left: Pixels,
     pub(crate) layout: Option<EditorLayout>,
+    /// The syntax highlights the last frame read.
+    pub(crate) highlight_query_cache: crate::element::HighlightQueryCache,
     #[doc(hidden)]
     /// Shared with in-flight background work (the minimap) and the frame
     /// being painted, so changes go through `Arc::make_mut`.
@@ -1159,6 +1161,7 @@ impl CodeEditor {
             scroll_top: px(0.),
             scroll_left: px(0.),
             layout: None,
+            highlight_query_cache: Default::default(),
             autoscroll_requested: false,
             autoscroll_from_mouse: false,
             autoscroll_minimal: false,
@@ -2042,8 +2045,10 @@ impl CodeEditor {
             ordinal,
             suppress_mouse_down: zone.suppress_mouse_down,
             height: zone.height,
-            view: zone.view,
-            margin_view: zone.margin_view,
+            views: std::rc::Rc::new(crate::widgets::ZoneViews {
+                view: zone.view,
+                margin_view: zone.margin_view,
+            }),
             full_width,
             captures_wheel: false,
             min_width: zone.min_width,
@@ -2080,6 +2085,7 @@ impl CodeEditor {
         match self.widgets.zones.iter_mut().find(|z| z.id == id) {
             Some(zone) if zone.height != height => {
                 zone.height = height;
+                self.widgets.zone_sizes_generation += 1;
                 true
             }
             _ => false,
@@ -4878,7 +4884,7 @@ impl CodeEditor {
                 let segment = row_segment(&self.view_lines, view_line);
                 let tab_size = self.cursor_config(cx).tab_size;
                 let line = layout_segment(
-                    self.snapshot.rope(),
+                    &self.snapshot.rope().line(segment.row),
                     &segment,
                     tab_size,
                     &layout.metrics,

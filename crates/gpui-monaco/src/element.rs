@@ -1017,7 +1017,7 @@ pub(crate) type Injection = (u32, bool, InjectedText, Option<DecorationId>);
 /// `edit-context-composition-secondary` / `-primary`).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn layout_segment<'a>(
-    rope: &Rope,
+    full: &str,
     segment: &RowSegment,
     tab_size: u32,
     metrics: &TextMetrics,
@@ -1028,9 +1028,8 @@ pub(crate) fn layout_segment<'a>(
     marked: Option<(Range<u32>, Option<Range<u32>>, Hsla)>,
     window: &mut Window,
 ) -> LineLayout {
-    let full = rope.line(segment.row);
-    let byte_start = utf16_to_byte(&full, segment.columns.start);
-    let byte_end = utf16_to_byte(&full, segment.columns.end);
+    let byte_start = utf16_to_byte(full, segment.columns.start);
+    let byte_end = utf16_to_byte(full, segment.columns.end);
     let line = &full[byte_start..byte_end];
     let tab_size = tab_size.max(1) as usize;
     let mut display = String::with_capacity(line.len());
@@ -1451,6 +1450,20 @@ pub(crate) fn layout_segment<'a>(
     }
 }
 
+/// The byte offset in `line` (a row's text) of UTF-16 `column`, as
+/// [`Rope::point_utf16_to_offset`] finds it: a column inside a surrogate pair
+/// is the pair's start, and columns past the end are the end.
+fn utf16_column_to_byte(line: &str, column: u32) -> usize {
+    let mut units = 0u32;
+    for (ix, ch) in line.char_indices() {
+        units += ch.len_utf16() as u32;
+        if units > column {
+            return ix;
+        }
+    }
+    line.len()
+}
+
 /// Monaco's `ghost-text-hidden` (`opacity: 0; font-size: 0`): `segment`
 /// shown only up to UTF-16 column `from` of its row, as the end of the row
 /// it holds `from`'s injected text; a later segment shows nothing. `None`
@@ -1866,6 +1879,25 @@ pub(crate) fn current_highlights(
     HighlightSource::new(model).map_or_else(Vec::new, |source| source.highlights(theme, range))
 }
 
+/// The syntax highlights last read for a range of a parse state, so frames
+/// that show the same lines of the same parse (cursor blinks, hovers, a
+/// keystroke drawn before the reparse it starts finishes) don't query the
+/// syntax tree again.
+#[derive(Default)]
+pub(crate) struct HighlightQueryCache {
+    last: Option<HighlightQuery>,
+}
+
+/// Spans read from a parse state.
+struct HighlightQuery {
+    state: syntax::HighlightState,
+    /// The range read, in the state's text.
+    range: Range<usize>,
+    /// Monaco `maxTokenizationLineLength` (longer lines aren't read).
+    max_line_length: u32,
+    spans: std::sync::Arc<[syntax::HighlightSpan]>,
+}
+
 /// Monaco's `inline-selected-text` color: selected text is drawn in
 /// `editor.selectionForeground` only in high-contrast themes (`ViewLine`
 /// adds the decoration when `isHighContrast`), and not when it's
@@ -1944,6 +1976,18 @@ impl HighlightSource {
         theme: &Theme,
         range: Range<usize>,
     ) -> Vec<(Range<usize>, TokenStyle)> {
+        self.highlights_cached(theme, range, None)
+    }
+
+    /// [`HighlightSource::highlights`], reading the parse state's spans
+    /// from `cache` when it has them for the same range, and keeping them
+    /// there.
+    pub(crate) fn highlights_cached(
+        &self,
+        theme: &Theme,
+        range: Range<usize>,
+        cache: Option<&mut HighlightQueryCache>,
+    ) -> Vec<(Range<usize>, TokenStyle)> {
         let syntax = &self.syntax;
         let old_range = match &self.patch {
             None => range,
@@ -1989,26 +2033,52 @@ impl HighlightSource {
                 .or(root);
             theme.style_for_language(span.highlight, language)
         };
-        let mut result = Vec::new();
         // Monaco `maxTokenizationLineLength`: long lines stay plain, and
         // aren't even queried.
-        for old_range in
+        let query = |old_range: Range<usize>| -> Vec<syntax::HighlightSpan> {
             crate::model::tokenized_ranges(syntax.text.rope(), old_range, self.max_line_length)
-        {
-            for span in syntax
-                .highlighter
-                .highlights(&syntax.state, syntax.text.rope(), old_range)
-            {
-                let range = match &self.patch {
-                    None => span.range.clone(),
-                    Some(patch) => {
-                        patch.transform_offset(span.range.start, text::Bias::Right)
-                            ..patch.transform_offset(span.range.end, text::Bias::Left)
-                    }
-                };
-                if range.start < range.end {
-                    result.push((range, style(&span)));
+                .into_iter()
+                .flat_map(|old_range| {
+                    syntax
+                        .highlighter
+                        .highlights(&syntax.state, syntax.text.rope(), old_range)
+                })
+                .collect()
+        };
+        let spans: std::sync::Arc<[syntax::HighlightSpan]> = match cache {
+            None => query(old_range).into(),
+            Some(cache) => match &cache.last {
+                Some(last)
+                    if last.state.ptr_eq(&syntax.state)
+                        && last.range == old_range
+                        && last.max_line_length == self.max_line_length =>
+                {
+                    last.spans.clone()
                 }
+                _ => {
+                    let spans: std::sync::Arc<[syntax::HighlightSpan]> =
+                        query(old_range.clone()).into();
+                    cache.last = Some(HighlightQuery {
+                        state: syntax.state.clone(),
+                        range: old_range,
+                        max_line_length: self.max_line_length,
+                        spans: spans.clone(),
+                    });
+                    spans
+                }
+            },
+        };
+        let mut result = Vec::with_capacity(spans.len());
+        for span in spans.iter() {
+            let range = match &self.patch {
+                None => span.range.clone(),
+                Some(patch) => {
+                    patch.transform_offset(span.range.start, text::Bias::Right)
+                        ..patch.transform_offset(span.range.end, text::Bias::Left)
+                }
+            };
+            if range.start < range.end {
+                result.push((range, style(span)));
             }
         }
         result
@@ -2214,10 +2284,11 @@ fn block_extent(
 /// `after` (-1 for above the first line).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct ZoneLayout {
-    /// (after view line, height), sorted by `after`.
-    zones: Vec<(i64, Pixels)>,
+    /// (after view line, height), sorted by `after`. Shared: there may be
+    /// thousands, and each frame's layout keeps a copy.
+    zones: std::sync::Arc<[(i64, Pixels)]>,
     /// `heights_before[i]`: the total height of zones `..i`.
-    heights_before: Vec<Pixels>,
+    heights_before: std::sync::Arc<[Pixels]>,
     /// View lines taller (or shorter) than the line height (Monaco
     /// `LineHeightsManager`): (view line, extra height), sorted.
     lines: Vec<(u32, Pixels)>,
@@ -2227,7 +2298,9 @@ pub(crate) struct ZoneLayout {
 
 impl ZoneLayout {
     pub fn new(mut zones: Vec<(i64, Pixels)>) -> Self {
-        zones.sort_by_key(|(after, _)| *after);
+        if !zones.is_sorted_by_key(|(after, _)| *after) {
+            zones.sort_by_key(|(after, _)| *after);
+        }
         let mut heights_before = Vec::with_capacity(zones.len() + 1);
         let mut total = px(0.);
         heights_before.push(total);
@@ -2236,8 +2309,8 @@ impl ZoneLayout {
             heights_before.push(total);
         }
         Self {
-            zones,
-            heights_before,
+            zones: zones.into(),
+            heights_before: heights_before.into(),
             lines: Vec::new(),
             extra_before: vec![px(0.)],
         }
@@ -3637,121 +3710,59 @@ fn prepaint_editor(
     // last view line of their row, or the one showing `afterColumn`;
     // hidden when the position after them is folded away, unless
     // `showInHiddenAreas`.
-    let mut zone_specs: Vec<ZoneSpec> = Vec::new();
-    {
-        let model = editor.model().clone();
-        let buffer = model.read(cx).buffer();
+    // The shown zones in layout order, their layout and widest minimum
+    // width: kept while the zones, their rows and sizes are the same, so a
+    // frame without edits (scrolling, a blink) doesn't go over them all.
+    let zone_frame = {
         let key = (
             view_lines.generation(),
-            buffer.version(),
+            editor.model().read(cx).buffer().version(),
             editor.widgets.zones_generation,
         );
-        let cached = editor
+        let frame_key = crate::widgets::ZoneFrameKey {
+            rows: key,
+            sizes_generation: editor.widgets.zone_sizes_generation,
+            line_height,
+            padding_top: options.padding.top,
+        };
+        match editor
             .widgets
-            .zone_rows
+            .zone_frame
             .as_ref()
-            .filter(|(k, _)| *k == key)
-            .map(|(_, rows)| rows.clone());
-        let rows = cached.unwrap_or_else(|| {
-            // Re-based on this version, so resolving stays cheap as edits
-            // pile up.
-            let offsets: Vec<Option<usize>> = editor
-                .widgets
-                .zones
-                .iter_mut()
-                .map(|zone| {
-                    let anchor = zone.anchor.as_mut()?;
-                    *anchor = buffer.refresh(anchor);
-                    Some(buffer.resolve(anchor))
-                })
-                .collect();
-            // Rows in one forward pass over the text (there can be tens of
-            // thousands of zones, e.g. code lenses).
-            let mut order: Vec<usize> = (0..offsets.len())
-                .filter(|&i| offsets[i].is_some())
-                .collect();
-            order.sort_by_key(|&i| offsets[i]);
-            let sorted: Vec<usize> = order.iter().filter_map(|&i| offsets[i]).collect();
-            let mut zone_rows = vec![0u32; offsets.len()];
-            for (&i, point) in order.iter().zip(buffer.rope().offsets_to_points(&sorted)) {
-                zone_rows[i] = point.row;
+            .filter(|frame| frame.key == frame_key)
+        {
+            Some(frame) => frame.clone(),
+            None => {
+                let rows = zone_view_rows(editor, &view_lines, key, cx);
+                // The last frame's list, to fill again without allocating.
+                let reuse = editor
+                    .widgets
+                    .zone_frame
+                    .take()
+                    .and_then(|frame| std::rc::Rc::try_unwrap(frame.specs).ok());
+                let frame = zone_frame(
+                    &editor.widgets.zones,
+                    &rows,
+                    frame_key,
+                    line_height,
+                    options.padding.top,
+                    reuse.unwrap_or_default(),
+                );
+                editor.widgets.zone_frame = Some(frame.clone());
+                frame
             }
-            let rope = buffer.rope();
-            let max_row = rope.max_point().row;
-            offsets
-                .iter()
-                .zip(zone_rows)
-                .zip(&editor.widgets.zones)
-                .map(|((offset, row), zone)| {
-                    // No anchor: above the first line.
-                    let Some(offset) = *offset else {
-                        return Some(-1);
-                    };
-                    // The zone's column: its anchor's with `afterColumn`,
-                    // else the line's end. Measured only when needed: this
-                    // runs for every zone after each edit.
-                    let column = zone
-                        .after_column
-                        .then(|| buffer.offset_to_point_utf16(offset).column);
-                    // The position right after the zone: the next line's
-                    // start after a line's end (the last line's end at the
-                    // end of the text).
-                    let at_line_end = column.is_none_or(|c| c >= rope.line_len_utf16(row));
-                    let before_row = if at_line_end {
-                        (row + 1).min(max_row)
-                    } else {
-                        row
-                    };
-                    if !zone.show_in_hidden_areas && view_lines.is_row_hidden(before_row) {
-                        return None;
-                    }
-                    if !zone.after_column && !view_lines.is_row_hidden(row) {
-                        let lines = view_lines.view_lines_of_row(row);
-                        return Some(lines.end.max(lines.start + 1) as i64 - 1);
-                    }
-                    let column = column.unwrap_or_else(|| rope.line_len_utf16(row));
-                    let point = PointUtf16::new(row, column);
-                    let prefer_previous = zone.after_column_affinity.prefers_previous();
-                    Some(view_lines.to_view(point, prefer_previous).0 as i64)
-                })
-                .collect()
-        });
-        for (index, (zone, after)) in editor.widgets.zones.iter().zip(&rows).enumerate() {
-            let Some(after) = *after else {
-                continue;
-            };
-            let height = match zone.height {
-                crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
-                crate::widgets::ZoneHeight::Pixels(height) => height,
-            };
-            zone_specs.push(ZoneSpec {
-                index,
-                after,
-                ordinal: zone.ordinal,
-                height,
-                view: zone.view.clone(),
-                margin_view: zone.margin_view.clone(),
-                full_width: zone.full_width,
-                captures_wheel: zone.captures_wheel,
-            });
         }
-        editor.widgets.zone_rows = Some((key, rows));
-    }
-    // Monaco `padding.top` comes before everything, view zones above the
-    // first line included.
-    let mut zone_heights: Vec<(i64, Pixels)> = zone_specs
-        .iter()
-        .map(|zone| (zone.after, zone.height))
-        .collect();
-    if options.padding.top > px(0.) {
-        zone_heights.push((-1, options.padding.top));
-    }
+    };
+    let zone_specs = zone_frame.specs.clone();
     let zones =
-        ZoneLayout::new(zone_heights).with_line_heights(if options.allow_variable_line_heights {
-            decoration_line_heights(editor, &view_lines, line_height, cx.entity_id(), cx)
-        } else {
-            Vec::new()
-        });
+        zone_frame
+            .layout
+            .clone()
+            .with_line_heights(if options.allow_variable_line_heights {
+                decoration_line_heights(editor, &view_lines, line_height, cx.entity_id(), cx)
+            } else {
+                Vec::new()
+            });
 
     // Monaco `ViewLayout._computeContentWidth`: wrapping at the viewport,
     // the content is as wide as its widest line, without
@@ -3775,9 +3786,7 @@ fn prepaint_editor(
     // Monaco `minWidthInPx` and `getMinContentWidthInPx`: view zones and
     // overlay widgets that need a wider scroll range.
     if !viewport_wrapping {
-        for zone in &editor.widgets.zones {
-            content_width = content_width.max(zone.min_width);
-        }
+        content_width = content_width.max(zone_frame.min_width);
         for widget in &editor.widgets.overlays {
             content_width = content_width.max(widget.min_content_width);
         }
@@ -4032,8 +4041,15 @@ fn prepaint_editor(
         editor.refresh_semantic_tokens(first.row..last.row + 1, cx);
     }
     let highlights = {
-        let model = editor.model().read(cx);
-        current_highlights(model, &theme, visible_start..visible_end)
+        let model = editor.model().clone();
+        let model = model.read(cx);
+        HighlightSource::new(model).map_or_else(Vec::new, |source| {
+            source.highlights_cached(
+                &theme,
+                visible_start..visible_end,
+                Some(&mut editor.highlight_query_cache),
+            )
+        })
     };
     let highlights = editor.merge_semantic_tokens(highlights, visible_start..visible_end, cx);
     let editor_id = cx.entity_id();
@@ -4080,12 +4096,26 @@ fn prepaint_editor(
     if editor.sync_injected_text(&[], cx) {
         window.request_animation_frame();
     }
+    // Each shown row's byte range and text, read once (segments are in
+    // row order).
+    let mut row_texts: Vec<(u32, Range<usize>, String)> = Vec::new();
+    for segment in &segments {
+        if row_texts.last().map(|(row, _, _)| *row) != Some(segment.row) {
+            let range = snapshot.line_range(segment.row);
+            let text = snapshot.chunks_in_range(range.clone()).collect();
+            row_texts.push((segment.row, range, text));
+        }
+    }
+    let row_text = |row: u32| {
+        let (_, range, text) = &row_texts[row_texts.partition_point(|(r, _, _)| *r < row)];
+        (range.clone(), text.as_str())
+    };
     // Only the drawn parts of lines (long ones stop rendering early).
     let mut rendered: Vec<Range<usize>> = Vec::new();
     for segment in &segments {
-        let start =
-            snapshot.point_utf16_to_offset(PointUtf16::new(segment.row, segment.columns.start));
-        let end = snapshot.point_utf16_to_offset(PointUtf16::new(segment.row, segment.columns.end));
+        let (line_range, text) = row_text(segment.row);
+        let start = line_range.start + utf16_column_to_byte(text, segment.columns.start);
+        let end = line_range.start + utf16_column_to_byte(text, segment.columns.end);
         match rendered.last_mut() {
             // Adjacent segments, or the next row after a line break.
             Some(last) if start <= last.end + 2 => last.end = last.end.max(end),
@@ -4102,7 +4132,7 @@ fn prepaint_editor(
     // viewport.
     let mut max_line_width = px(0.);
     for segment in &segments {
-        let line_range = snapshot.line_range(segment.row);
+        let (line_range, row_text) = row_text(segment.row);
         while highlight_ix < highlights.len() && highlights[highlight_ix].0.end <= line_range.start
         {
             highlight_ix += 1;
@@ -4229,7 +4259,7 @@ fn prepaint_editor(
             None => segment,
         };
         let line = layout_segment(
-            &snapshot,
+            row_text,
             segment,
             tab_size,
             &metrics,
@@ -4582,11 +4612,11 @@ fn prepaint_editor(
         );
         // View zones in the viewport, besides the top padding (Monaco
         // `whitespaceViewportData`).
-        let whitespace_gaps = zone_specs.iter().any(|zone| {
-            zone.height > px(0.)
-                && zone.after + 1 >= first_line as i64
-                && zone.after <= last_line as i64
-        });
+        let first_gap = zone_specs.partition_point(|zone| zone.after + 1 < first_line as i64);
+        let whitespace_gaps = zone_specs[first_gap..]
+            .iter()
+            .take_while(|zone| zone.after <= last_line as i64)
+            .any(|zone| zone.height > px(0.));
         let (minimap, paint) = crate::minimap::prepaint(
             editor,
             crate::minimap::MinimapInput {
@@ -4771,7 +4801,7 @@ fn prepaint_editor(
                     (row_highlights, injections, fonts)
                 };
                 let shaped = layout_segment(
-                    &snapshot,
+                    &snapshot.line(segment.row),
                     &segment,
                     tab_size,
                     &metrics,
@@ -5834,10 +5864,6 @@ fn prepaint_editor(
             let mut text = String::new();
             let mut text_row = None;
             for line in &layout.lines {
-                if text_row != Some(line.row) {
-                    text = rope.line(line.row);
-                    text_row = Some(line.row);
-                }
                 let selected: Vec<Range<u32>> = selections
                     .iter()
                     .filter(|s| s.start().row <= line.row && line.row <= s.end().row)
@@ -5855,6 +5881,16 @@ fn prepaint_editor(
                         start..end
                     })
                     .collect();
+                // Only selected whitespace shows: nothing on this line.
+                if options.render_whitespace == crate::options::RenderWhitespace::Selection
+                    && selected.is_empty()
+                {
+                    continue;
+                }
+                if text_row != Some(line.row) {
+                    text = rope.line(line.row);
+                    text_row = Some(line.row);
+                }
                 let top = layout.text_top(line.view_line);
                 // Monaco scans the view line, injected text included, in
                 // view columns.
@@ -6042,10 +6078,8 @@ fn prepaint_editor(
     // Embedded views; their elements are built after this update returns so
     // host views may read the editor while rendering.
     let mut embedded = Vec::new();
-    let mut zone_specs = zone_specs;
-    // Monaco `LinesLayout`: zones after the same view line by ordinal, ties
-    // in insertion order (a stable sort).
-    zone_specs.sort_by_key(|zone| (zone.after, zone.ordinal));
+    // In layout order: by view line, then ordinal, then insertion.
+    let zone_specs = &*zone_specs;
     // Monaco's zones layer is in the scrolled `linesContent`, as wide as
     // the scroll width (`ViewZones.render`); the margin part is the
     // gutter's width and doesn't scroll horizontally.
@@ -6057,11 +6091,17 @@ fn prepaint_editor(
     let mut zone_reports: Vec<(Option<Pixels>, Pixels)> = Vec::new();
     if editor.widgets.zone_callbacks > 0 {
         zone_reports = vec![(None, px(0.)); editor.widgets.zones.len()];
-        for zone in &zone_specs {
+        for zone in zone_specs {
             zone_reports[zone.index].1 = zone.height;
         }
     }
-    let mut ix = 0;
+    // Only zones on screen are rendered: start at the first that may be
+    // (well above the viewport, so rounding can't skip one) and stop well
+    // below it. Zones are in view line order, so their tops only grow.
+    const ZONE_SLACK: Pixels = px(64.);
+    let mut ix = zone_specs.partition_point(|zone| {
+        zones.line_y((zone.after + 1) as u32, line_height) < scroll_top - ZONE_SLACK
+    });
     while ix < zone_specs.len() {
         let after = zone_specs[ix].after;
         let group_end = ix
@@ -6076,7 +6116,9 @@ fn prepaint_editor(
         let mut top = layout.bounds.top() + zones.line_y((after + 1) as u32, line_height)
             - group_height
             - scroll_top;
-        // Only zones on screen are rendered.
+        if top > layout.bounds.bottom() + ZONE_SLACK {
+            break;
+        }
         if top > layout.bounds.bottom() || top + group_height < layout.bounds.top() {
             ix = group_end;
             continue;
@@ -6108,12 +6150,12 @@ fn prepaint_editor(
                 )
             };
             embedded.push(Embedded::Zone {
-                view: zone.view.clone(),
+                view: zone.views.view.clone(),
                 bounds,
                 full_width: zone.full_width,
                 captures_wheel: zone.captures_wheel,
             });
-            if let Some(margin) = &zone.margin_view
+            if let Some(margin) = &zone.views.margin_view
                 && !zone.full_width
                 && margin_width > px(0.)
             {
@@ -8024,6 +8066,228 @@ impl Embedded {
     }
 }
 
+/// Each zone's view line (`None`: hidden), cached for `key` (the view
+/// lines' generation, the text version and the zones generation).
+fn zone_view_rows(
+    editor: &mut CodeEditor,
+    view_lines: &ViewLines,
+    key: crate::widgets::ZoneRowsKey,
+    cx: &App,
+) -> Vec<Option<i64>> {
+    let model = editor.model().clone();
+    let buffer = model.read(cx).buffer();
+    let cached = editor
+        .widgets
+        .zone_rows
+        .as_ref()
+        .filter(|(k, _)| *k == key)
+        .map(|(_, rows)| rows.clone());
+    let rows = cached.unwrap_or_else(|| {
+        // Re-based on this version, so resolving stays cheap as edits
+        // pile up.
+        let offsets: Vec<Option<usize>> = editor
+            .widgets
+            .zones
+            .iter_mut()
+            .map(|zone| {
+                let anchor = zone.anchor.as_mut()?;
+                *anchor = buffer.refresh(anchor);
+                Some(buffer.resolve(anchor))
+            })
+            .collect();
+        // From the last rows through the edits since (there can be tens
+        // of thousands of zones, e.g. code lenses).
+        let model_id = model.entity_id();
+        let zones_generation = editor.widgets.zones_generation;
+        let previous = editor
+            .widgets
+            .zone_model_rows
+            .as_ref()
+            .filter(|last| last.model == model_id && last.zones_generation == zones_generation)
+            .map(|last| (last.version, &last.rope, last.rows.as_slice()));
+        let zone_rows = zone_model_rows(buffer, &offsets, previous);
+        editor.widgets.zone_model_rows = Some(crate::widgets::ZoneModelRows {
+            model: model_id,
+            zones_generation,
+            version: buffer.version(),
+            rope: buffer.rope().clone(),
+            rows: zone_rows.clone(),
+        });
+        let rope = buffer.rope();
+        let max_row = rope.max_point().row;
+        // Nothing folded or wrapped: each row is its one view line.
+        let identity =
+            view_lines.hidden().is_empty() && view_lines.line_count() == rope.line_count();
+        offsets
+            .iter()
+            .zip(zone_rows)
+            .zip(&editor.widgets.zones)
+            .map(|((offset, row), zone)| {
+                // No anchor: above the first line.
+                let Some(offset) = *offset else {
+                    return Some(-1);
+                };
+                if identity {
+                    return Some(i64::from(row));
+                }
+                // The zone's column: its anchor's with `afterColumn`,
+                // else the line's end. Measured only when needed: this
+                // runs for every zone after each edit.
+                let column = zone
+                    .after_column
+                    .then(|| buffer.offset_to_point_utf16(offset).column);
+                // The position right after the zone: the next line's
+                // start after a line's end (the last line's end at the
+                // end of the text).
+                let at_line_end = column.is_none_or(|c| c >= rope.line_len_utf16(row));
+                let before_row = if at_line_end {
+                    (row + 1).min(max_row)
+                } else {
+                    row
+                };
+                if !zone.show_in_hidden_areas && view_lines.is_row_hidden(before_row) {
+                    return None;
+                }
+                if !zone.after_column && !view_lines.is_row_hidden(row) {
+                    let lines = view_lines.view_lines_of_row(row);
+                    return Some(lines.end.max(lines.start + 1) as i64 - 1);
+                }
+                let column = column.unwrap_or_else(|| rope.line_len_utf16(row));
+                let point = PointUtf16::new(row, column);
+                let prefer_previous = zone.after_column_affinity.prefers_previous();
+                Some(view_lines.to_view(point, prefer_previous).0 as i64)
+            })
+            .collect()
+    });
+    editor.widgets.zone_rows = Some((key, rows.clone()));
+    rows
+}
+
+/// The shown zones (with `rows`, their view lines) in layout order, their
+/// layout and the widest minimum width.
+fn zone_frame(
+    zones: &[crate::widgets::ZoneState],
+    rows: &[Option<i64>],
+    key: crate::widgets::ZoneFrameKey,
+    line_height: Pixels,
+    padding_top: Pixels,
+    mut specs: Vec<ZoneSpec>,
+) -> crate::widgets::ZoneFrame {
+    specs.clear();
+    specs.extend(
+        zones
+            .iter()
+            .zip(rows)
+            .enumerate()
+            .filter_map(|(index, (zone, after))| {
+                let height = match zone.height {
+                    crate::widgets::ZoneHeight::Lines(lines) => line_height * lines,
+                    crate::widgets::ZoneHeight::Pixels(height) => height,
+                };
+                Some(ZoneSpec {
+                    index,
+                    after: (*after)?,
+                    ordinal: zone.ordinal,
+                    height,
+                    views: zone.views.clone(),
+                    full_width: zone.full_width,
+                    captures_wheel: zone.captures_wheel,
+                })
+            }),
+    );
+    // Monaco `LinesLayout`: zones after the same view line by ordinal, ties
+    // in insertion order (a stable sort).
+    if !specs.is_sorted_by_key(|zone| (zone.after, zone.ordinal)) {
+        specs.sort_by_key(|zone| (zone.after, zone.ordinal));
+    }
+    // The heights by view line, then insertion (the order they're summed
+    // in), and `padding.top` before everything but the view zones above
+    // the first line.
+    let mut order: Vec<(i64, usize, Pixels)> = specs
+        .iter()
+        .map(|zone| (zone.after, zone.index, zone.height))
+        .collect();
+    if !order.is_sorted_by_key(|(after, index, _)| (*after, *index)) {
+        order.sort_by_key(|(after, index, _)| (*after, *index));
+    }
+    let mut heights: Vec<(i64, Pixels)> = Vec::with_capacity(order.len() + 1);
+    heights.extend(order.iter().map(|(after, _, height)| (*after, *height)));
+    if padding_top > px(0.) {
+        let at = heights.partition_point(|(after, _)| *after <= -1);
+        heights.insert(at, (-1, padding_top));
+    }
+    crate::widgets::ZoneFrame {
+        key,
+        specs: std::rc::Rc::new(specs),
+        layout: ZoneLayout::new(heights),
+        min_width: zones
+            .iter()
+            .map(|zone| zone.min_width)
+            .fold(px(0.), Pixels::max),
+    }
+}
+
+/// Each zone's model row in `buffer`, by its anchor's offset (`None`: no
+/// anchor, row 0). With `previous` (the text version, its text and the
+/// rows then) for the same zones, rows outside the edits since move by the
+/// lines those added or removed, and only zones in edited text are looked
+/// up again; otherwise all of them are, in one forward pass over the text.
+pub(crate) fn zone_model_rows(
+    buffer: &text::Buffer,
+    offsets: &[Option<usize>],
+    previous: Option<(text::Version, &Rope, &[u32])>,
+) -> Vec<u32> {
+    // Beyond this many edits (multi-cursor typing, a replace all), looking
+    // every row up is about as fast.
+    const MAX_EDITS: usize = 64;
+    let rope = buffer.rope();
+    if let Some((version, old_rope, old_rows)) = previous
+        && old_rows.len() == offsets.len()
+    {
+        let patch = buffer.edits_since(version);
+        if patch.edits().len() <= MAX_EDITS {
+            // Per edit: where it is in the current text, and how far it
+            // moved the rows after it (those of the edits before included).
+            let edits: Vec<(Range<usize>, i64)> = patch
+                .edits()
+                .iter()
+                .map(|edit| {
+                    let new_row = rope.offset_to_point(edit.new.end).row;
+                    let old_row = old_rope.offset_to_point(edit.old.end).row;
+                    (edit.new.clone(), i64::from(new_row) - i64::from(old_row))
+                })
+                .collect();
+            return offsets
+                .iter()
+                .zip(old_rows)
+                .map(|(offset, &old_row)| {
+                    let Some(offset) = *offset else {
+                        return 0;
+                    };
+                    let after = edits.partition_point(|(range, _)| range.start <= offset);
+                    match after.checked_sub(1).map(|ix| &edits[ix]) {
+                        // Before every edit.
+                        None => old_row,
+                        // In edited text.
+                        Some((range, _)) if offset <= range.end => rope.offset_to_point(offset).row,
+                        Some((_, delta)) => (i64::from(old_row) + delta) as u32,
+                    }
+                })
+                .collect();
+        }
+    }
+    let mut order: Vec<usize> = (0..offsets.len())
+        .filter(|&i| offsets[i].is_some())
+        .collect();
+    order.sort_by_key(|&i| offsets[i]);
+    let sorted: Vec<usize> = order.iter().filter_map(|&i| offsets[i]).collect();
+    let mut rows = vec![0u32; offsets.len()];
+    for (&i, point) in order.iter().zip(rope.offsets_to_points(&sorted)) {
+        rows[i] = point.row;
+    }
+    rows
+}
+
 /// A view zone as laid out this frame.
 pub(crate) struct ZoneSpec {
     /// Its index in `Widgets::zones`.
@@ -8033,8 +8297,7 @@ pub(crate) struct ZoneSpec {
     /// Monaco's ordinal among zones after the same view line.
     ordinal: i64,
     height: Pixels,
-    view: gpui::AnyView,
-    margin_view: Option<gpui::AnyView>,
+    views: std::rc::Rc<crate::widgets::ZoneViews>,
     full_width: bool,
     captures_wheel: bool,
 }
@@ -9322,5 +9585,181 @@ mod inline_selected_text_tests {
         assert_eq!(inline_selected_text_color(&high_contrast), Some(red));
         high_contrast.colors.selection_foreground = Some(gpui::hsla(0., 1., 0.5, 0.));
         assert_eq!(inline_selected_text_color(&high_contrast), None);
+    }
+}
+
+#[cfg(test)]
+mod zone_model_rows_tests {
+    use super::zone_model_rows;
+    use text::{Bias, Buffer};
+
+    /// Each anchor's row, looked up directly.
+    fn direct(buffer: &Buffer, offsets: &[Option<usize>]) -> Vec<u32> {
+        offsets
+            .iter()
+            .map(|offset| offset.map_or(0, |o| buffer.rope().offset_to_point(o).row))
+            .collect()
+    }
+
+    /// The rows carried through edits (one or several batches, undo, edits
+    /// touching anchors from either side, adding and removing lines) are
+    /// the rows looked up again.
+    #[test]
+    fn rows_follow_edits() {
+        let text: String = (0..200).map(|i| format!("line {i}\n")).collect();
+        let mut buffer = Buffer::new(&text);
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = |bound: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % bound.max(1) as u64) as usize
+        };
+        let mut anchors: Vec<Option<text::Anchor>> = (0..300)
+            .map(|i| {
+                (i % 17 != 0).then(|| {
+                    let bias = if i % 2 == 0 { Bias::Left } else { Bias::Right };
+                    buffer.anchor_at(next(buffer.len() + 1), bias)
+                })
+            })
+            .collect();
+        anchors.push(Some(buffer.anchor_at(buffer.len(), Bias::Right)));
+        let resolve = |buffer: &Buffer, anchors: &[Option<text::Anchor>]| -> Vec<Option<usize>> {
+            anchors
+                .iter()
+                .map(|a| a.as_ref().map(|a| buffer.resolve(a)))
+                .collect()
+        };
+        let offsets = resolve(&buffer, &anchors);
+        let mut last = (
+            buffer.version(),
+            buffer.rope().clone(),
+            zone_model_rows(&buffer, &offsets, None),
+        );
+        assert_eq!(last.2, direct(&buffer, &offsets));
+        let inserts = ["", "x", "\n", "a\nb", "\n\n\n", "long text\nwith lines\n"];
+        for round in 0..300 {
+            for _ in 0..1 + next(3) {
+                if round % 23 == 22 {
+                    buffer.undo();
+                    continue;
+                }
+                let mut edits = Vec::new();
+                let mut at = 0;
+                for _ in 0..1 + next(4) {
+                    let len = buffer.len();
+                    if at >= len {
+                        break;
+                    }
+                    let start = at + next((len - at).min(400));
+                    let end = (start + next(40)).min(len);
+                    edits.push((start..end, inserts[next(inserts.len())]));
+                    at = end + 1;
+                }
+                buffer.edit(edits).unwrap();
+            }
+            let offsets = resolve(&buffer, &anchors);
+            let rows = zone_model_rows(&buffer, &offsets, Some((last.0, &last.1, &last.2)));
+            assert_eq!(rows, direct(&buffer, &offsets), "round {round}");
+            last = (buffer.version(), buffer.rope().clone(), rows);
+        }
+    }
+
+    /// Without edits since, the rows are the last ones.
+    #[test]
+    fn rows_without_edits_are_kept() {
+        let buffer = Buffer::new("a\nb\nc\n");
+        let offsets = [Some(0), None, Some(4)];
+        let stale = [7, 0, 9];
+        let rows = zone_model_rows(
+            &buffer,
+            &offsets,
+            Some((buffer.version(), buffer.rope(), &stale)),
+        );
+        assert_eq!(rows, stale);
+        // A different number of zones: looked up again.
+        let rows = zone_model_rows(
+            &buffer,
+            &offsets,
+            Some((buffer.version(), buffer.rope(), &[1])),
+        );
+        assert_eq!(rows, [0, 0, 2]);
+    }
+}
+
+#[cfg(test)]
+mod highlight_query_cache_tests {
+    use super::{HighlightQueryCache, HighlightSource};
+    use crate::model::TextModel;
+    use crate::theme::Theme;
+    use gpui::{AppContext as _, TestAppContext};
+
+    /// Cached highlights are the uncached ones: for the same range of the
+    /// same parse (read again, not queried), through edits the parse
+    /// hasn't caught up with, for other ranges and after a new parse.
+    #[gpui::test]
+    fn cached_highlights_match_uncached(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::set_language_registry(cx, gpui_monaco_languages::registry()));
+        let text: String = (0..40)
+            .map(|i| format!("fn f{i}() {{ let s = \"{i}\"; }} // {i}\n"))
+            .collect();
+        let model = cx.new(|_| TextModel::new(&text).with_language("rust"));
+        model.update(cx, |model, cx| model.ensure_syntax(cx));
+        cx.run_until_parked();
+        let theme = Theme::vs_dark();
+        let mut cache = HighlightQueryCache::default();
+        let mut check = |model: &TextModel, range: std::ops::Range<usize>| {
+            let source = HighlightSource::new(model).unwrap();
+            let cached = source.highlights_cached(&theme, range.clone(), Some(&mut cache));
+            assert!(!cached.is_empty());
+            assert_eq!(cached, source.highlights(&theme, range));
+            // What's kept is for the model's latest parse.
+            let last = cache.last.as_ref().unwrap();
+            assert!(last.state.ptr_eq(&model.syntax_snapshot().unwrap().state));
+            last.spans.clone()
+        };
+        let spans = model.read_with(cx, |model, _| check(model, 100..600));
+        let again = model.read_with(cx, |model, _| check(model, 100..600));
+        assert!(std::sync::Arc::ptr_eq(&spans, &again));
+        // Typing after the range, before the reparse: the same spans.
+        model.update(cx, |model, cx| model.edit([(700..700, "x")], cx).unwrap());
+        let lagging = model.read_with(cx, |model, _| {
+            assert_ne!(
+                model.syntax_snapshot().unwrap().text.version(),
+                model.version()
+            );
+            check(model, 100..600)
+        });
+        assert!(std::sync::Arc::ptr_eq(&spans, &lagging));
+        // Typing inside it: shifted through the edit.
+        model.update(cx, |model, cx| model.edit([(300..300, "\"")], cx).unwrap());
+        model.read_with(cx, |model, _| check(model, 100..601));
+        model.read_with(cx, |model, _| check(model, 0..900));
+        // A new parse is queried again.
+        cx.run_until_parked();
+        let parsed = model.read_with(cx, |model, _| check(model, 0..900));
+        let again = model.read_with(cx, |model, _| check(model, 0..900));
+        assert!(std::sync::Arc::ptr_eq(&parsed, &again));
+    }
+}
+
+#[cfg(test)]
+mod utf16_column_tests {
+    use super::utf16_column_to_byte;
+    use text::{PointUtf16, Rope};
+
+    /// A row's UTF-16 column is at the byte the rope puts it: inside a
+    /// surrogate pair at the pair's start, past the end at the end.
+    #[test]
+    fn columns_match_the_rope() {
+        let rope = Rope::from("ab\u{1F600}c\u{e9}\td\nnext");
+        let line = rope.line(0);
+        for column in 0..12 {
+            assert_eq!(
+                utf16_column_to_byte(&line, column),
+                rope.point_utf16_to_offset(PointUtf16::new(0, column)),
+                "column {column}"
+            );
+        }
     }
 }

@@ -6884,6 +6884,7 @@ impl CodeEditor {
             && zone.min_width != width
         {
             zone.min_width = width;
+            self.widgets.zone_sizes_generation += 1;
             cx.notify();
         }
     }

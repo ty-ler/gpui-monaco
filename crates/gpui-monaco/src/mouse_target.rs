@@ -176,12 +176,12 @@ impl CodeEditor {
             EmbeddedKind::ViewZone => widgets
                 .zones
                 .iter()
-                .find(|w| w.view.entity_id() == view)
+                .find(|w| w.views.view.entity_id() == view)
                 .map(|w| w.id),
             EmbeddedKind::ViewZoneMargin => widgets
                 .zones
                 .iter()
-                .find(|w| w.margin_view.as_ref().map(|v| v.entity_id()) == Some(view))
+                .find(|w| w.views.margin_view.as_ref().map(|v| v.entity_id()) == Some(view))
                 .map(|w| w.id),
             EmbeddedKind::ContentWidget => widgets
                 .content

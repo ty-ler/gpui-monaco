@@ -378,6 +378,7 @@ impl CodeEditor {
             return;
         }
         self.code_lens.height = height;
+        self.widgets.zone_sizes_generation += 1;
         for group in &self.code_lens.groups {
             if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == group.zone) {
                 zone.height = ZoneHeight::Pixels(height);
