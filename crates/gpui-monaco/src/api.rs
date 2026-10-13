@@ -230,7 +230,12 @@ impl TextModel {
     /// at `position` in the language before counts too.
     pub fn word_at_position(&self, position: PointUtf16) -> Option<WordAtPosition> {
         let position = self.validate_position(position);
-        let line = self.line_content(position.row);
+        let rope = self.buffer().rope();
+        let line_range = rope.line_range(position.row);
+        // A line of at most `maxLen` bytes is searched whole; a longer one
+        // is read only around `position`.
+        let line = (line_range.len() <= WORD_SEARCH_MAX_LEN as usize)
+            .then(|| rope.chunks_in_range(line_range.clone()).collect::<String>());
         let (runs, ix, column) = self.language_run_at(position);
         let word_in = |run: &LanguageRun| {
             let pattern = run
@@ -241,10 +246,34 @@ impl TextModel {
                 Some(regex) => regex,
                 None => cursor::in_place_replace::default_word_regex(),
             };
-            let offset = cursor::strings::utf16_len(&line[..run.columns.start]);
+            let (text, offset) = match &line {
+                Some(line) => (
+                    std::borrow::Cow::Borrowed(&line[run.columns.clone()]),
+                    cursor::strings::utf16_len(&line[..run.columns.start]),
+                ),
+                None => {
+                    // The run's UTF-16 columns, and the part of it
+                    // searched.
+                    let run_start = rope
+                        .offset_to_point_utf16(line_range.start + run.columns.start)
+                        .column;
+                    let run_end = rope
+                        .offset_to_point_utf16(line_range.start + run.columns.end)
+                        .column;
+                    let (window, offset) = word_search_window(position.column, run_end - run_start);
+                    let units = rope.line_units_utf16(
+                        position.row,
+                        run_start + window.start..run_start + window.end,
+                    );
+                    (
+                        std::borrow::Cow::Owned(String::from_utf16_lossy(&units)),
+                        run_start + offset,
+                    )
+                }
+            };
             let word = cursor::in_place_replace::word_at(
-                &line[run.columns.clone()],
-                position.column - offset,
+                &text,
+                position.column.checked_sub(offset)?,
                 regex,
             )?;
             Some(word.start + offset..word.end + offset)
@@ -2294,4 +2323,25 @@ impl CodeEditor {
             height: layout.line_height_of(line.view_line),
         })
     }
+}
+
+/// Monaco `getWordAtText`'s `maxLen` (its default config): longer text
+/// isn't searched whole for the word at a position.
+const WORD_SEARCH_MAX_LEN: u32 = 1000;
+
+/// The part of a language run `len` UTF-16 units long that Monaco
+/// `getWordAtText` searches for the word at `column` (0-based, in the
+/// line), as columns in the run, and the run column the search's text
+/// starts at (Monaco's `textOffset`, minus the run's). Text longer than
+/// `maxLen` is cut to `maxLen / 2` units each side of the 1-based column,
+/// counted from the run's start as Monaco does (not the line's).
+fn word_search_window(column: u32, len: u32) -> (Range<u32>, u32) {
+    if len <= WORD_SEARCH_MAX_LEN {
+        return (0..len, 0);
+    }
+    // JavaScript's `substring(start, column + maxLen / 2)`, clamped.
+    let column = column + 1;
+    let start = column.saturating_sub(WORD_SEARCH_MAX_LEN / 2);
+    let end = (column + WORD_SEARCH_MAX_LEN / 2).min(len);
+    (start.min(len)..end, start)
 }

@@ -9,14 +9,14 @@ Measured in the playground's perf mode with `PLAYGROUND_PLAIN=1` (release, Apple
 | File | First frame | Keystroke, median / p95 | Page Down, median / p95 |
 |---|---|---|---|
 | 1M lines, 35MB of Rust | 340ms | 2.2 / 4.5ms | 2.0 / 4.3ms |
-| One 2MB line of minified JS | 270ms | 11 / 16ms | 8.3 / 9.3ms |
+| One 2MB line of minified JS | 270ms | 2.2 / 2.8ms | 8.3 / 9.3ms |
 
 What keeps them responsive:
 
 - **Monaco's long-line limits:**
   - `stop_rendering_line_after` (10 000 by default) draws a "Show more" chip instead of the rest of the line.
   - `max_tokenization_line_length` (20 000, a `ModelOptions` field) leaves longer lines unhighlighted, so they count as plain text for brackets and indentation.
-- **Chunked shaping:** long lines are shaped in chunks ending at delimiters, so an edit reshapes one chunk and GPUI's layout cache keeps the rest.
+- **Chunked shaping:** long lines are shaped in chunks of a few hundred bytes ending at delimiters, so an edit reshapes one chunk and GPUI's layout cache keeps the rest. The cuts are content-defined (a rolling hash of the bytes before a cut picks it, not the distance from the previous cut), so the chunks after an edit come back with the same text; with cuts counted from the previous one, a shifted cut moved every cut after it and a keystroke could reshape most of the line.
 - **Windowed scans:** bracket matching only scans 20 000 units each way on a line. Cursor validation and the line queries cursor commands use slice the rope instead of copying whole lines.
 - **One computation at a time:** fold ranges and bracket pairs run one whole-document pass at a time and catch up when it finishes, instead of piling up a pass per keystroke.
 - **Batched lookups:** view zones (e.g. thousands of code lenses) find their rows in one forward pass over the text, and `Rope::offset_to_point` counts line breaks per chunk instead of walking characters.
@@ -102,10 +102,11 @@ Each of these was a measured hot spot on large files:
   - `ViewLines` and `Buffer` are shared, not cloned, each frame.
   - View zones (thousands with code lenses) are laid out once and kept while the zones, their rows and sizes stay the same; only the zones on screen are visited to render them. After an edit, zone rows move by the lines the edits added or removed, and only zones in edited text are looked up again.
   - The syntax spans read for the visible lines are kept for their parse, so a frame showing the same lines of the same parse doesn't query the tree again.
-  - Each shown row's text is read once per frame and shared by the passes that need it.
+  - Each shown row's text is read once per frame and shared by the passes that need it, only as far as its shown segments go (a long line stops rendering at 10 000 columns), and so is rendered whitespace's.
+  - The syntax spans replaced by a newer parse's are dropped on the background executor: they can hold the last reference to the old tree, and freeing a big file's tree took several milliseconds of a frame.
   - Inlay hints for the scrolled-to rows replace only those rows' hints, as Monaco's `_updateHintsDecorators` does. Each hint keeps a slot with its decorations, so the hints elsewhere (all the hints shown so far) aren't moved, re-indexed or rehashed. While no edit has moved the decorations since they were shown, the rows' hints are found by binary search in the hints' order and spliced out. After an edit, every position is read from the decorations again.
   - `ViewLines` keeps its per-row data (projections and view-line counts) in `Arc`'d chunks of about 1,000 rows, with a prefix sum per chunk and the running total before each chunk. Views that keep an older mapping (the minimap's tiles plan their redraws from it) share the chunks, so an edit copies only the chunks it touches instead of the whole document, and dropping the old mapping frees only those. Inserting or deleting lines splices only the chunks at the edit's ends.
-- **Per-keystroke work on a line scales with the columns it needs, not the line.** On a long line (minified code), fetching the whole line as a `String`, or encoding it to UTF-16, on every keystroke is most of the cost. `Rope::line_units_utf16` reads only the UTF-16 columns asked for, so ghost text and the suggest preview (`LineSource`), the minimap's decoration offsets (`ViewLines::line_content_prefix`, up to the minimap's width) and indent guides (leading whitespace only) read just that. Bracket matching skips the position-to-offset lookup when a block has no strings or comments, and checks a bracket's first code unit before comparing it.
+- **Per-keystroke work on a line scales with the columns it needs, not the line.** On a long line (minified code), fetching the whole line as a `String`, or encoding it to UTF-16, on every keystroke is most of the cost. `Rope::line_units_utf16` reads only the UTF-16 columns asked for, so ghost text and the suggest preview (`LineSource`), the minimap's decoration offsets (`ViewLines::line_content_prefix`, up to the minimap's width) and indent guides (leading whitespace only) read just that. `TextModel::word_at_position` (the suggest widget's word on every keystroke) reads only Monaco `getWordAtText`'s window of 500 units each side of the cursor on a line longer than 1000, and the suggest widget's indentation check and leading line content read only up to the cursor. Bracket matching skips the position-to-offset lookup when a block has no strings or comments, and checks a bracket's first code unit before comparing it.
 - **Opening a file avoids per-line work.**
   - Indentation guessing streams its 10 000 lines from the rope instead of copying and encoding each one.
   - Rope chunks of ASCII text are measured a line at a time, not a char at a time.
