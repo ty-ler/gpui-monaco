@@ -231,6 +231,39 @@ fn code_lens_option(cx: &mut TestAppContext) {
     assert!(lenses(&editor, cx).is_empty());
 }
 
+/// Monaco removes the lenses' zones in one `changeViewZones`: one
+/// `ViewZonesChanged` however many there are (removing thousands one by
+/// one was quadratic).
+#[gpui::test]
+fn lens_zones_go_in_one_change(cx: &mut TestAppContext) {
+    let text = (0..50)
+        .map(|i| format!("fn f{i}() {{}}\n"))
+        .collect::<String>();
+    let (editor, cx, _) = setup(&text, cx);
+    assert_eq!(lenses(&editor, cx).len(), 50);
+    assert!(zones_above(10, &editor, cx) > gpui::px(0.));
+    let changes = Rc::new(Cell::new(0));
+    let counter = changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &CodeEditorEvent, _| {
+            if matches!(event, CodeEditorEvent::ViewZonesChanged) {
+                counter.set(counter.get() + 1);
+            }
+        })
+        .detach();
+    });
+    editor.update(cx, |e, cx| {
+        let mut options = e.options().clone();
+        options.code_lens = false;
+        e.update_options(options, cx);
+    });
+    assert!(lenses(&editor, cx).is_empty());
+    assert_eq!(changes.get(), 1);
+    for row in [0, 10, 49] {
+        assert_eq!(zones_above(row, &editor, cx), gpui::px(0.));
+    }
+}
+
 #[gpui::test]
 fn show_lenses_in_current_line(cx: &mut TestAppContext) {
     let (editor, cx, _) = setup("fn a() {}\nlet x;\n", cx);

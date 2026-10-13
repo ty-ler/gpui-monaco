@@ -15,7 +15,9 @@ fn is_unusual_line_terminator(ch: char) -> bool {
 
 /// Whether `text` has an unusual line terminator.
 pub(crate) fn contains_unusual_line_terminators(text: &str) -> bool {
-    text.contains(is_unusual_line_terminator)
+    // Searching for each char is a byte search (`memchr`), much faster than
+    // testing every char.
+    text.contains('\u{2028}') || text.contains('\u{2029}')
 }
 
 impl CodeEditor {

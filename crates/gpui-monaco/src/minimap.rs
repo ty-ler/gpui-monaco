@@ -1156,6 +1156,13 @@ fn render_lines(
     } else {
         Vec::new()
     };
+    // `render_line` stops at the minimap's edge, and every unit moves it on
+    // by a char's width at least: the units past these aren't drawn (a
+    // minified file's line can be megabytes).
+    let max_units = match style.char_width {
+        0 => usize::MAX,
+        char_width => (width / char_width) as usize + 2,
+    };
     let mut content = Vec::new();
     let mut line_colors = Vec::new();
     let (mut row_content, mut row_colors) = (Vec::new(), Vec::new());
@@ -1169,31 +1176,30 @@ fn render_lines(
             line_highlights = colored(row_range(segment.row, segment.row));
             &line_highlights
         };
-        let full = snapshot.line(segment.row);
         let line_start = snapshot.point_to_offset(text::Point::new(segment.row, 0));
         content.clear();
         line_colors.clear();
         let injected = view_lines.injected_text(segment.row);
         if injected.is_empty() {
-            let byte_start = utf16_to_byte(&full, segment.columns.start);
-            let byte_end = utf16_to_byte(&full, segment.columns.end);
             // Continuation lines start with their indentation (Monaco's
             // view line content).
             for _ in 0..segment.indent {
                 content.push(u16::from(b' '));
                 line_colors.push(default_color);
             }
-            let mut next = spans.partition_point(|(r, _)| r.end <= line_start + byte_start);
-            push_colored(
+            push_row_segment(
                 &mut content,
                 &mut line_colors,
-                &full[byte_start..byte_end],
-                line_start + byte_start,
+                snapshot,
+                line_start,
+                segment.row,
+                segment.columns.clone(),
                 spans,
-                &mut next,
                 default_color,
+                max_units,
             );
         } else {
+            let full = snapshot.line(segment.row);
             // Monaco's view line content has the injected text (inlay
             // hints, `before`/`after` content, ghost text), in its own
             // `tokens` or the default token color
@@ -1292,6 +1298,62 @@ fn push_colored(
         for unit in ch.encode_utf16(&mut buf) {
             content.push(*unit);
             colors.push(color);
+        }
+    }
+}
+
+/// [`push_colored`] for the part of `row` from UTF-16 column
+/// `columns.start` to `columns.end` (the chars starting in that range, as
+/// [`utf16_to_byte`] cuts it), read from the rope as it goes and stopping
+/// once `content` has `max_units` units.
+#[allow(clippy::too_many_arguments)]
+fn push_row_segment(
+    content: &mut Vec<u16>,
+    colors: &mut Vec<Rgba8>,
+    rope: &text::Rope,
+    line_start: usize,
+    row: u32,
+    columns: std::ops::Range<u32>,
+    spans: &[(std::ops::Range<usize>, Option<Rgba8>)],
+    default_color: Rgba8,
+    max_units: usize,
+) {
+    // Where the segment starts, without walking the row up to it: inside a
+    // surrogate pair is after it.
+    let (mut units, mut offset) = if columns.start == 0 {
+        (0, line_start)
+    } else {
+        let start = rope.locate(PointUtf16::new(row, columns.start));
+        (start.point_utf16.column, start.offset)
+    };
+    if units < columns.start
+        && let Some(ch) = rope.chars_at(offset).next().filter(|ch| *ch != '\n')
+    {
+        units += ch.len_utf16() as u32;
+        offset += ch.len_utf8();
+    }
+    let mut next = None;
+    let mut buf = [0u16; 2];
+    for chunk in rope.chunks_in_range(offset..rope.len()) {
+        for ch in chunk.chars() {
+            if ch == '\n' || units >= columns.end || content.len() >= max_units {
+                return;
+            }
+            let next = next.get_or_insert_with(|| spans.partition_point(|(r, _)| r.end <= offset));
+            while spans.get(*next).is_some_and(|(r, _)| r.end <= offset) {
+                *next += 1;
+            }
+            let color = spans
+                .get(*next)
+                .filter(|(r, _)| r.start <= offset)
+                .and_then(|(_, color)| *color)
+                .unwrap_or(default_color);
+            for unit in ch.encode_utf16(&mut buf) {
+                content.push(*unit);
+                colors.push(color);
+            }
+            units += ch.len_utf16() as u32;
+            offset += ch.len_utf8();
         }
     }
 }
@@ -1658,5 +1720,77 @@ impl CodeEditor {
             .as_ref()
             .and_then(|l| l.minimap_paint.as_ref())
             .is_some_and(|p| p.shadow.is_some())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn color(r: u8) -> Rgba8 {
+        Rgba8 {
+            r,
+            ..Default::default()
+        }
+    }
+
+    /// Reading a row segment from the rope pushes what cutting the row's
+    /// text at its UTF-16 columns did, colors too, up to the limit.
+    #[test]
+    fn row_segments_match_the_cut_line() {
+        let text = "ab\n\tx𝄞y日本 z,\n\nlast 𝄞";
+        let rope = text::Rope::from(text);
+        let spans = vec![
+            (1..4, Some(color(1))),
+            (6..12, Some(color(2))),
+            (14..15, None),
+        ];
+        let default = color(9);
+        for row in 0..rope.line_count() {
+            let line = rope.line(row);
+            let line_start = rope.point_to_offset(text::Point::new(row, 0));
+            let len = line.encode_utf16().count() as u32;
+            for start in 0..=len + 1 {
+                for end in start..=len + 1 {
+                    for max_units in [0, 1, 3, usize::MAX] {
+                        let (mut content, mut colors) = (Vec::new(), Vec::new());
+                        push_row_segment(
+                            &mut content,
+                            &mut colors,
+                            &rope,
+                            line_start,
+                            row,
+                            start..end,
+                            &spans,
+                            default,
+                            max_units,
+                        );
+                        let (byte_start, byte_end) =
+                            (utf16_to_byte(&line, start), utf16_to_byte(&line, end));
+                        let (mut expected, mut expected_colors) = (Vec::new(), Vec::new());
+                        let mut next =
+                            spans.partition_point(|(r, _)| r.end <= line_start + byte_start);
+                        push_colored(
+                            &mut expected,
+                            &mut expected_colors,
+                            &line[byte_start..byte_end],
+                            line_start + byte_start,
+                            &spans,
+                            &mut next,
+                            default,
+                        );
+                        // Whole chars, stopping once at the limit.
+                        let shown = (0..=expected.len())
+                            .find(|&n| {
+                                n == expected.len()
+                                    || (n >= max_units && !(0xDC00..=0xDFFF).contains(&expected[n]))
+                            })
+                            .unwrap();
+                        assert_eq!(content, expected[..shown], "row {row}, {start}..{end}");
+                        assert_eq!(colors, expected_colors[..shown]);
+                    }
+                }
+            }
+        }
     }
 }

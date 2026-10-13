@@ -24,6 +24,14 @@ impl LineEnding {
     /// half of the line breaks contain a `\r`, else LF; `default` when the text
     /// has no line breaks.
     pub fn detect(text: &str, default: LineEnding) -> LineEnding {
+        // Without a `\r` (most text), the bytes needn't be counted.
+        if !text.contains('\r') {
+            return if text.contains('\n') {
+                LineEnding::Lf
+            } else {
+                default
+            };
+        }
         let bytes = text.as_bytes();
         let (mut cr, mut lf, mut crlf) = (0usize, 0usize, 0usize);
         let mut i = 0;

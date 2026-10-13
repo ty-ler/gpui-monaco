@@ -59,6 +59,61 @@ impl TextSummary {
 
 impl From<&str> for TextSummary {
     fn from(text: &str) -> Self {
+        if text.is_ascii() {
+            Self::from_ascii(text)
+        } else {
+            Self::from_chars(text)
+        }
+    }
+}
+
+impl TextSummary {
+    /// [`TextSummary::from`] for ASCII text, where every char is one byte
+    /// and one UTF-16 unit: measured a line at a time.
+    fn from_ascii(text: &str) -> Self {
+        let mut row = 0;
+        let mut first_line_chars = None;
+        let mut line_start = 0;
+        let mut longest_row = 0;
+        let mut longest_row_chars = 0;
+        // Chunks are short and so are lines: a plain loop beats searching
+        // for each `\n`.
+        for (ix, &byte) in text.as_bytes().iter().enumerate() {
+            if byte == b'\n' {
+                let line_chars = (ix - line_start) as u32;
+                first_line_chars.get_or_insert(line_chars);
+                if line_chars > longest_row_chars {
+                    longest_row = row;
+                    longest_row_chars = line_chars;
+                }
+                row += 1;
+                line_start = ix + 1;
+            }
+        }
+        let len = text.len();
+        let line_chars = (len - line_start) as u32;
+        let first_line_chars = first_line_chars.unwrap_or(line_chars);
+        if line_chars > longest_row_chars {
+            longest_row = row;
+            longest_row_chars = line_chars;
+        }
+        Self {
+            extent: Location {
+                offset: len,
+                offset_utf16: OffsetUtf16(len),
+                point: Point::new(row, line_chars),
+                point_utf16: PointUtf16::new(row, line_chars),
+                chars: len,
+            },
+            first_line_chars,
+            last_line_chars: line_chars,
+            longest_row,
+            longest_row_chars,
+        }
+    }
+
+    /// [`TextSummary::from`], a char at a time.
+    fn from_chars(text: &str) -> Self {
         let mut extent = Location::default();
         let mut first_line_chars = 0;
         let mut line_chars = 0u32;
@@ -357,7 +412,61 @@ impl Rope {
 
     /// Converts a [`Point`] to a byte offset, clamping like [`Rope::locate`].
     pub fn point_to_offset(&self, point: Point) -> usize {
-        self.locate(point).offset
+        let (start, text, local) = self.seek_point(point);
+        start.offset + local.min(text.len())
+    }
+
+    /// [`Rope::locate`] for a [`Point`] without its char-by-char walk (row
+    /// starts and line lengths are hot, e.g. per minimap line): the start
+    /// of the chunk with `point`, its text, and the byte in it `point`
+    /// clamps to.
+    fn seek_point(&self, point: Point) -> (Location, &str, usize) {
+        let mut cursor = self.chunks.cursor::<TextSummary>(());
+        cursor.seek(&Seek(point), Bias::Left);
+        let start = cursor.start().extent;
+        let Some(chunk) = cursor.item() else {
+            return (start, "", 0);
+        };
+        let text = chunk.0.as_str();
+        // Where `point.row` starts in the chunk, and its column there.
+        let (line_start, column) = if point.row == start.point.row {
+            (0, start.point.column)
+        } else if point.row < start.point.row {
+            return (start, text, 0);
+        } else {
+            let newlines = (point.row - start.point.row) as usize;
+            match text.match_indices('\n').nth(newlines - 1) {
+                Some((ix, _)) => (ix + 1, 0),
+                // The row is past the chunk: its end.
+                None => return (start, text, text.len()),
+            }
+        };
+        if point.column < column {
+            return (start, text, 0);
+        }
+        let line_end = text[line_start..]
+            .find('\n')
+            .map_or(text.len(), |ix| line_start + ix);
+        let mut local = line_start
+            .saturating_add((point.column - column) as usize)
+            .min(line_end);
+        while !text.is_char_boundary(local) {
+            local -= 1;
+        }
+        (start, text, local)
+    }
+
+    /// [`Rope::locate`] for a [`Point`], measuring only the chunk's text
+    /// before it.
+    fn locate_point(&self, point: Point) -> Location {
+        let (mut location, text, local) = self.seek_point(point);
+        let prefix = TextSummary::from(&text[..local]).extent;
+        location.offset += prefix.offset;
+        location.offset_utf16 += prefix.offset_utf16;
+        location.chars += prefix.chars;
+        location.point += prefix.point;
+        location.point_utf16 += prefix.point_utf16;
+        location
     }
 
     /// Converts a byte offset to a [`PointUtf16`], clamping like [`Rope::locate`].
@@ -372,7 +481,7 @@ impl Rope {
 
     /// Converts a byte-column [`Point`] to a UTF-16 [`PointUtf16`], clamping like [`Rope::locate`].
     pub fn point_to_point_utf16(&self, point: Point) -> PointUtf16 {
-        self.locate(point).point_utf16
+        self.locate_point(point).point_utf16
     }
 
     /// Converts a UTF-16 [`PointUtf16`] to a byte-column [`Point`], clamping like [`Rope::locate`].
@@ -452,7 +561,7 @@ impl Rope {
         if row > self.max_point().row {
             return 0;
         }
-        self.locate(Point::new(row, u32::MAX)).point.column
+        self.locate_point(Point::new(row, u32::MAX)).point.column
     }
 
     /// Length of `row` in UTF-16 code units, excluding the newline.
@@ -460,7 +569,9 @@ impl Rope {
         if row > self.max_point().row {
             return 0;
         }
-        self.locate(Point::new(row, u32::MAX)).point_utf16.column
+        self.locate_point(Point::new(row, u32::MAX))
+            .point_utf16
+            .column
     }
 
     /// Byte range of `row`, excluding the newline.
@@ -795,6 +906,31 @@ mod tests {
     }
 
     proptest! {
+        // The ASCII summary measures what the char-at-a-time one does.
+        #[test]
+        fn ascii_summary_matches_chars(text in "[a-c \n]{0,300}") {
+            prop_assert_eq!(TextSummary::from_ascii(&text), TextSummary::from_chars(&text));
+        }
+
+        // Points located without the char walk land where `locate` does,
+        // past row and line ends and inside chars too.
+        #[test]
+        fn located_points_match_locate(
+            text in arb_text(),
+            points in proptest::collection::vec((0u32..40, prop_oneof![0u32..60, Just(u32::MAX)]), 1..20),
+        ) {
+            let rope = Rope::from(text.as_str());
+            for (row, column) in points {
+                let point = Point::new(row, column);
+                let expected = rope.locate(point);
+                prop_assert_eq!(rope.locate_point(point), expected);
+                prop_assert_eq!(rope.point_to_offset(point), expected.offset);
+                prop_assert_eq!(rope.point_to_point_utf16(point), expected.point_utf16);
+                prop_assert_eq!(rope.line_len(row), if row > rope.max_point().row { 0 } else { rope.locate(Point::new(row, u32::MAX)).point.column });
+                prop_assert_eq!(rope.line_len_utf16(row), if row > rope.max_point().row { 0 } else { rope.locate(Point::new(row, u32::MAX)).point_utf16.column });
+            }
+        }
+
         #[test]
         fn matches_string_reference(
             text in arb_text(),

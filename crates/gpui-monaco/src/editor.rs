@@ -2360,6 +2360,24 @@ impl CodeEditor {
         }
     }
 
+    /// Removes the widgets in `ids` at once: one
+    /// [`CodeEditorEvent::ViewZonesChanged`] if any was a view zone
+    /// (Monaco removes code lens zones in one `changeViewZones`).
+    pub(crate) fn remove_widgets(
+        &mut self,
+        ids: impl IntoIterator<Item = WidgetId>,
+        cx: &mut Context<Self>,
+    ) {
+        let ids: std::collections::HashSet<WidgetId> = ids.into_iter().collect();
+        let zones = self.widgets.zones_generation;
+        if self.widgets.remove_all(&ids) {
+            if self.widgets.zones_generation != zones {
+                cx.emit(CodeEditorEvent::ViewZonesChanged);
+            }
+            cx.notify();
+        }
+    }
+
     /// Where each content widget (position, secondary position) and glyph
     /// margin widget (range) is in the current model.
     fn widget_positions(&self, cx: &App) -> WidgetPositions {

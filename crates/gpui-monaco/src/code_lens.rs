@@ -520,9 +520,10 @@ impl CodeEditor {
             .into_iter()
             .peekable();
         let mut merged = Vec::with_capacity(groups.len());
+        let mut removed = Vec::new();
         for (row, items) in groups {
             while let Some(group) = old.next_if(|group| group.row < row) {
-                self.remove_widget(group.zone, cx);
+                removed.push(group.zone);
             }
             let group = match old.next_if(|group| group.row == row) {
                 Some(group) => self.update_code_lens_group(group, row, items, cx),
@@ -530,9 +531,8 @@ impl CodeEditor {
             };
             merged.push(group);
         }
-        for group in old {
-            self.remove_widget(group.zone, cx);
-        }
+        removed.extend(old.map(|group| group.zone));
+        self.remove_widgets(removed, cx);
         // Monaco `CodeLensHelper.commit`: every lens's range is tracked
         // anew.
         let rope = self.model().read(cx).buffer().rope().clone();
@@ -895,9 +895,7 @@ impl CodeEditor {
         self.code_lens.resolve_timer = None;
         self.code_lens.resolving = None;
         let groups = std::mem::take(&mut self.code_lens.groups);
-        for group in groups {
-            self.remove_widget(group.zone, cx);
-        }
+        self.remove_widgets(groups.into_iter().map(|group| group.zone), cx);
         if !self.options.code_lens {
             self.code_lens.task = None;
             self.code_lens.pending = None;
