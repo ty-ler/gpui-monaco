@@ -1828,7 +1828,7 @@ pub struct DecorationFilter {
 
 impl DecorationFilter {
     /// Whether a decoration with `options` passes.
-    fn keeps(&self, options: &DecorationOptions) -> bool {
+    pub(crate) fn keeps(&self, options: &DecorationOptions) -> bool {
         !(self.filter_out_validation && options.validation)
             && !(self.filter_font_decorations && options.has_font())
             && !(self.only_minimap_decorations && options.minimap.is_none())
@@ -2029,15 +2029,35 @@ impl TextModel {
 
 /// Monaco `ICodeEditor`'s decoration methods: the editor's model's
 /// decorations as this editor sees them, validation decorations left out
-/// as its `render_validation_decorations` says.
+/// as its `render_validation_decorations` says and font decorations as
+/// [`CodeEditor::allows_variable_fonts`] says.
 impl CodeEditor {
-    /// Monaco `filterValidationDecorations`.
-    fn filter_out_validation(&self) -> bool {
-        use crate::options::RenderValidationDecorations;
-        match self.options.render_validation_decorations {
-            RenderValidationDecorations::Editable => self.options.read_only,
-            RenderValidationDecorations::On => false,
-            RenderValidationDecorations::Off => true,
+    /// Whether decorations may change the font (Monaco's computed
+    /// `effectiveAllowVariableFonts`): `allow_variable_fonts_in_accessibility_mode`
+    /// while the editor is optimized for screen readers, else
+    /// `allow_variable_fonts`.
+    pub fn allows_variable_fonts(&self) -> bool {
+        use crate::options::AccessibilitySupport;
+        let screen_reader = match self.options.accessibility_support {
+            AccessibilitySupport::On => true,
+            AccessibilitySupport::Off => false,
+            AccessibilitySupport::Auto => self.screen_reader.optimized,
+        };
+        if screen_reader {
+            self.options.allow_variable_fonts_in_accessibility_mode
+        } else {
+            self.options.allow_variable_fonts
+        }
+    }
+
+    /// The decorations the editor shows (Monaco passes
+    /// `filterValidationDecorations` and `filterFontDecorations` to every
+    /// view query: the text, gutter, minimap, overview ruler and hovers).
+    pub(crate) fn view_decoration_filter(&self) -> DecorationFilter {
+        DecorationFilter {
+            filter_out_validation: !self.shows_validation_decorations(),
+            filter_font_decorations: !self.allows_variable_fonts(),
+            ..DecorationFilter::default()
         }
     }
 
@@ -2046,7 +2066,7 @@ impl CodeEditor {
         let owner = Some(cx.entity_id());
         self.model()
             .read(cx)
-            .line_decorations(row, owner, self.filter_out_validation())
+            .line_decorations(row, owner, self.view_decoration_filter())
     }
 
     /// The decorations intersecting `range` (Monaco
@@ -2057,9 +2077,11 @@ impl CodeEditor {
         cx: &Context<Self>,
     ) -> Vec<ModelDecoration> {
         let owner = Some(cx.entity_id());
-        self.model()
-            .read(cx)
-            .decorations_in_point_range(range, owner, self.filter_out_validation())
+        self.model().read(cx).decorations_in_point_range(
+            range,
+            owner,
+            self.view_decoration_filter(),
+        )
     }
 
     /// Replaces this editor's decorations `old` with `new` on its model,
@@ -2097,14 +2119,32 @@ pub struct FontInfo {
     pub font_size: gpui::Pixels,
     /// The line height (Monaco `lineHeight`).
     pub line_height: gpui::Pixels,
-    /// A space is as wide as an `n` (Monaco `isMonospace` checks more
-    /// characters).
+    /// The font's features, as CSS `font-feature-settings` (Monaco
+    /// `fontFeatureSettings`, from the validated `font_ligatures`).
+    pub font_feature_settings: gpui::SharedString,
+    /// The window's scale factor (Monaco `pixelRatio`).
+    pub pixel_ratio: f32,
+    /// The ligatures are off and `n`, a space, the digits, `→`, `·` and
+    /// `|/-_ilm%` (also italic and bold) are equally wide (Monaco
+    /// `isMonospace`). Full-width characters take two cells only then.
     pub is_monospace: bool,
     /// The width of a typical half-width character, an `n` (Monaco
     /// `typicalHalfwidthCharacterWidth`).
     pub typical_halfwidth_character_width: gpui::Pixels,
+    /// The width of a typical full-width character, `ｍ` (Monaco
+    /// `typicalFullwidthCharacterWidth`).
+    pub typical_fullwidth_character_width: gpui::Pixels,
+    /// `￫` keeps a monospace font monospace and is no wider than `→`
+    /// (Monaco `canUseHalfwidthRightwardsArrow`).
+    pub can_use_halfwidth_rightwards_arrow: bool,
     /// The width of a space (Monaco `spaceWidth`).
     pub space_width: gpui::Pixels,
+    /// The width of `·` (Monaco `middotWidth`).
+    pub middot_width: gpui::Pixels,
+    /// The width of `⸱` (Monaco `wsmiddotWidth`).
+    pub wsmiddot_width: gpui::Pixels,
+    /// The widest digit's width (Monaco `maxDigitWidth`).
+    pub max_digit_width: gpui::Pixels,
 }
 
 /// Where a position shows, from the editor's top-left (Monaco
@@ -2204,14 +2244,22 @@ impl CodeEditor {
     /// `getOption(EditorOption.fontInfo)`).
     pub fn font_info(&self) -> Option<FontInfo> {
         let metrics = &self.layout.as_ref()?.metrics;
+        let measured = &metrics.measurements;
         Some(FontInfo {
             font_family: metrics.font.family.clone(),
             font_weight: metrics.font.weight,
             font_size: metrics.font_size,
             line_height: metrics.line_height,
-            is_monospace: (metrics.space_width - metrics.em_width).abs() < gpui::px(0.01),
+            font_feature_settings: self.options.font_ligatures.font_feature_settings(),
+            pixel_ratio: metrics.pixel_ratio,
+            is_monospace: measured.is_monospace,
             typical_halfwidth_character_width: metrics.em_width,
+            typical_fullwidth_character_width: measured.typical_fullwidth_character_width,
+            can_use_halfwidth_rightwards_arrow: measured.can_use_halfwidth_rightwards_arrow,
             space_width: metrics.space_width,
+            middot_width: measured.middot_width,
+            wsmiddot_width: measured.wsmiddot_width,
+            max_digit_width: metrics.max_digit_width,
         })
     }
 

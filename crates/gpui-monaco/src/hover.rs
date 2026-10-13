@@ -3028,12 +3028,12 @@ impl CodeEditor {
         let start = rope.point_to_offset(text::Point::new(row, 0));
         let end = rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
         let editor_id = Some(cx.entity_id());
-        let validation = self.shows_validation_decorations();
+        let filter = self.view_decoration_filter();
         self.model().update(cx, |model, _| {
             model
                 .decorations_in_range(start..end, editor_id)
                 .into_iter()
-                .filter(|d| validation || !d.options.validation)
+                .filter(|d| filter.keeps(&d.options))
                 .flat_map(|d| {
                     let messages = match target {
                         LaneOrLineNumber::Lane(lane) => {
@@ -3217,13 +3217,13 @@ impl CodeEditor {
         let start = rope.point_to_offset(text::Point::new(row, 0));
         let end = rope.point_to_offset(text::Point::new(row, rope.line_len(row)));
         let editor_id = Some(cx.entity_id());
-        let validation = self.shows_validation_decorations();
+        let filter = self.view_decoration_filter();
         let snapshot = &self.snapshot;
         self.model().update(cx, |model, _| {
             model
                 .decorations_in_range(start..end, editor_id)
                 .into_iter()
-                .filter(|d| validation || !d.options.validation)
+                .filter(|d| filter.keeps(&d.options))
                 .filter_map(|d| {
                     if is_empty_markdown(&d.options.hover_message) {
                         return None;

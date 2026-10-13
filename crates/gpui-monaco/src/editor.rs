@@ -146,8 +146,9 @@ pub enum CodeEditorEvent {
     /// editor shows are listed.
     LineHeightChanged(Arc<[LineHeightChange]>),
     /// Decorations that set a font on this editor's lines were added,
-    /// removed or changed (Monaco `onDidChangeFont`). Only the decorations
-    /// this editor shows are listed.
+    /// removed or changed (Monaco `onDidChangeFont`), while
+    /// [`CodeEditor::allows_variable_fonts`]. Only the decorations this
+    /// editor shows are listed.
     FontChanged(Arc<[FontChange]>),
     /// Files or other data were dropped on the text (Monaco
     /// `onDropIntoEditor`), with the `drop_into_editor` option on, before
@@ -776,6 +777,9 @@ pub struct CodeEditor {
     /// The editor font's measured character widths, for `Advanced`
     /// wrapping.
     pub(crate) char_widths: Option<Arc<crate::element::CharWidths>>,
+    /// The editor font as last measured (Monaco's `FontMeasurements`
+    /// cache).
+    pub(crate) font_measurements: Option<Arc<crate::element::FontMeasurements>>,
     /// The wrap classifier for the break character options it was built
     /// from (Monaco recreates its line breaks computer when they change).
     wrap_classifier: Option<(
@@ -1243,6 +1247,7 @@ impl CodeEditor {
             minimap_cache: Default::default(),
             overview_ruler_cache: Default::default(),
             char_widths: None,
+            font_measurements: None,
             wrap_classifier: None,
             minimap_hovered: false,
             minimap_slider_hovered: false,
@@ -3174,15 +3179,18 @@ impl CodeEditor {
                     }
                 }
             }
+            // Fonts only with `effectiveAllowVariableFonts`.
             TextModelEvent::FontChanged(changes) => {
                 let me = Some(cx.entity_id());
-                let mine: Arc<[FontChange]> = changes
-                    .iter()
-                    .filter(|c| c.owner.is_none() || c.owner == me)
-                    .copied()
-                    .collect();
-                if !mine.is_empty() {
-                    cx.emit(CodeEditorEvent::FontChanged(mine));
+                if self.allows_variable_fonts() {
+                    let mine: Arc<[FontChange]> = changes
+                        .iter()
+                        .filter(|c| c.owner.is_none() || c.owner == me)
+                        .copied()
+                        .collect();
+                    if !mine.is_empty() {
+                        cx.emit(CodeEditorEvent::FontChanged(mine));
+                    }
                 }
             }
             TextModelEvent::MarkersChanged => {
@@ -8503,7 +8511,9 @@ impl Render for CodeEditor {
 fn computed_options(options: &EditorOptions, screen_reader: bool) -> EditorOptions {
     use crate::options::{AccessibilitySupport, WrappingStrategy};
     let mut computed = options.clone();
-    computed.font_size = options.resolved_font_size();
+    // Already validated and zoomed, unclamped like Monaco's
+    // `fontInfo.fontSize`.
+    computed.font_size = options.font_size;
     computed.line_height = Some(crate::font_zoom::effective_line_height(options));
     let screen_reader = match options.accessibility_support {
         AccessibilitySupport::On => true,

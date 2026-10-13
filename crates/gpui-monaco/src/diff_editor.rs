@@ -3105,8 +3105,11 @@ impl DiffEditor {
                 options.minimap.enabled = false;
                 options.folding = false;
                 // Monaco `_adjustOptionsForSubEditor`: alignment assumes
-                // every line is the line height.
+                // every line is the line height, and no decoration changes
+                // the font.
                 options.allow_variable_line_heights = false;
+                options.allow_variable_fonts = false;
+                options.allow_variable_fonts_in_accessibility_mode = false;
                 if sticky_off {
                     if options.sticky_scroll.enabled {
                         *saved_sticky = Some(true);

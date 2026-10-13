@@ -266,6 +266,10 @@ pub(crate) struct TextMetrics {
     /// The widest digit's width (Monaco `maxDigitWidth`), for the line
     /// numbers' width.
     pub max_digit_width: Pixels,
+    /// Everything measured from the font.
+    pub measurements: std::sync::Arc<FontMeasurements>,
+    /// The window's scale factor (Monaco `pixelRatio`).
+    pub pixel_ratio: f32,
     /// Show control characters as their Unicode control pictures.
     pub render_control_characters: bool,
     /// Monaco `effectiveFullwidthCharacterWidth: 'twoCells'`: the cell
@@ -275,55 +279,143 @@ pub(crate) struct TextMetrics {
 }
 
 impl TextMetrics {
-    pub fn new(options: &EditorOptions, window: &mut Window) -> Self {
+    /// The metrics for `options`, measuring the font only when `cached`
+    /// was measured from another one.
+    pub fn new(
+        options: &EditorOptions,
+        cached: &mut Option<std::sync::Arc<FontMeasurements>>,
+        window: &mut Window,
+    ) -> Self {
         let font = Font {
             weight: options.font_weight,
             features: options.font_ligatures.features(),
             ..font(options.font_family.clone())
         };
         let font_size = options.font_size;
-        let width = |text: &'static str| {
-            window
-                .text_system()
-                .shape_line(
-                    text.into(),
+        // Monaco `isMonospace` starts from the ligatures being off.
+        let ligatures_off =
+            options.font_ligatures.font_feature_settings() == crate::options::FontLigatures::OFF;
+        let measurements = match cached {
+            Some(measured) if measured.is_for(&font, font_size, ligatures_off) => measured.clone(),
+            _ => {
+                let measured = std::sync::Arc::new(FontMeasurements::measure(
+                    &font,
                     font_size,
-                    &[run(1, &font, gpui::black())],
-                    None,
-                )
-                .width
+                    ligatures_off,
+                    window,
+                ));
+                *cached = Some(measured.clone());
+                measured
+            }
         };
-        // Monaco `typicalHalfwidthCharacter` (`fontMeasurements.ts`).
-        let em_width = width("n");
-        let space_width = width(" ");
-        // Monaco `FontInfo.maxDigitWidth`: the widest of the digits.
-        let digits = window.text_system().shape_line(
-            "0123456789".into(),
-            font_size,
-            &[run(10, &font, gpui::black())],
-            None,
-        );
-        let max_digit_width = (0..10)
-            .map(|i| digits.x_for_index(i + 1) - digits.x_for_index(i))
-            .fold(px(0.), Pixels::max);
-        // Monaco `FontInfo.isMonospace`: the typical characters are equally
-        // wide.
+        // Monaco `effectiveFullwidthCharacterWidth`: two cells only with a
+        // monospace font.
         let two_cells = options.fullwidth_character_width
             == crate::options::FullwidthCharacterWidth::TwoCells
-            && ["i", "W", "1", ".", "_"]
-                .into_iter()
-                .all(|text| (width(text) - em_width).abs() < px(0.01))
-            && (space_width - em_width).abs() < px(0.01);
+            && measurements.is_monospace;
         Self {
             number_font: tabular_figures(&font),
             font,
             font_size,
             line_height: crate::font_zoom::effective_line_height(options),
-            em_width,
-            space_width,
-            max_digit_width,
+            em_width: measurements.typical_halfwidth_character_width,
+            space_width: measurements.space_width,
+            max_digit_width: measurements.max_digit_width,
+            pixel_ratio: window.scale_factor(),
             render_control_characters: options.render_control_characters,
-            full_width_cell: two_cells.then_some(space_width * 2.),
+            full_width_cell: two_cells.then_some(measurements.space_width * 2.),
+            measurements,
+        }
+    }
+}
+
+/// What Monaco reads from the editor font (`FontMeasurementsImpl.
+/// _actualReadFontInfo`), each character measured alone. The editor keeps
+/// the last one and measures again when the font, its size or its
+/// features change.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct FontMeasurements {
+    font: Font,
+    font_size: Pixels,
+    ligatures_off: bool,
+    /// The width of `n` (Monaco `typicalHalfwidthCharacterWidth`).
+    pub typical_halfwidth_character_width: Pixels,
+    /// The width of `ｍ` (Monaco `typicalFullwidthCharacterWidth`).
+    pub typical_fullwidth_character_width: Pixels,
+    /// The width of a space (Monaco `spaceWidth`).
+    pub space_width: Pixels,
+    /// The width of `·` (Monaco `middotWidth`).
+    pub middot_width: Pixels,
+    /// The width of `⸱` (Monaco `wsmiddotWidth`).
+    pub wsmiddot_width: Pixels,
+    /// The widest digit's width (Monaco `maxDigitWidth`).
+    pub max_digit_width: Pixels,
+    /// Monaco `isMonospace`: the ligatures are off and `n`, a space, the
+    /// digits, `→`, `·` and `|/-_ilm%` (also italic and bold) are equally
+    /// wide.
+    pub is_monospace: bool,
+    /// Monaco `canUseHalfwidthRightwardsArrow`: `￫` keeps a monospace font
+    /// monospace and is no wider than `→`.
+    pub can_use_halfwidth_rightwards_arrow: bool,
+}
+
+impl FontMeasurements {
+    fn is_for(&self, font: &Font, font_size: Pixels, ligatures_off: bool) -> bool {
+        self.font == *font && self.font_size == font_size && self.ligatures_off == ligatures_off
+    }
+
+    fn measure(font: &Font, font_size: Pixels, ligatures_off: bool, window: &mut Window) -> Self {
+        let italic = Font {
+            style: FontStyle::Italic,
+            ..font.clone()
+        };
+        let bold = Font {
+            weight: FontWeight::BOLD,
+            ..font.clone()
+        };
+        let text_system = window.text_system().clone();
+        let width = |ch: char, font: &Font| {
+            text_system
+                .shape_line(
+                    ch.to_string().into(),
+                    font_size,
+                    &[run(ch.len_utf8(), font, gpui::black())],
+                    None,
+                )
+                .width
+        };
+        let typical_halfwidth_character_width = width('n', font);
+        let space_width = width(' ', font);
+        let digits: Vec<Pixels> = ('0'..='9').map(|digit| width(digit, font)).collect();
+        let rightwards_arrow = width('\u{2192}', font);
+        let halfwidth_rightwards_arrow = width('\u{ffeb}', font);
+        let middot_width = width('\u{b7}', font);
+        // Monaco's monospace test, against the width of `n`.
+        let reference = typical_halfwidth_character_width;
+        let same = |w: Pixels| (f32::from(reference) - f32::from(w)).abs() <= 0.001;
+        let is_monospace = ligatures_off
+            && same(space_width)
+            && digits.iter().all(|w| same(*w))
+            && same(rightwards_arrow)
+            && same(middot_width)
+            && "|/-_ilm%".chars().all(|ch| {
+                same(width(ch, font)) && same(width(ch, &italic)) && same(width(ch, &bold))
+            });
+        let can_use_halfwidth_rightwards_arrow = !(is_monospace
+            && halfwidth_rightwards_arrow != reference)
+            && halfwidth_rightwards_arrow <= rightwards_arrow;
+        Self {
+            font: font.clone(),
+            font_size,
+            ligatures_off,
+            typical_halfwidth_character_width,
+            typical_fullwidth_character_width: width('\u{ff4d}', font),
+            space_width,
+            middot_width,
+            wsmiddot_width: width('\u{2e31}', font),
+            max_digit_width: digits.into_iter().fold(px(0.), Pixels::max),
+            is_monospace,
+            can_use_halfwidth_rightwards_arrow,
         }
     }
 }
@@ -3431,7 +3523,7 @@ fn prepaint_editor(
     let options = editor.options.clone();
     let theme = editor.theme.clone();
     let colors = theme.colors.clone();
-    let metrics = TextMetrics::new(&options, window);
+    let metrics = TextMetrics::new(&options, &mut editor.font_measurements, window);
     let line_height = metrics.line_height;
     let tab_size = editor.cursor_config(cx).tab_size;
     let line_count = editor.snapshot.line_count();
@@ -3949,14 +4041,13 @@ fn prepaint_editor(
     let decorations = editor.model().update(cx, |model, _| {
         model.decorations_in_range(visible_start..visible_end, Some(editor_id))
     });
-    let show_validation = editor.shows_validation_decorations();
+    // Monaco `filterValidationDecorations` and `filterFontDecorations`.
+    let filter = editor.view_decoration_filter();
     let decorations: Vec<_> = {
         let model = editor.model().read(cx);
         decorations
             .into_iter()
-            .filter(|d| {
-                (show_validation || !d.options.validation) && model.is_decoration_visible(d)
-            })
+            .filter(|d| filter.keeps(&d.options) && model.is_decoration_visible(d))
             .collect()
     };
     // Decorations in model points.
@@ -4615,7 +4706,7 @@ fn prepaint_editor(
             );
             let collapsed_rows = editor.folds.collapsed_rows();
             let editor_id = cx.entity_id();
-            let show_validation = editor.shows_validation_decorations();
+            let filter = editor.view_decoration_filter();
             let count = state.start_rows.len();
             // Monaco's sticky widget clips its lines to its height, which the
             // pushed last line shrinks (`_renderRootNode`).
@@ -4651,10 +4742,7 @@ fn prepaint_editor(
                         model
                             .decorations_in_range(line_range.clone(), Some(editor_id))
                             .into_iter()
-                            .filter(|d| {
-                                (show_validation || !d.options.validation)
-                                    && model.is_decoration_visible(d)
-                            })
+                            .filter(|d| filter.keeps(&d.options) && model.is_decoration_visible(d))
                             .collect()
                     });
                     let points: Vec<_> = row_decorations
@@ -5265,7 +5353,7 @@ fn prepaint_editor(
                 options.overview_ruler_lanes,
             );
             let offset_of = |line: u32| f32::from(zones.line_y(line, line_height));
-            let show_validation = editor.shows_validation_decorations();
+            let filter = editor.view_decoration_filter();
             let marker_colors = [
                 colors.overview_ruler_error,
                 colors.overview_ruler_warning,
@@ -5278,7 +5366,7 @@ fn prepaint_editor(
                 model.entity_id(),
                 model.read(cx).decorations_version(),
                 view_lines.generation(),
-                show_validation,
+                filter,
                 marker_colors,
                 std::sync::Arc::as_ptr(&theme) as usize,
             );
@@ -5290,7 +5378,7 @@ fn prepaint_editor(
                     model.update(cx, |model, _| model.all_decorations(Some(editor_id)));
                 let mut groups = ruler::DecorationGroups::default();
                 for decoration in decorations {
-                    if !show_validation && decoration.options.validation {
+                    if !filter.keeps(&decoration.options) {
                         continue;
                     }
                     let Some(ruler) = &decoration.options.overview_ruler else {
@@ -9154,7 +9242,7 @@ mod glyph_font_tests {
 mod gutter_font_tests {
     use gpui::{Font, FontFeatures, font, px};
 
-    use super::{TextMetrics, guide_left, tabular_figures};
+    use super::{FontMeasurements, TextMetrics, guide_left, tabular_figures};
 
     /// Monaco `.line-numbers { font-variant-numeric: tabular-nums }`: the
     /// line numbers' font adds `tnum`, keeping the editor's features.
@@ -9187,6 +9275,20 @@ mod gutter_font_tests {
             em_width: px(8.),
             space_width: px(4.),
             max_digit_width: px(8.),
+            measurements: std::sync::Arc::new(FontMeasurements {
+                font: font("Helvetica"),
+                font_size: px(14.),
+                ligatures_off: true,
+                typical_halfwidth_character_width: px(8.),
+                typical_fullwidth_character_width: px(14.),
+                space_width: px(4.),
+                middot_width: px(4.),
+                wsmiddot_width: px(4.),
+                max_digit_width: px(8.),
+                is_monospace: false,
+                can_use_halfwidth_rightwards_arrow: true,
+            }),
+            pixel_ratio: 2.,
             render_control_characters: false,
             full_width_cell: None,
         };

@@ -470,6 +470,105 @@ fn overview_ruler_marks_follow_theme_colors(cx: &mut TestAppContext) {
     );
 }
 
+/// Monaco `effectiveAllowVariableFonts` and `filterFontDecorations`: with
+/// a screen reader (unless `allowVariableFontsInAccessibilityMode`) or
+/// without `allowVariableFonts`, decorations that change the font are left
+/// out of the view, their overview ruler and minimap marks and the
+/// editor's getters included, and their font changes aren't forwarded.
+#[gpui::test]
+fn font_decorations_follow_allow_variable_fonts(cx: &mut TestAppContext) {
+    use gpui_monaco::options::AccessibilitySupport;
+    let (editor, cx) = setup(&"line\n".repeat(40), cx);
+    let font_changes = Rc::new(Cell::new(0));
+    let sink = font_changes.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event, _| {
+            if let CodeEditorEvent::FontChanged(_) = event {
+                sink.set(sink.get() + 1);
+            }
+        })
+        .detach();
+    });
+    let bold_mark = |color: gpui::Hsla| DecorationOptions {
+        font_weight: Some(gpui::FontWeight::BOLD),
+        overview_ruler: Some(OverviewRulerDecoration::new(color, OverviewRulerLane::Full)),
+        minimap: Some(gpui_monaco::MinimapDecoration {
+            color: Some(color.into()),
+            position: gpui_monaco::MinimapPosition::Gutter,
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    // Rows 2 and 4; the plain one on row 4 stays in every case.
+    decorate(
+        &editor,
+        vec![
+            (10..12, bold_mark(gpui::red())),
+            (
+                20..22,
+                DecorationOptions {
+                    overview_ruler: Some(OverviewRulerDecoration::new(
+                        gpui::blue(),
+                        OverviewRulerLane::Full,
+                    )),
+                    ..Default::default()
+                },
+            ),
+        ],
+        cx,
+    );
+    font_changes.set(0);
+    let shown = |cx: &mut VisualTestContext| {
+        draw(cx);
+        let marks = editor.read_with(cx, |e, _| {
+            e.overview_ruler_for_tests()
+                .map(|ruler| ruler.marks.iter().map(|(_, c)| *c).collect::<Vec<_>>())
+                .unwrap_or_default()
+        });
+        assert!(marks.contains(&gpui::blue()));
+        // The minimap's gutter bar, on its 0.9-opaque decorations canvas.
+        let red = gpui::red().opacity(0.9);
+        let in_minimap = editor.read_with(cx, |e, _| {
+            e.minimap_marks_for_tests().iter().any(|(_, c)| {
+                (c.h - red.h).abs() < 1e-4
+                    && (c.s - red.s).abs() < 1e-4
+                    && (c.l - red.l).abs() < 1e-4
+                    && (c.a - red.a).abs() < 1e-4
+            })
+        });
+        let on_row = editor.update(cx, |e, cx| e.line_decorations(2, cx).len());
+        (marks.contains(&gpui::red()), in_minimap, on_row)
+    };
+    let set = |change: fn(&mut gpui_monaco::EditorOptions), cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| e.update_options_with(change, cx));
+    };
+    assert!(editor.read_with(cx, |e, _| e.allows_variable_fonts()));
+    assert_eq!(shown(cx), (true, true, 1));
+    // With a screen reader, `allowVariableFontsInAccessibilityMode` (off by
+    // default) decides.
+    set(|o| o.accessibility_support = AccessibilitySupport::On, cx);
+    assert!(!editor.read_with(cx, |e, _| e.allows_variable_fonts()));
+    assert_eq!(shown(cx), (false, false, 0));
+    // The model reports the font change; the editor doesn't forward it.
+    decorate(&editor, vec![(30..32, bold_mark(gpui::green()))], cx);
+    assert_eq!(font_changes.get(), 0);
+    set(|o| o.allow_variable_fonts_in_accessibility_mode = true, cx);
+    assert_eq!(shown(cx), (true, true, 1));
+    // Without one, `allowVariableFonts` does.
+    set(
+        |o| {
+            o.accessibility_support = AccessibilitySupport::Off;
+            o.allow_variable_fonts = false;
+        },
+        cx,
+    );
+    assert_eq!(shown(cx), (false, false, 0));
+    set(|o| o.allow_variable_fonts = true, cx);
+    assert_eq!(shown(cx), (true, true, 1));
+    decorate(&editor, vec![(40..42, bold_mark(gpui::green()))], cx);
+    assert_eq!(font_changes.get(), 1);
+}
+
 /// Monaco `onDidChangeTokens` ranges: everything after the first parse,
 /// then the edited lines and what the parse changed around them.
 #[gpui::test]

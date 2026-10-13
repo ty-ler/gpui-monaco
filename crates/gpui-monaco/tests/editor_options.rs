@@ -15,9 +15,9 @@ use gpui::{
 };
 use gpui_monaco::cursor::Selection;
 use gpui_monaco::options::{
-    AccessibilitySupport, CursorStyle, FullwidthCharacterWidth, LineNumbers, MinimapAutohide,
-    MouseMiddleClickAction, MouseStyle, SelectedTextMatchMode, WordBreak, WordWrap,
-    WordWrapOverride, WrappingStrategy,
+    AccessibilitySupport, CursorStyle, FontLigatures, FullwidthCharacterWidth, LineNumbers,
+    MinimapAutohide, MouseMiddleClickAction, MouseStyle, SelectedTextMatchMode, WordBreak,
+    WordWrap, WordWrapOverride, WrappingStrategy,
 };
 use gpui_monaco::text::{LineEnding, PointUtf16};
 use gpui_monaco::{CodeEditor, CodeEditorEvent, EditorOptions, ModelOptions, TextModel};
@@ -730,6 +730,79 @@ fn full_width_characters_in_two_cells(cx: &mut TestAppContext) {
         cx,
     );
     assert_eq!(segments(&editor, 0, cx), vec!["a", "中", "b"]);
+}
+
+/// Monaco `effectiveFullwidthCharacterWidth` is `twoCells` only with
+/// `isMonospace`, which needs the ligatures off (`fontMeasurements.ts`),
+/// and `EditorFontLigatures.validate` reads `"false"` as off.
+#[gpui::test]
+fn two_cells_need_a_monospace_font_without_ligatures(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "a中b",
+        |o| {
+            o.fullwidth_character_width = FullwidthCharacterWidth::TwoCells;
+            o.font_ligatures = FontLigatures::On;
+        },
+        cx,
+    );
+    let x = |editor: &Entity<CodeEditor>, column: u32, cx: &mut VisualTestContext| {
+        paint(cx);
+        editor.read_with(cx, |e, _| e.offset_for_column(0, column).unwrap())
+    };
+    let em = x(&editor, 1, cx) - x(&editor, 0, cx);
+    // The font's width (one em in the test font), not two cells.
+    assert_eq!(x(&editor, 2, cx) - x(&editor, 1, cx), em);
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    assert!(!font.is_monospace);
+    assert_eq!(font.font_feature_settings, FontLigatures::ON);
+    set_options(
+        &editor,
+        |o| o.font_ligatures = FontLigatures::Settings("false".into()),
+        cx,
+    );
+    assert_eq!(x(&editor, 2, cx), em * 3.);
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    assert!(font.is_monospace);
+    assert_eq!(font.font_feature_settings, FontLigatures::OFF);
+}
+
+/// Monaco `FontInfo`'s measurements: in the test font every character is
+/// one em wide.
+#[gpui::test]
+fn font_info_measurements(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("text", |_| {}, cx);
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    let em = font.typical_halfwidth_character_width;
+    assert!(em > px(0.));
+    assert_eq!(font.typical_fullwidth_character_width, em);
+    assert_eq!(font.space_width, em);
+    assert_eq!(font.middot_width, em);
+    assert_eq!(font.wsmiddot_width, em);
+    assert_eq!(font.max_digit_width, em);
+    assert!(font.is_monospace);
+    assert!(font.can_use_halfwidth_rightwards_arrow);
+    assert_eq!(
+        font.pixel_ratio,
+        cx.update(|window, _| window.scale_factor())
+    );
+}
+
+/// Monaco `EditorFontSize.compute`: the zoomed font size, unclamped.
+#[gpui::test]
+fn computed_font_size_is_zoomed_without_clamping(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("text", |o| o.font_size = px(80.), cx);
+    let computed = |cx: &mut VisualTestContext| {
+        paint(cx);
+        let size = editor.read_with(cx, |e, _| e.computed_options().font_size);
+        (f32::from(size) * 100.).round() / 100.
+    };
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(5., cx));
+    assert_eq!(computed(cx), 120.);
+    let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
+    assert_eq!((f32::from(font.font_size) * 100.).round() / 100., 120.);
+    set_options(&editor, |o| o.font_size = px(10.), cx);
+    cx.update(|_, cx| gpui_monaco::set_editor_zoom_level(-5., cx));
+    assert_eq!(computed(cx), 5.);
 }
 
 #[gpui::test]
