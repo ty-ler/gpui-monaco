@@ -6178,6 +6178,36 @@ impl CodeEditor {
         (x <= line.width()).then_some(point)
     }
 
+    /// Monaco's mouse target `range` for content text
+    /// (`HitTestContext._doHitTestWithCaretPosition`): the start of the
+    /// character under the mouse, rather than the nearer caret position.
+    /// `None` where [`Self::text_position_under_mouse`] is.
+    fn character_under_mouse(
+        &self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &App,
+    ) -> Option<PointUtf16> {
+        let point = self.text_position_under_mouse(position, window, cx)?;
+        let (Some(layout), Some(view)) =
+            (self.layout.as_ref(), self.laid_out_view_position(position))
+        else {
+            return Some(point);
+        };
+        let Some(line) = layout.view_line(view.row) else {
+            return Some(point);
+        };
+        let x = position.x - layout.text_origin_x();
+        // The caret position right of the mouse ends the character.
+        let column = if view.column > line.view_start && line.x_for_view_column(view.column) > x {
+            line.grapheme_view_columns(view.column - 1)
+                .map_or(view.column - 1, |columns| columns.start)
+        } else {
+            view.column
+        };
+        Some(self.view_lines.to_model(view.row, column))
+    }
+
     /// Visible column under the mouse, past the end of text too (box
     /// selection).
     fn mouse_visible_column(&self, position: Point<Pixels>) -> u32 {
@@ -6299,6 +6329,7 @@ impl CodeEditor {
                     crate::hover::HoverTarget::None,
                     true,
                     hover_focused,
+                    event.position,
                     event.modifiers,
                     cx,
                 );
@@ -6332,6 +6363,7 @@ impl CodeEditor {
                         crate::hover::HoverTarget::None,
                         false,
                         hover_focused,
+                        event.position,
                         event.modifiers,
                         cx,
                     );
@@ -6360,9 +6392,21 @@ impl CodeEditor {
                             crate::hover::HoverTarget::Gutter(row, lane)
                         }
                         (_, Some(None)) | (None, None) => crate::hover::HoverTarget::None,
-                        (Some(position), None) => crate::hover::HoverTarget::Text(position),
+                        // Monaco's hover anchor is the character under the
+                        // mouse (`HoverRangeAnchor` on the target's range).
+                        (Some(position), None) => crate::hover::HoverTarget::Text(
+                            self.character_under_mouse(event.position, window, cx)
+                                .unwrap_or(position),
+                        ),
                     };
-                    self.hover_mouse_move(target, false, hover_focused, event.modifiers, cx);
+                    self.hover_mouse_move(
+                        target,
+                        false,
+                        hover_focused,
+                        event.position,
+                        event.modifiers,
+                        cx,
+                    );
                 }
             }
         } else if self.mouse_selection.is_some() || self.dnd.active {
@@ -7262,7 +7306,7 @@ macro_rules! move_action {
 
 impl Render for CodeEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        if std::mem::take(&mut self.refocus) {
+        if std::mem::take(&mut self.refocus) | self.take_hidden_hover_focus(window, cx) {
             window.focus(&self.focus_handle, cx);
         }
         // Monaco without a model: the editor's container, empty; no keys,

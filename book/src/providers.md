@@ -5,7 +5,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | Trait | Monaco | UI |
 |---|---|---|
 | `CompletionProvider` | `CompletionItemProvider` | suggest widget: fuzzy filtering, kind icons, details and docs |
-| `HoverProvider` | `HoverProvider` | markdown hover on mouse rest |
+| `HoverProvider` | `HoverProvider` | markdown hover on mouse rest, asked at the start of the character under the mouse (Monaco's hover anchor) |
 | `DefinitionProvider` | `DefinitionProvider` | Cmd/Ctrl+hover link with the definition's code in a hover, Cmd/Ctrl+click, F12 and Alt+F12 (peek) |
 | `ReferenceProvider` | `ReferenceProvider` | Shift+F12 (references in a peek view) |
 | `DeclarationProvider` | `DeclarationProvider` | go to and peek declaration |
