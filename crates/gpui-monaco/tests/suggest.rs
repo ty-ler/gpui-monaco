@@ -650,6 +650,122 @@ fn additional_edits_after_a_change_are_dropped(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "item end");
 }
 
+/// Monaco `_insertSuggestion` inserts an unresolved item with
+/// `NoAfterUndoStop`, so the resolved edits join the insertion (#475).
+#[gpui::test]
+fn additional_edits_resolved_after_inserting_join_its_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab ", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    cx.update(|_, cx| {
+        register_completion_provider(cx, LanguageSelector::All, SlowResolve { edit_at: 0 })
+    });
+    move_to(&editor, cx, 0, 3);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "Xab item");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(&editor, cx), "ab ");
+}
+
+/// Typing before the resolve arrives pushes the undo stop: the insertion,
+/// the typing and the resolved edits are separate steps (#475).
+#[gpui::test]
+fn additional_edits_resolved_after_typing_are_their_own_undo_step(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("ab ", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    cx.update(|_, cx| {
+        register_completion_provider(cx, LanguageSelector::All, SlowResolve { edit_at: 0 })
+    });
+    move_to(&editor, cx, 0, 3);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_keystrokes("enter");
+    cx.simulate_input("z");
+    cx.executor().advance_clock(Duration::from_millis(200));
+    cx.run_until_parked();
+    assert_eq!(text(&editor, cx), "Xab itemz");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(&editor, cx), "ab itemz");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(&editor, cx), "ab item");
+    cx.simulate_keystrokes("cmd-z");
+    assert_eq!(text(&editor, cx), "ab ");
+}
+
+/// Monaco `SuggestModel` cancels on `onDidChangeModelLanguage` (#475).
+#[gpui::test]
+fn a_language_change_closes_suggest(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, functions(&["alpha"]));
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert!(visible(&editor, cx));
+    editor.update(cx, |e, cx| {
+        e.model()
+            .update(cx, |model, cx| model.set_language(Some("css".into()), cx))
+    });
+    cx.run_until_parked();
+    assert!(!visible(&editor, cx));
+}
+
+/// Monaco `SuggestModel._updateActiveSuggestSession`: registering a
+/// completion provider asks an open session again, and removing the last
+/// one closes it (#475).
+#[gpui::test]
+fn provider_changes_update_an_open_session(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(
+        "",
+        |o| {
+            o.quick_suggestions = QuickSuggestions::OFF;
+            o.word_based_suggestions = WordBasedSuggestions::Off;
+        },
+        cx,
+    );
+    let first = cx.update(|_, cx| {
+        register_completion_provider(cx, LanguageSelector::All, Items(functions(&["alpha"])))
+    });
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["alpha".to_string()]));
+    let second = cx.update(|_, cx| {
+        register_completion_provider(cx, LanguageSelector::All, Items(functions(&["beta"])))
+    });
+    cx.run_until_parked();
+    assert_eq!(
+        labels(&editor, cx),
+        Some(vec!["alpha".to_string(), "beta".to_string()])
+    );
+    cx.update(|_, cx| unregister_provider(cx, first));
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["beta".to_string()]));
+    cx.update(|_, cx| unregister_provider(cx, second));
+    cx.run_until_parked();
+    assert!(!visible(&editor, cx));
+}
+
+/// Monaco `_insertSuggestion`: an additional edit on the request's line
+/// after the request position moves by the text typed since (#475).
+#[gpui::test]
+fn additional_edits_after_the_request_shift_by_the_typed_text(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("x()", |o| o.quick_suggestions = QuickSuggestions::OFF, cx);
+    provide(cx, |_| {
+        let end = PointUtf16::new(0, 3);
+        vec![CompletionItem {
+            additional_text_edits: vec![(end..end, ";".to_string())],
+            ..CompletionItem::new("abc", CompletionItemKind::Function)
+        }]
+    });
+    move_to(&editor, cx, 0, 2);
+    cx.simulate_keystrokes("ctrl-space");
+    cx.run_until_parked();
+    cx.simulate_input("ab");
+    cx.run_until_parked();
+    assert_eq!(labels(&editor, cx), Some(vec!["abc".to_string()]));
+    cx.simulate_keystrokes("enter");
+    assert_eq!(text(&editor, cx), "x(abc);");
+}
+
 fn functions(labels: &'static [&'static str]) -> impl Fn(PointUtf16) -> Vec<CompletionItem> {
     move |_| {
         labels

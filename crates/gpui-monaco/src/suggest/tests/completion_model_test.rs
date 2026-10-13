@@ -407,3 +407,19 @@ fn preselect_picks_first_preselected_top_item() {
     assert_eq!(labels(&lower), ["foo", "x_foo"]);
     assert_eq!(lower.preselected_index(), 0);
 }
+
+#[test]
+fn missing_sort_text_falls_back_to_the_label() {
+    // Monaco `provideSuggestionItems` fills a missing or empty `sortText`
+    // with the label, so `bbb` (sorted as `bbb`) and `ccc` come before
+    // `aaa` (sorted as `zzz`).
+    let model = model(
+        vec![
+            item_with("aaa", 0, CompletionItemKind::Property, Some("zzz"), None),
+            item_with("bbb", 0, CompletionItemKind::Property, None, None),
+            item_with("ccc", 0, CompletionItemKind::Property, Some(""), None),
+        ],
+        ctx("", 0),
+    );
+    assert_eq!(labels(&model), ["bbb", "ccc", "aaa"]);
+}

@@ -372,10 +372,17 @@ fn prepare(item: &CompletionItem, position: PointUtf16, word_start_column: u32) 
     PreparedItem {
         label,
         filter_text: item.filter_text.as_deref().map(Utf16Text::new),
-        sort_text_low: item
-            .sort_text
-            .as_deref()
-            .map(|sort_text| Utf16Text::new(sort_text).low),
+        // Monaco `provideSuggestionItems` fills a missing (or empty)
+        // `sortText` with the label before `defaultComparator` runs, which
+        // compares sort text only when both are non-empty.
+        sort_text_low: Some(
+            item.sort_text
+                .as_deref()
+                .filter(|sort_text| !sort_text.is_empty())
+                .unwrap_or(&item.label),
+        )
+        .filter(|sort_text| !sort_text.is_empty())
+        .map(|sort_text| Utf16Text::new(sort_text).low),
         overwrite_before,
     }
 }
@@ -387,7 +394,7 @@ fn provider_compare(
     snippet_order: SnippetSortOrder,
 ) -> Ordering {
     snippet_compare(a.kind, b.kind, snippet_order).then_with(|| {
-        // defaultComparator: sortText (when both have one), label, kind.
+        // defaultComparator: sortText (when both are non-empty), label, kind.
         let by_sort_text = match (&a_prepared.sort_text_low, &b_prepared.sort_text_low) {
             (Some(a), Some(b)) => a.cmp(b),
             _ => Ordering::Equal,

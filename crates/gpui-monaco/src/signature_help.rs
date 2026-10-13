@@ -506,26 +506,30 @@ impl CodeEditor {
                 .as_ref()
                 .map(|(widget, _)| widget.read(cx).help.clone()),
         };
-        let tasks: Vec<_> = signature_help_providers(cx, self.provider_target(cx))
-            .into_iter()
-            .map(|provider| {
-                provider.provide_signature_help_with_context(&context, position, &help_context, cx)
-            })
-            .collect();
+        let providers = signature_help_providers(cx, self.provider_target(cx));
         self.signature_help.pending = true;
         self.signature_help.task = Some(cx.spawn(async move |this, cx| {
+            // Monaco `provideSignatureHelp`: the providers are asked in
+            // order, and the first result wins, even one without
+            // signatures (which hides the hints); a failure asks the next.
             let mut result = None;
-            for task in tasks {
-                if let Ok(Some(help)) = task.await
-                    && !help.signatures.is_empty()
-                {
+            for provider in providers {
+                let task = cx.update(|cx| {
+                    provider.provide_signature_help_with_context(
+                        &context,
+                        position,
+                        &help_context,
+                        cx,
+                    )
+                });
+                if let Ok(Some(help)) = task.await {
                     result = Some(help);
                     break;
                 }
             }
             this.update(cx, |this, cx| {
                 this.signature_help.pending = false;
-                match result {
+                match result.filter(|help| !help.signatures.is_empty()) {
                     Some(help) => this.show_signature_help(help, cx),
                     None => this.hide_signature_help(cx),
                 }

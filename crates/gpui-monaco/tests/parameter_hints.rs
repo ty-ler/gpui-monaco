@@ -314,6 +314,54 @@ fn the_first_provider_with_a_result_wins(cx: &mut TestAppContext) {
     );
 }
 
+/// Answers with no signatures, counting the requests.
+struct NoSignatures(Rc<RefCell<usize>>);
+
+impl SignatureHelpProvider for NoSignatures {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['(']
+    }
+
+    fn provide_signature_help(
+        &self,
+        _: &ProviderContext,
+        _: PointUtf16,
+        _: SignatureHelpTrigger,
+        _: &mut App,
+    ) -> Task<anyhow::Result<Option<SignatureHelp>>> {
+        *self.0.borrow_mut() += 1;
+        Task::ready(Ok(Some(SignatureHelp {
+            signatures: Vec::new(),
+            active_signature: 0,
+            active_parameter: 0,
+        })))
+    }
+}
+
+/// Monaco `provideSignatureHelp` asks the providers in order and stops at
+/// the first result, even one without signatures, which hides the hints
+/// (#475).
+#[gpui::test]
+fn a_first_result_without_signatures_wins(cx: &mut TestAppContext) {
+    let first = Rc::new(RefCell::new(0));
+    let last = Rc::new(RefCell::new(0));
+    cx.update(|cx| {
+        // Equal scores are tried newest first (Monaco `ordered`).
+        register_signature_help_provider(cx, LanguageSelector::All, NoSignatures(last.clone()));
+        register_signature_help_provider(cx, LanguageSelector::All, Fixed(Some("second")));
+        register_signature_help_provider(cx, LanguageSelector::All, NoSignatures(first.clone()));
+    });
+    let (editor, cx) = setup("", cx);
+    cx.simulate_input("(");
+    settle(cx);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.active_signature_for_tests(cx)),
+        None
+    );
+    assert_eq!(*first.borrow(), 1);
+    assert_eq!(*last.borrow(), 0, "later providers aren't asked");
+}
+
 /// Monaco `ParameterHintsModel`'s `DEFAULT_DELAY`: typing asks the
 /// providers 120ms after the last keystroke, with the triggers since then
 /// merged (`mergeTriggerContexts`: a trigger character wins over content

@@ -762,6 +762,23 @@ impl CodeEditor {
         }
     }
 
+    /// Monaco `SuggestModel._updateActiveSuggestSession`, when completion
+    /// providers are registered or removed: an open session asks again, or
+    /// closes when no provider is left (Monaco registers word-based
+    /// suggestions as a `*` provider, so they count while they're on).
+    pub(crate) fn update_active_suggest_session(&mut self, cx: &mut Context<Self>) {
+        let Some(auto) = self.suggest.session.as_ref().map(|session| session.auto) else {
+            return;
+        };
+        let has_provider = self.options.word_based_suggestions != WordBasedSuggestions::Off
+            || !completion_provider_groups(cx, self.provider_target(cx)).is_empty();
+        if has_provider {
+            self.request_suggestions(CompletionTrigger::Invoke, auto, cx);
+        } else {
+            self.hide_suggest(cx);
+        }
+    }
+
     /// Asks the completion providers for suggestions at the cursor
     /// (Ctrl+Space or a trigger).
     pub fn trigger_suggest(&mut self, trigger: CompletionTrigger, cx: &mut Context<Self>) {
@@ -2430,13 +2447,16 @@ impl CodeEditor {
         if item.additional_text_edits.is_empty()
             && !resolved
             && let Some(task) = provider.and_then(|p| p.resolve_completion_item(&item, cx))
+            && let Some(inserted) = self.model().read(cx).last_transaction_id()
         {
             self.suggest.late_edits = Some(cx.spawn(async move |this, cx| {
                 let Ok(resolved) = task.await else {
                     return;
                 };
-                this.update(cx, |this, cx| this.apply_late_edits(resolved, version, cx))
-                    .ok();
+                this.update(cx, |this, cx| {
+                    this.apply_late_edits(resolved, version, inserted, cx)
+                })
+                .ok();
             }));
         }
         // Monaco's inline completions controller asks again after
@@ -2469,11 +2489,13 @@ impl CodeEditor {
     /// Applies additional edits resolved after inserting, unless one starts
     /// after the earliest change since `version` (from before inserting):
     /// Monaco drops them then, since only text before every change still
-    /// has its old positions.
+    /// has its old positions. They join the insertion's undo step
+    /// (`inserted`) unless another edit came between.
     fn apply_late_edits(
         &mut self,
         item: CompletionItem,
         version: text::Version,
+        inserted: text::TransactionId,
         cx: &mut Context<Self>,
     ) {
         if item.additional_text_edits.is_empty() || self.options.read_only {
@@ -2498,7 +2520,14 @@ impl CodeEditor {
         }
         edits.sort_by_key(|(range, _)| range.start);
         model.update(cx, |model, cx| {
-            model.push_stack_element();
+            // Monaco inserts an unresolved item without an undo stop after
+            // it, so the resolved edits join the insertion's undo step
+            // unless the user typed in between (which pushes the stop).
+            if model.last_transaction_id() == Some(inserted) {
+                model.pop_stack_element();
+            } else {
+                model.push_stack_element();
+            }
             model.edit(edits, cx).ok();
             model.push_stack_element();
         });
@@ -2539,7 +2568,26 @@ impl CodeEditor {
             model.start_transaction();
         });
         if !item.additional_text_edits.is_empty() {
-            self.apply_additional_text_edits(&item.additional_text_edits, cx);
+            // Monaco shifts an edit on the request's line that starts after
+            // the request position by the text typed since the request.
+            let delta = head.column as i64 - position.column as i64;
+            let shift = |column: u32| (column as i64 + delta).max(0) as u32;
+            let edits: Vec<_> = item
+                .additional_text_edits
+                .iter()
+                .map(|(range, text)| {
+                    let mut range = range.clone();
+                    if range.start.row == position.row && range.start.column > position.column {
+                        let multi_line = range.end.row != range.start.row;
+                        range.start.column = shift(range.start.column);
+                        if !multi_line {
+                            range.end.column = shift(range.end.column);
+                        }
+                    }
+                    (range, text.clone())
+                })
+                .collect();
+            self.apply_additional_text_edits(&edits, cx);
         }
         let template = if item.insert_text_is_snippet {
             item.insert_text().to_string()

@@ -1095,6 +1095,12 @@ impl CodeEditor {
                 this.update_code_actions(cx)
             }),
         );
+        // Monaco's `SuggestModel` listens to `completionProvider.onDidChange`.
+        subscriptions.push(
+            cx.observe_global::<crate::providers::CompletionProvidersEpoch>(|this, cx| {
+                this.update_active_suggest_session(cx)
+            }),
+        );
         subscriptions.extend(crate::editor_commands::subscriptions(cx));
         subscriptions.push(
             cx.observe_global::<crate::font_zoom::EditorZoom>(|this, cx| this.on_zoom_changed(cx)),
@@ -3107,6 +3113,9 @@ impl CodeEditor {
             } => {
                 // Monaco closes the peek view.
                 self.close_peek(cx);
+                // And cancels suggest (`SuggestModel` on
+                // `onDidChangeModelLanguage`).
+                self.hide_suggest(cx);
                 // And the inspect tokens widget.
                 self.stop_inspect_tokens(cx);
                 self.reset_inlay_hints(cx);
