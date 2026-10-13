@@ -36,6 +36,7 @@ editor.update(cx, |editor, cx| {
 | `rounded_selection`, `render_line_highlight_only_when_focus` | same names | (on, off). Rounded selections get Monaco's reverse-rounded inner corners; high contrast themes draw them square. With several selections, each is inset 1px at its first and last line |
 | `read_only` | `readOnly` | edits are refused and show `read_only_message` |
 | `read_only_message` | `readOnlyMessage` | markdown; defaults to "Cannot edit in read-only editor" |
+| `dom_read_only` | `domReadOnly` | with `read_only`, screen readers are told the editor is read-only (off: like Monaco, a read-only editor reads as an editable text box) |
 | `placeholder` | `placeholder` | shown while the model is empty |
 | `unicode_highlight` | `unicodeHighlight.*` | `non_basic_ascii`, `invisible_characters`, `ambiguous_characters`, `include_comments`, `include_strings`, `allowed_characters`, `allowed_locales` |
 | `drag_and_drop`, `double_click_selects_block` | `dragAndDrop`, `doubleClickSelectsBlock` | drag the selection to move it (Alt/Ctrl copies); double-click inside brackets or quotes selects their content |

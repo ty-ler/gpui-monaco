@@ -80,6 +80,8 @@ pub struct AriaNode {
     pub role_description: Option<SharedString>,
     /// `aria-autocomplete` (`None` is `"none"`).
     pub auto_complete: Option<accesskit::AutoComplete>,
+    /// `readonly` (Monaco's textarea with `domReadOnly`).
+    pub read_only: bool,
 }
 
 impl AriaNode {
@@ -451,9 +453,11 @@ impl CodeEditor {
     /// `TextAreaEditContext`): a text input (or Monaco `setAriaOptions({
     /// role })`'s role) labelled by `ariaLabelForScreenReaderContent`, with
     /// the role description "editor" and `aria-autocomplete` "both", "none"
-    /// when read-only, or "list" while `setAriaOptions` points it at an
-    /// active descendant. A widget input is a plain `<input>` in Monaco, so
-    /// it has neither.
+    /// when read-only, or "list" while `setAriaOptions` (or the suggest
+    /// widget's focused row) points it at an active descendant. A widget
+    /// input is a plain `<input>` in Monaco, so it has neither. It's
+    /// `readonly` only with `dom_read_only` as well as `read_only`
+    /// (Monaco `_ensureReadOnlyAttribute`).
     pub(crate) fn root_aria(&self) -> AriaNode {
         let role = self
             .aria_options
@@ -471,7 +475,9 @@ impl CodeEditor {
         let mut aria = AriaNode::new(role, label);
         if !self.widget_input {
             aria.role_description = Some("editor".into());
-            aria.auto_complete = if self.aria_options.active_descendant.is_some() {
+            aria.auto_complete = if self.aria_options.active_descendant.is_some()
+                || self.suggest_has_active_descendant()
+            {
                 Some(accesskit::AutoComplete::List)
             } else if self.options.read_only {
                 None
@@ -479,6 +485,7 @@ impl CodeEditor {
                 Some(accesskit::AutoComplete::Both)
             };
         }
+        aria.read_only = self.options.dom_read_only && self.options.read_only;
         aria
     }
 
