@@ -363,3 +363,37 @@ fn bracket_match_foreground(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert_eq!(styles(cx), vec![Some(red), Some(red)]);
 }
+
+fn draw(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    cx.run_until_parked();
+}
+
+/// Monaco `_recomputeBrackets` clears the highlights only without widget
+/// focus (#472): the pair stays boxed while the find input has the focus,
+/// and goes once the focus leaves the editor.
+#[gpui::test]
+fn bracket_highlights_stay_while_a_widget_has_focus(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_brackets("foo(a, b)", cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&editor.focus_handle(cx), cx);
+    });
+    set_position(&editor, cx, 1, 10);
+    draw(cx);
+    assert_eq!(highlights(&editor, cx), vec![(3, 4), (8, 9)]);
+    cx.simulate_keystrokes("secondary-f");
+    draw(cx);
+    assert!(cx.update(|window, cx| {
+        let focus = editor.focus_handle(cx);
+        !focus.is_focused(window) && focus.contains_focused(window, cx)
+    }));
+    assert_eq!(highlights(&editor, cx), vec![(3, 4), (8, 9)]);
+    cx.update(|window, cx| window.blur(cx));
+    draw(cx);
+    assert!(highlights(&editor, cx).is_empty());
+}

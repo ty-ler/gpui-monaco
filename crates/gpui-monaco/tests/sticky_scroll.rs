@@ -766,3 +766,36 @@ fn sticky_focus_ends_on_blur_and_keeps_typing_out(cx: &mut TestAppContext) {
     cx.run_until_parked();
     assert!(!editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
 }
+
+/// Monaco moves DOM focus to the sticky line, so `editorTextFocus` turns
+/// false (#472): Cmd/Ctrl+/, Cmd/Ctrl+Shift+K and Alt+Down don't edit the
+/// text, while `editorFocus` holds.
+#[gpui::test]
+fn focused_sticky_line_has_no_text_focus(cx: &mut TestAppContext) {
+    use gpui::Focusable;
+    use gpui_monaco::actions::*;
+    let (editor, cx) = setup("rust", StickyScrollModel::Outline, cx);
+    cx.update(|window, cx| {
+        window.activate_window();
+        window.focus(&editor.focus_handle(cx), cx);
+    });
+    assert_eq!(sticky_rows_at(&editor, 1000., cx), vec![0, 1]);
+    let text = |cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, cx| e.model().read(cx).buffer().rope().to_string())
+    };
+    let before = text(cx);
+    let row = cursor_row(&editor, cx);
+    cx.dispatch_action(FocusStickyScroll);
+    cx.run_until_parked();
+    let keys = editor.read_with(cx, |e, cx| e.context_keys(cx));
+    assert!(!keys.contains("editorTextFocus"));
+    assert!(!keys.contains("textInputFocus"));
+    assert!(keys.contains("editorFocus"));
+    for key in ["secondary-/", "secondary-shift-k", "alt-down"] {
+        cx.simulate_keystrokes(key);
+        cx.run_until_parked();
+    }
+    assert_eq!(text(cx), before);
+    assert_eq!(cursor_row(&editor, cx), row);
+    assert!(editor.read_with(cx, |e, _| e.is_sticky_scroll_focused()));
+}

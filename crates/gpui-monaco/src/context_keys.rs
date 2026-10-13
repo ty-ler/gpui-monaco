@@ -220,9 +220,25 @@ impl CodeEditor {
         let selections = self.cursors.selections();
 
         // Monaco `EditorContextKeys`.
-        flag(context, "editorTextFocus", self.has_focus);
-        flag(context, "textInputFocus", self.has_focus);
-        flag(context, "editorFocus", self.has_focus || focus.widget);
+        // A focused sticky line has the keyboard rather than the text
+        // (Monaco moves DOM focus to it), so neither text key holds, while
+        // `editorFocus` does. A widget's input (the find, rename and quick
+        // input boxes) stands in for Monaco's plain `<input>`: not an
+        // editor of its own, so neither `editorTextFocus` nor `editorFocus`
+        // (its editor's keys say whether that one has widget focus), but a
+        // text input, whose own keys (`textInputFocus`) still apply.
+        let text_input_focus = self.has_focus && self.sticky.focused.is_none();
+        flag(
+            context,
+            "editorTextFocus",
+            text_input_focus && !self.widget_input,
+        );
+        flag(context, "textInputFocus", text_input_focus);
+        flag(
+            context,
+            "editorFocus",
+            !self.widget_input && (self.has_focus || focus.widget),
+        );
         flag(context, "editorReadonly", self.options.read_only);
         flag(context, "editorSimpleInput", self.widget_input);
         flag(

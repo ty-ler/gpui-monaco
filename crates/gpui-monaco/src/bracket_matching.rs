@@ -123,7 +123,8 @@ impl CodeEditor {
     /// Re-highlights the bracket pairs at the cursors (Monaco
     /// `BracketMatchingController._recomputeBrackets`): the pair next to a
     /// cursor, with an overview ruler mark, or with `matchBrackets:
-    /// "always"` the pair enclosing it. Only while the editor has focus.
+    /// "always"` the pair enclosing it. Only while the editor or one of its
+    /// widgets (the find input, a focused hover) has focus.
     /// Matched brackets take `editorBracketMatch.foreground` when the theme
     /// sets it, over their pair colorization (Monaco's
     /// `bracket-match-inline`).
@@ -133,7 +134,7 @@ impl CodeEditor {
         let selections = self.cursors.selections();
         let always = self.options.match_brackets == MatchBrackets::Always;
         if self.options.match_brackets != MatchBrackets::Never
-            && self.has_focus
+            && self.widget_focused
             && !self.options.single_line
             && selections.len() <= MAX_CURSORS
         {

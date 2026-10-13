@@ -4,7 +4,7 @@
 //! override any of them by binding the same keystroke in that context after
 //! [`crate::init`], or skip [`default_key_bindings`] entirely and bind their
 //! own. As in Monaco, the text's own keys (typing, deleting, moving the
-//! cursor, …) also need `editorTextFocus`, so they don't act while one of
+//! cursor, …) also need `textInputFocus`, so they don't act while one of
 //! the editor's widgets (a hover, the find widget's buttons, a menu, the
 //! peek list, …) has the focus.
 
@@ -2442,21 +2442,24 @@ fn works_from_widgets(action: &dyn Action) -> bool {
     )
 }
 
-/// `bindings` with Monaco's `editorTextFocus` (or `textInputFocus`, the
-/// same here) required by the plain [`KEY_CONTEXT`] ones whose Monaco
-/// keybindings need it: all but [`works_from_widgets`]'s.
+/// `bindings` with Monaco's `textInputFocus` required by the plain
+/// [`KEY_CONTEXT`] ones whose Monaco keybindings need it or
+/// `editorTextFocus`: all but [`works_from_widgets`]'s.
 ///
 /// GPUI matches a binding at any depth of the focused element's context
 /// stack, and the editor's widgets draw inside its key context, so without
 /// it Enter in a focused hover ran `Newline` on the document. A widget's
-/// input (the find, rename and quick input boxes) is an editor of its own,
-/// with the text focus, so the keys still apply in it.
+/// input (the find, rename and quick input boxes) stands in for Monaco's
+/// plain `<input>`, whose keys the browser handles: it has
+/// `textInputFocus` but not `editorTextFocus`, so these keys still edit
+/// it while the host's `editorTextFocus` rules don't apply there. A
+/// focused sticky line has neither.
 fn with_text_focus(bindings: Vec<KeyBinding>) -> Vec<KeyBinding> {
     use gpui::KeyBindingContextPredicate as P;
     let plain = P::Identifier(KEY_CONTEXT.into());
     let text_focus = P::And(
         Box::new(plain.clone()),
-        Box::new(P::Identifier("editorTextFocus".into())),
+        Box::new(P::Identifier("textInputFocus".into())),
     );
     bindings
         .into_iter()
