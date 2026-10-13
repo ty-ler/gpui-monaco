@@ -410,3 +410,41 @@ fn move_up_by_folded_line_with_count_clamps_to_first_visible_line_before_fold(
     cursor_move(&editor, cx, folded_line("up", 2));
     cursor_equal(&editor, cx, (1, 1), None);
 }
+
+// ----- Cursor move command - left/right on view lines -------------------------
+
+/// Monaco `_moveHalfLineRight`/`Left`: half the length of the wrapped
+/// segment the cursor is on, not of the model line.
+#[gpui::test]
+fn move_by_half_line_uses_the_wrapped_segment_length(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"x".repeat(200), cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| {
+                o.word_wrap = gpui_monaco::options::WordWrap::WordWrapColumn;
+                o.word_wrap_column = 80;
+            },
+            cx,
+        )
+    });
+    draw(cx);
+    // On the second segment (model columns 81-160).
+    move_to(&editor, cx, 1, 101);
+    cursor_move(&editor, cx, right(Some(1), Some("halfLine")));
+    cursor_equal(&editor, cx, (1, 141), None);
+    cursor_move(&editor, cx, left(Some(1), Some("halfLine")));
+    cursor_equal(&editor, cx, (1, 101), None);
+}
+
+/// Monaco `_moveLeft`/`_moveRight` on the view model: a fold is one line,
+/// so left from the line after it lands at the end of its header line.
+#[gpui::test]
+fn move_left_and_right_step_over_a_fold(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(FOLD_TEXT, cx);
+    hide(&editor, cx, 2, 4);
+    move_to(&editor, cx, 5, 1);
+    cursor_move(&editor, cx, left(None, None));
+    cursor_equal(&editor, cx, (1, 6), None);
+    cursor_move(&editor, cx, right(None, None));
+    cursor_equal(&editor, cx, (5, 1), None);
+}

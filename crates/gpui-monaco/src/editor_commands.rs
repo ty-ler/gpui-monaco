@@ -203,7 +203,15 @@ pub(crate) fn register_handlers(
         LastCursorWordSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastWord, args.position, args.view_position, Some(2), cx),
         LastCursorLineSelect => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(false), args.position, args.view_position, Some(2), cx),
         LastCursorLineSelectDrag => |this, args, _, cx| this.mouse_command(MouseCommand::LastLine(true), args.position, args.view_position, Some(2), cx),
-        Type => |this, args, _, cx| this.type_text(&args.text, cx),
+        // Monaco `_type`: only the keyboard types through the interceptors
+        // and fires `onWillType`/`onDidType`.
+        Type => |this, args, _, cx| {
+            if this.trigger_source.is_some() {
+                this.type_text_without_interceptors(&args.text, cx);
+            } else {
+                this.type_text(&args.text, cx);
+            }
+        },
         ReplacePreviousChar => |this, args, _, cx| this.composition_type(&args.text, args.replace_char_cnt, 0, 0, cx),
         CompositionType => |this, args, _, cx| this.composition_type(&args.text, args.replace_prev_char_cnt, args.replace_next_char_cnt, args.position_delta, cx),
         CompositionStart => |this, _, _, cx| {
@@ -449,23 +457,33 @@ impl CodeEditor {
             cursors.all().to_vec()
         };
         let moved: Vec<SingleCursorState> = match args.to.as_str() {
+            // Monaco `_moveLeft`/`_moveRight` and `_moveHalfLineLeft`/`Right`:
+            // `MoveOperations` on the cursors' view states, half a line being
+            // half the view line's length.
             "left" | "right" => {
                 let left = args.to == "left";
-                states
+                let lines = self.view_lines.clone();
+                let model = ViewCursorModel(&lines);
+                let to_model = |p: PointUtf16| lines.to_model(p.row, p.column);
+                let moved = self
+                    .cursor_view_states()
                     .iter()
-                    .map(|state| {
+                    .map(|view| {
                         let count = if by == Some("halfLine") {
-                            (rope.line_len_utf16(state.position.row) as f32 / 2.).round() as u32
+                            (lines.line_max_column(view.position.row) as f32 / 2.).round() as u32
                         } else {
                             value
                         };
-                        if left {
-                            cursor::move_left(&config, &rope, state, select, count.max(1))
+                        let moved = if left {
+                            cursor::move_left(&config, &model, view, select, count)
                         } else {
-                            cursor::move_right(&config, &rope, state, select, count.max(1))
-                        }
+                            cursor::move_right(&config, &model, view, select, count)
+                        };
+                        (map_state(&moved, to_model), Some(moved))
                     })
-                    .collect()
+                    .collect();
+                self.set_cursor_states_with_views(moved, true, cx);
+                return;
             }
             "up" | "down" => {
                 let up = args.to == "up";
@@ -1106,8 +1124,10 @@ impl CodeEditor {
             "mode": args.mode,
         });
         let item = ClipboardItem::new_string_with_json_metadata(args.text.clone(), metadata);
+        // Monaco `_paste` fires `onDidPaste` only from the keyboard.
+        let keyboard = self.trigger_source.is_none();
         self.begin_update(cx);
-        self.paste_item_inner(item, cx);
+        self.paste_item_inner(item, keyboard, cx);
         self.end_update(cx);
     }
 

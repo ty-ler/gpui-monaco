@@ -5,6 +5,10 @@ All notable changes to this project are documented here. The format follows [Kee
 ## [Unreleased]
 
 ### Fixed
+- **Editor commands and undo (#473):** Ported Monaco's non-keyboard `type` and `paste`, the linked-editing mirror joining a paste's undo step and `cursorMove` by view columns (audit 5 §A.3–§A.5).
+  - **`type` and `paste` from another source:** `trigger_from` with any source but `"keyboard"` types without the typing interceptors (Monaco `TypeWithoutInterceptorsOperation`): `(` no longer auto-closes, a line break isn't auto-indented, and no `WillType`/`DidType` fires, so suggest's trigger characters, signature help, inline completions and format-on-type stay quiet. `paste` from another source fires no `DidPaste`, so format-on-paste and auto-indent-on-paste don't run, as in Monaco's `_type` and `_paste`.
+  - **Linked editing after a paste or cut:** the mirror edit joins the undo step of the edit that triggered it even when that edit pushed an undo stop after itself (Monaco `popUndoStop`), so one Undo reverts both tags.
+  - **`cursorMove` left and right:** move on the cursors' view states, as the arrow keys do, so they step over a fold in one move, and `halfLine` is half the wrapped segment's length rather than the model line's.
 - **Suggest and parameter hints (#475):** ported Monaco's `sortText` fallback, the undo step of resolved additional edits and the provider order of signature help (audit 5 §C.4–§C.8).
   - **Sort text:** an item without a `sortText` (or an empty one) sorts by its label against items that have one, as Monaco fills it with the label: `{label: "bbb"}` now comes before `{label: "aaa", sortText: "zzz"}`.
   - **Resolved additional edits:** additional edits that arrive with the resolve after accepting an item join the insertion's undo step, so one Undo removes both; typing before they arrive still keeps them a separate step.

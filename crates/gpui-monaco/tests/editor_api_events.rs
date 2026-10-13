@@ -683,3 +683,232 @@ fn decoration_getter_filters(cx: &mut TestAppContext) {
             .is_empty()
     }));
 }
+
+/// A JavaScript editor with the bundled languages.
+fn setup_javascript<'a>(
+    text: &str,
+    cx: &'a mut TestAppContext,
+) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    cx.update(|cx| {
+        gpui_monaco::init(cx);
+        gpui_monaco::set_language_registry(cx, gpui_monaco_languages::registry());
+    });
+    let text = text.to_string();
+    let (editor, cx) = cx.add_window_view(|window, cx| {
+        let model = cx.new(|_| TextModel::new(&text).with_language("javascript"));
+        CodeEditor::new(model, window, cx)
+    });
+    focus(&editor, cx);
+    (editor, cx)
+}
+
+fn trigger_from(
+    editor: &Entity<CodeEditor>,
+    source: &str,
+    handler: &str,
+    payload: serde_json::Value,
+    cx: &mut VisualTestContext,
+) {
+    editor
+        .update_in(cx, |e, window, cx| {
+            e.trigger_from(source, handler, Some(payload), window, cx)
+        })
+        .unwrap();
+    cx.run_until_parked();
+}
+
+fn text(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> String {
+    editor.read_with(cx, |e, cx| e.model().read(cx).text())
+}
+
+fn type_and_paste_events(
+    editor: &Entity<CodeEditor>,
+    cx: &mut VisualTestContext,
+) -> Rc<RefCell<Vec<CodeEditorEvent>>> {
+    record(
+        editor,
+        |e| {
+            matches!(
+                e,
+                CodeEditorEvent::WillType(_)
+                    | CodeEditorEvent::DidType(_)
+                    | CodeEditorEvent::DidPaste(_)
+            )
+        },
+        cx,
+    )
+}
+
+/// Monaco `Cursor.type`: only the keyboard types through the interceptors
+/// (`typeWithInterceptors`); any other source replaces the selections as
+/// is (`typeWithoutInterceptors`), and `_type` fires `onWillType` and
+/// `onDidType` only for the keyboard.
+#[gpui::test]
+fn type_from_another_source_skips_the_interceptors_and_events(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_javascript("", cx);
+    let events = type_and_paste_events(&editor, cx);
+    trigger_from(
+        &editor,
+        "api",
+        "type",
+        serde_json::json!({ "text": "(" }),
+        cx,
+    );
+    assert_eq!(text(&editor, cx), "(");
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+    // From the keyboard, `(` auto-closes.
+    trigger_from(
+        &editor,
+        "keyboard",
+        "type",
+        serde_json::json!({ "text": "(" }),
+        cx,
+    );
+    assert_eq!(text(&editor, cx), "(()");
+    assert_eq!(events.borrow().len(), 2);
+    // No auto-indent after `{` either.
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |m, cx| m.set_value("{", cx));
+        e.set_selections(&[Selection::collapsed(p(0, 1))], cx);
+    });
+    trigger_from(
+        &editor,
+        "api",
+        "type",
+        serde_json::json!({ "text": "\nx" }),
+        cx,
+    );
+    assert_eq!(text(&editor, cx), "{\nx");
+    assert_eq!(
+        editor.read_with(cx, |e, _| e.selections()),
+        [Selection::collapsed(p(1, 1))]
+    );
+}
+
+struct Dotted;
+
+impl gpui_monaco::providers::CompletionProvider for Dotted {
+    fn trigger_characters(&self) -> Vec<char> {
+        vec!['.']
+    }
+
+    fn provide_completions(
+        &self,
+        _: &gpui_monaco::providers::ProviderContext,
+        _: PointUtf16,
+        _: gpui_monaco::providers::CompletionTrigger,
+        _: &mut gpui::App,
+    ) -> gpui::Task<anyhow::Result<gpui_monaco::providers::CompletionList>> {
+        use gpui_monaco::providers::{CompletionItem, CompletionItemKind, CompletionList};
+        gpui::Task::ready(Ok(CompletionList {
+            items: vec![CompletionItem::new("len", CompletionItemKind::Method)],
+            incomplete: false,
+        }))
+    }
+}
+
+/// Suggest's trigger characters listen to `onDidType`, which only the
+/// keyboard fires.
+#[gpui::test]
+fn type_from_another_source_triggers_no_suggestions(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_javascript("a", cx);
+    cx.update(|_, cx| {
+        gpui_monaco::providers::register_completion_provider(
+            cx,
+            gpui_monaco::providers::LanguageSelector::All,
+            Dotted,
+        )
+    });
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 1))], cx)
+    });
+    let visible = |cx: &mut VisualTestContext| editor.read_with(cx, |e, _| e.is_suggest_visible());
+    trigger_from(
+        &editor,
+        "api",
+        "type",
+        serde_json::json!({ "text": "." }),
+        cx,
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+    assert!(!visible(cx));
+    trigger_from(
+        &editor,
+        "keyboard",
+        "type",
+        serde_json::json!({ "text": "." }),
+        cx,
+    );
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+    assert!(visible(cx));
+}
+
+/// The typed text joins the typing before it in one undo step
+/// (`getTypingOperation`), as Monaco's `TypeWithoutInterceptorsOperation`.
+#[gpui::test]
+fn type_from_another_source_groups_undo_like_typing(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_javascript("", cx);
+    trigger_from(
+        &editor,
+        "api",
+        "type",
+        serde_json::json!({ "text": "ab" }),
+        cx,
+    );
+    trigger_from(
+        &editor,
+        "api",
+        "type",
+        serde_json::json!({ "text": "c" }),
+        cx,
+    );
+    assert_eq!(text(&editor, cx), "abc");
+    editor.update(cx, |e, cx| e.undo(cx));
+    assert_eq!(text(&editor, cx), "");
+}
+
+/// Monaco `_paste` fires `onDidPaste`, which format-on-paste and
+/// `AutoIndentOnPaste` listen to, only for the keyboard.
+#[gpui::test]
+fn paste_from_another_source_fires_no_did_paste(cx: &mut TestAppContext) {
+    let (editor, cx) = setup_javascript("if (a) {\n\n}", cx);
+    editor.update(cx, |e, cx| {
+        e.update_options_with(
+            |o| {
+                o.auto_indent_on_paste = true;
+                o.auto_indent = gpui_monaco::cursor::AutoIndent::Full;
+            },
+            cx,
+        );
+        e.set_selections(&[Selection::collapsed(p(1, 0))], cx)
+    });
+    let events = type_and_paste_events(&editor, cx);
+    trigger_from(
+        &editor,
+        "api",
+        "paste",
+        serde_json::json!({ "text": "b();" }),
+        cx,
+    );
+    // Not auto-indented.
+    assert_eq!(text(&editor, cx), "if (a) {\nb();\n}");
+    assert!(events.borrow().is_empty(), "{:?}", events.borrow());
+    // From the keyboard it is.
+    editor.update(cx, |e, cx| e.undo(cx));
+    trigger_from(
+        &editor,
+        "keyboard",
+        "paste",
+        serde_json::json!({ "text": "b();" }),
+        cx,
+    );
+    assert_eq!(text(&editor, cx), "if (a) {\n    b();\n}");
+    assert!(matches!(
+        events.borrow().as_slice(),
+        [CodeEditorEvent::DidPaste(_)]
+    ));
+}

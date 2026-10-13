@@ -1918,6 +1918,12 @@ impl TextModel {
         self.buffer.pop_stack_element();
     }
 
+    /// Whether the last undo step is closed, so the next edit starts a new
+    /// one (an undo stop follows it).
+    pub(crate) fn is_last_undo_step_sealed(&self) -> bool {
+        self.buffer.is_last_step_sealed()
+    }
+
     /// Whether there's an undo step to undo.
     pub fn can_undo(&self) -> bool {
         self.buffer.can_undo()
