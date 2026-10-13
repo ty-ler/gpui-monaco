@@ -82,12 +82,13 @@ Ranges are byte offsets. To convert from `PointUtf16`, use `model.buffer().point
 | `overview_ruler` (`OverviewRulerDecoration`) | `overviewRuler` | a mark in the scrollbar's overview ruler, in a color (`dark_color` in dark themes) and lane, spanning the range's lines |
 | `minimap` (`MinimapDecoration`) | `minimap` | a mark in the minimap: `Inline` over the characters with a half-color band across the line, or a 2px `Gutter` bar; or a section header (`section_header_style`, `section_header_text`) |
 | `before`, `after` | `before`, `after` | text injected before or after the range (see below) |
-| `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, its background is widened to a character's width (so are narrower ones, such as a zero-width space's), and a range ending at a line's start stops at the end of the line before |
+| `show_if_collapsed` | `showIfCollapsed` | an empty range still shows: its injected text only shows with it, its background is widened to a character's width (so are narrower ones, such as a zero-width space's), and a range ending at a line's start stops at the end of the line before in the text area (the glyph margin and line decorations keep the decoration's own range) |
 | `font_family`, `font_weight`, `font_style` | `fontFamily`, `fontWeight`, `fontStyle` | the decorated text's font; line wrapping still measures the editor's font |
 | `text_direction` | `textDirection` | kept for the getters; GPUI can't lay out right-to-left lines, so they stay left to right |
 | `hover_message` | `hoverMessage` | markdown (`Vec<MarkdownString>`) shown in the hover over the range, or anywhere on its lines with `is_whole_line`; `show_if_collapsed` ones take a character more each side |
 | `stickiness` | `stickiness` | whether typing at the edges grows the range |
 | `collapse_on_replace_edit` | `collapseOnReplaceEdit` | an edit replacing the whole range collapses it to the edit's start, so pasting over a link doesn't decorate the pasted text |
+| `hide_in_comment_tokens`, `hide_in_string_tokens` | `hideInCommentTokens`, `hideInStringTokens` | the decoration isn't drawn while its range lies in comment (string) tokens, as the language's highlighting finds them |
 | `z_index` | `zIndex` | paint order for overlapping decorations: among the whole-line ones, painted first (the fold background is one, at 0), then among the others |
 
 Monaco's class names become styles here, so `className` effects beyond these fields can't be expressed. `inlineClassNameAffectsLetterSpacing` has no equivalent: it tells Monaco's DOM renderer to measure again, and text here is always shaped with its styles. A decoration doesn't change the font size (`fontSize`); `get_font_size_at_position` is the editor's.

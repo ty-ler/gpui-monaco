@@ -755,7 +755,11 @@ pub(crate) fn prepaint(
         model
             .decorations_in_range(header_byte_start..byte_range.end, Some(editor_id))
             .into_iter()
-            .filter(|d| d.options.minimap.is_some() && (shows_validation || !d.options.validation))
+            .filter(|d| {
+                d.options.minimap.is_some()
+                    && (shows_validation || !d.options.validation)
+                    && model.is_decoration_visible(d)
+            })
             .collect()
     });
     decorations.sort_by_key(|d| d.options.z_index);

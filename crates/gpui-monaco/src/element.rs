@@ -225,10 +225,37 @@ impl LineLayout {
     }
 }
 
+/// Monaco `IndentGuidesOverlay.prepareRender`: a guide without a column
+/// is `visible_column - 1` spaces (`fontInfo.spaceWidth`) past the line's
+/// start. Only `_maxIndentLeft` uses the typical half-width.
+pub(crate) fn guide_left(metrics: &TextMetrics, visible_column: i64) -> Pixels {
+    metrics.space_width * (visible_column - 1) as f32
+}
+
+/// `font` with tabular figures (CSS `font-variant-numeric: tabular-nums`,
+/// the OpenType `tnum` feature), its other features kept.
+pub(crate) fn tabular_figures(font: &Font) -> Font {
+    let mut features: Vec<(String, u32)> = font
+        .features
+        .0
+        .iter()
+        .filter(|(tag, _)| tag != "tnum")
+        .cloned()
+        .collect();
+    features.push(("tnum".into(), 1));
+    Font {
+        features: gpui::FontFeatures(std::sync::Arc::new(features)),
+        ..font.clone()
+    }
+}
+
 /// Text style shared by everything the element shapes.
 #[derive(Clone)]
 pub(crate) struct TextMetrics {
     pub font: Font,
+    /// [`font`](Self::font) with tabular figures, for line numbers (Monaco's
+    /// `.line-numbers { font-variant-numeric: tabular-nums }`).
+    pub number_font: Font,
     pub font_size: Pixels,
     pub line_height: Pixels,
     /// Monaco `typicalHalfwidthCharacterWidth`: the width of `n`, a column
@@ -288,6 +315,7 @@ impl TextMetrics {
                 .all(|text| (width(text) - em_width).abs() < px(0.01))
             && (space_width - em_width).abs() < px(0.01);
         Self {
+            number_font: tabular_figures(&font),
             font,
             font_size,
             line_height: crate::font_zoom::effective_line_height(options),
@@ -3874,10 +3902,15 @@ fn prepaint_editor(
         model.decorations_in_range(visible_start..visible_end, Some(editor_id))
     });
     let show_validation = editor.shows_validation_decorations();
-    let decorations: Vec<_> = decorations
-        .into_iter()
-        .filter(|d| show_validation || !d.options.validation)
-        .collect();
+    let decorations: Vec<_> = {
+        let model = editor.model().read(cx);
+        decorations
+            .into_iter()
+            .filter(|d| {
+                (show_validation || !d.options.validation) && model.is_decoration_visible(d)
+            })
+            .collect()
+    };
     // Decorations in model points.
     let decoration_points: Vec<(PointUtf16, PointUtf16, &crate::decorations::Decoration)> =
         decorations
@@ -4578,14 +4611,16 @@ fn prepaint_editor(
                             })
                             .collect()
                     };
-                    let row_decorations: Vec<_> = editor
-                        .model()
-                        .update(cx, |model, _| {
-                            model.decorations_in_range(line_range.clone(), Some(editor_id))
-                        })
-                        .into_iter()
-                        .filter(|d| show_validation || !d.options.validation)
-                        .collect();
+                    let row_decorations: Vec<_> = editor.model().update(cx, |model, _| {
+                        model
+                            .decorations_in_range(line_range.clone(), Some(editor_id))
+                            .into_iter()
+                            .filter(|d| {
+                                (show_validation || !d.options.validation)
+                                    && model.is_decoration_visible(d)
+                            })
+                            .collect()
+                    });
                     let points: Vec<_> = row_decorations
                         .iter()
                         .map(|d| {
@@ -4636,7 +4671,7 @@ fn prepaint_editor(
                     window.text_system().shape_line(
                         label.clone().into(),
                         metrics.font_size,
-                        &[run(label.len(), &metrics.font, colors.line_number)],
+                        &[run(label.len(), &metrics.number_font, colors.line_number)],
                         None,
                     )
                 });
@@ -4828,9 +4863,14 @@ fn prepaint_editor(
     );
     for ((start, end, decoration), overlay) in decoration_points.iter().zip(&overlays) {
         let options = &decoration.options;
-        // Monaco `_renderNormalDecorations`: with `showIfCollapsed`, a range
-        // ending at the start of a line ends at the end of the line before.
-        let end = &collapsed_end(*start, *end, options, |row| snapshot.line_len_utf16(row));
+        // The gutter's parts (Monaco `LinesDecorationsOverlay`,
+        // `MarginViewLineDecorationsOverlay`, `GlyphMarginWidgets`) are on
+        // the decoration's own view range, not the `showIfCollapsed`
+        // shortened one of the decorations overlay (`overlay`).
+        let (view_start, view_end) =
+            decoration_view_range(*start, *end, options.is_whole_line, |row| {
+                snapshot.line_len_utf16(row)
+            });
         if options.is_whole_line
             && options.z_index > 0
             && let Some(fold_highlights) = fold_highlights.take()
@@ -4839,10 +4879,6 @@ fn prepaint_editor(
         }
         let faded = faded(decoration);
         let last_row = overlay.map_or(end.row, |(_, overlay_end)| overlay_end.row.max(end.row));
-        let (view_start, view_end) =
-            decoration_view_range(*start, *end, options.is_whole_line, |row| {
-                snapshot.line_len_utf16(row)
-            });
         for line in layout.lines.iter() {
             if line.row < start.row || line.row > last_row {
                 continue;
@@ -5045,8 +5081,11 @@ fn prepaint_editor(
                 line_number_colors.push((line.row, color));
             }
             // Monaco `_collectDecorationBasedGlyphRenderRequest`: on every
-            // view line of the range.
-            if let Some((glyph, color)) = &options.glyph {
+            // view line of the range, and none without the glyph margin
+            // (`GlyphMarginWidgets.prepareRender`).
+            if let Some((glyph, color)) = &options.glyph
+                && layout.glyph_margin_width > px(0.)
+            {
                 let lane = options.glyph_margin.unwrap_or_default().position;
                 glyph_requests.push(GlyphRequest {
                     view_line: line.view_line,
@@ -5593,7 +5632,7 @@ fn prepaint_editor(
                     let color = if guide.active { active } else { inactive };
                     let left = match guide.column {
                         Some(column) => origin_x + line.x_for_column(column - 1),
-                        None => origin_x + metrics.em_width * (guide.visible_column - 1) as f32,
+                        None => origin_x + guide_left(&metrics, guide.visible_column),
                     };
                     let bounds = match guide.horizontal {
                         Some(horizontal) => {
@@ -5638,7 +5677,7 @@ fn prepaint_editor(
                     continue;
                 };
                 let color = if is_active { active } else { inactive };
-                let x = origin_x + metrics.em_width * ((level - 1) * ctx.indent_size) as f32;
+                let x = origin_x + guide_left(&metrics, indent_column);
                 if max_indent_left.is_some_and(|max| x - origin_x > max) {
                     continue;
                 }
@@ -5861,7 +5900,7 @@ fn prepaint_editor(
             let shaped = window.text_system().shape_line(
                 label.clone().into(),
                 metrics.font_size,
-                &[run(label.len(), &metrics.font, color)],
+                &[run(label.len(), &metrics.number_font, color)],
                 None,
             );
             // Right-aligned, but for the relative mode's current line
@@ -9072,5 +9111,51 @@ mod glyph_font_tests {
             let (text, text_size) = glyph_font(None, &editor_font, size);
             assert_eq!((text, text_size), (editor_font.clone(), size));
         }
+    }
+}
+
+#[cfg(test)]
+mod gutter_font_tests {
+    use gpui::{Font, FontFeatures, font, px};
+
+    use super::{TextMetrics, guide_left, tabular_figures};
+
+    /// Monaco `.line-numbers { font-variant-numeric: tabular-nums }`: the
+    /// line numbers' font adds `tnum`, keeping the editor's features.
+    #[test]
+    fn line_numbers_use_tabular_figures() {
+        let base = Font {
+            features: FontFeatures(std::sync::Arc::new(vec![
+                ("liga".into(), 0),
+                ("tnum".into(), 0),
+            ])),
+            ..font("Helvetica")
+        };
+        let numbers = tabular_figures(&base);
+        assert_eq!(
+            *numbers.features.0,
+            vec![("liga".to_string(), 0), ("tnum".to_string(), 1)]
+        );
+        assert_eq!(numbers.family, base.family);
+    }
+
+    /// Monaco `IndentGuidesOverlay`: guides are `spaceWidth` apart, not
+    /// `typicalHalfwidthCharacterWidth` (they differ in proportional fonts).
+    #[test]
+    fn guides_are_placed_by_the_space_width() {
+        let metrics = TextMetrics {
+            font: font("Helvetica"),
+            number_font: font("Helvetica"),
+            font_size: px(14.),
+            line_height: px(19.),
+            em_width: px(8.),
+            space_width: px(4.),
+            max_digit_width: px(8.),
+            render_control_characters: false,
+            full_width_cell: None,
+        };
+        assert_eq!(guide_left(&metrics, 1), px(0.));
+        // The level-2 guide of 4-space indents, on the indented code.
+        assert_eq!(guide_left(&metrics, 5), px(16.));
     }
 }
