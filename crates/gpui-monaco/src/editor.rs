@@ -6430,7 +6430,7 @@ impl CodeEditor {
                 self.links_mouse_move(position, link_modifier, cx);
                 if link_modifier && position.is_some() {
                     self.definition_mouse_move(position, cx);
-                } else if self.has_definition_link() {
+                } else if self.has_definition_state() {
                     self.clear_definition_link(cx);
                 }
                 if let Some(part) = inlay_part {

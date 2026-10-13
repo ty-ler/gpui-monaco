@@ -8,7 +8,6 @@
 //! (MIT).
 
 use std::ops::Range;
-use std::time::Duration;
 
 use gpui::{Context, SharedString, Task};
 use text::PointUtf16;
@@ -28,7 +27,9 @@ pub(crate) struct DefinitionLink {
     /// The word under the mouse and where it leads.
     pub link: Option<(Range<PointUtf16>, Vec<Location>)>,
     decorations: Vec<DecorationId>,
-    pending: Option<PointUtf16>,
+    /// Monaco `currentWordAtPosition`: the word last asked about, found or
+    /// not, so moving within it asks nothing again.
+    word: Option<(Range<PointUtf16>, String)>,
     /// Shown from the keyboard (Monaco `startFindDefinitionFromCursor`):
     /// the next cursor move or key press removes it.
     from_keyboard: bool,
@@ -181,60 +182,62 @@ impl CodeEditor {
             self.clear_definition_link(cx);
             return;
         };
-        if let Some((range, _)) = &self.definition.link
-            && range.start <= position
-            && position < range.end
-        {
-            return;
-        }
-        if self.definition.pending == Some(position) {
-            return;
-        }
         self.start_find_definition(position, false, cx);
     }
 
     /// Monaco `startFindDefinition`: asks the providers for the definition
-    /// of the word at `position` and links it, with the definition's code
-    /// as its hover. From the keyboard, the hover is shown at the cursor
-    /// afterwards.
+    /// of the word at `position`, unless it is the word last asked about,
+    /// and links it, with the definition's code as its hover. The link
+    /// shown stays until the answer replaces or removes it. From the
+    /// keyboard, the hover is shown at the cursor afterwards.
     fn start_find_definition(
         &mut self,
         position: PointUtf16,
         from_keyboard: bool,
         cx: &mut Context<Self>,
     ) {
-        self.clear_definition_link(cx);
-        self.definition.pending = Some(position);
         let config = self.cursor_config(cx);
-        let word = cursor::word_at(&config, self.snapshot.rope(), position);
-        if word.is_none() && !from_keyboard {
+        let rope = self.snapshot.rope();
+        let word = cursor::word_at(&config, rope, position).map(|range| {
+            let bytes =
+                rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end);
+            let text: String = rope.chunks_in_range(bytes).collect();
+            (range, text)
+        });
+        let Some(word) = word else {
+            self.clear_definition_link(cx);
+            // Monaco `ShowDefinitionPreviewHoverAction`: the hover anyway.
+            if from_keyboard {
+                self.show_hover_at_cursor(cx);
+            }
+            return;
+        };
+        // Monaco's `toUnhookForKeyboard.clear()`, then its listeners again
+        // when from the keyboard.
+        self.definition.from_keyboard = from_keyboard;
+        if self.definition.word.as_ref() == Some(&word) {
+            if from_keyboard {
+                self.show_hover_at_cursor(cx);
+            }
             return;
         }
+        let range = word.0.clone();
+        self.definition.word = Some(word);
+        let tasks = self.request_definitions(position, cx);
         self.definition.task = Some(cx.spawn(async move |this, cx| {
             let mut locations = Vec::new();
-            if word.is_some() {
-                cx.background_executor()
-                    .timer(Duration::from_millis(50))
-                    .await;
-                let Ok(tasks) = this.update(cx, |this, cx| this.request_definitions(position, cx))
-                else {
-                    return;
-                };
-                for task in tasks {
-                    if let Ok(found) = task.await {
-                        locations.extend(found);
-                    }
+            for task in tasks {
+                if let Ok(found) = task.await {
+                    locations.extend(found);
                 }
             }
             this.update(cx, |this, cx| {
-                if this.definition.pending != Some(position) {
-                    return;
-                }
-                if let Some(word) = word
-                    && !locations.is_empty()
-                {
-                    let range = link_range(word, &locations);
-                    this.set_definition_link(range, locations, from_keyboard, cx);
+                this.definition.task = None;
+                if locations.is_empty() {
+                    this.remove_definition_link_decorations(cx);
+                } else {
+                    let range = link_range(range, &locations);
+                    this.set_definition_link(range, locations, cx);
                 }
                 // Monaco `ShowDefinitionPreviewHoverAction`: then the hover.
                 if from_keyboard {
@@ -258,7 +261,7 @@ impl CodeEditor {
     /// keyboard goes away (Monaco `startFindDefinitionFromCursor`'s
     /// listeners).
     pub(crate) fn dismiss_keyboard_definition_link(&mut self, cx: &mut Context<Self>) {
-        if self.definition.from_keyboard && self.definition.link.is_some() {
+        if self.definition.from_keyboard {
             self.clear_definition_link(cx);
         }
     }
@@ -302,7 +305,6 @@ impl CodeEditor {
         &mut self,
         range: Range<PointUtf16>,
         locations: Vec<Location>,
-        from_keyboard: bool,
         cx: &mut Context<Self>,
     ) {
         let hover_message = self.definition_hover_message(&locations, cx);
@@ -339,15 +341,21 @@ impl CodeEditor {
             )
         });
         self.definition.link = Some((range, locations));
-        self.definition.from_keyboard = from_keyboard;
         cx.notify();
     }
 
+    /// Monaco `removeLinkDecorations` and `currentWordAtPosition = null`:
+    /// the link goes and the next word is asked about again.
     pub(crate) fn clear_definition_link(&mut self, cx: &mut Context<Self>) {
         self.definition.task = None;
-        self.definition.pending = None;
-        self.definition.link = None;
+        self.definition.word = None;
         self.definition.from_keyboard = false;
+        self.remove_definition_link_decorations(cx);
+    }
+
+    /// Monaco `removeLinkDecorations`.
+    fn remove_definition_link_decorations(&mut self, cx: &mut Context<Self>) {
+        self.definition.link = None;
         let old = std::mem::take(&mut self.definition.decorations);
         if !old.is_empty() {
             self.model().update(cx, |model, cx| {
@@ -360,6 +368,13 @@ impl CodeEditor {
     /// Whether a Cmd/Ctrl+hover link is showing (for the pointer cursor).
     pub(crate) fn has_definition_link(&self) -> bool {
         self.definition.link.is_some()
+    }
+
+    /// Whether a link, a request or a remembered word would be cleared.
+    pub(crate) fn has_definition_state(&self) -> bool {
+        self.definition.link.is_some()
+            || self.definition.word.is_some()
+            || self.definition.task.is_some()
     }
 
     /// Follows the link under the mouse (a Cmd/Ctrl+click on a sticky

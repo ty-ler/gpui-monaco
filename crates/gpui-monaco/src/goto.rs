@@ -560,6 +560,9 @@ impl CodeEditor {
                 DecorationOptions {
                     background: Some(self.theme.colors.symbol_highlight_background),
                     border: self.theme.colors.symbol_highlight_border,
+                    border_style: crate::decorations::dotted_in_high_contrast(
+                        self.theme.high_contrast,
+                    ),
                     ..Default::default()
                 },
             )],

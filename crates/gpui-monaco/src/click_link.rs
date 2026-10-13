@@ -68,7 +68,7 @@ impl CodeEditor {
     /// (`onCancel`).
     pub(crate) fn reset_click_link(&mut self, cx: &mut Context<Self>) {
         self.click_link = ClickLinkGesture::default();
-        if self.has_definition_link() {
+        if self.has_definition_state() {
             self.clear_definition_link(cx);
         }
         if self.has_active_link() {

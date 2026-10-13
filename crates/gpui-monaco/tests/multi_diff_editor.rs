@@ -1164,6 +1164,48 @@ fn the_reveal_highlight_lasts_350ms(cx: &mut TestAppContext) {
     assert!(highlights(cx).is_empty());
 }
 
+/// Monaco's `.hc-black .symbolHighlight`: the reveal highlight's border is
+/// dotted (dashed in the port's mapping) in high contrast themes.
+#[gpui::test]
+fn the_reveal_highlight_is_dotted_in_high_contrast(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(10, cx);
+    let range = PointUtf16::new(20, 0)..PointUtf16::new(20, 7);
+    let reveal = |cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            multi.update(cx, |m, cx| {
+                m.reveal_range(4, range.clone(), false, window, cx)
+            })
+        });
+        paint(cx);
+    };
+    // Once to create the file's editors, then again in HC Black after the
+    // first highlight is gone.
+    reveal(cx);
+    let editor = multi.update(cx, |m, cx| {
+        m.diff_editor(4).unwrap().read(cx).modified_editor().clone()
+    });
+    editor.update(cx, |e, cx| {
+        e.set_theme(std::sync::Arc::new(gpui_monaco::Theme::hc_black()), cx)
+    });
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(400));
+    paint(cx);
+    reveal(cx);
+    let styles = editor.update(cx, |editor, cx| {
+        let colors = editor.colors().clone();
+        editor
+            .decorations_in_range(range.clone(), cx)
+            .into_iter()
+            .filter(|d| {
+                d.options.background == Some(colors.symbol_highlight_background)
+                    && d.options.border == colors.symbol_highlight_border
+            })
+            .map(|d| d.options.border_style)
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(styles, vec![gpui::BorderStyle::Dashed]);
+}
+
 /// The documents shown, for passing back to `set_documents`.
 fn documents(
     multi: &Entity<MultiDiffEditor>,
