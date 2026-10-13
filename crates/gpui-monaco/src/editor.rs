@@ -2853,13 +2853,16 @@ impl CodeEditor {
         Some((self.marked_range_points()?, self.marked_selection_points()))
     }
 
-    /// Monaco `compositionType` across cursors: replaces `range` (bytes),
-    /// which must be around the collapsed primary cursor on its line, by
-    /// `text` at every cursor (the same number of characters before and
-    /// after each), leaving each cursor `position_delta` UTF-16 units from
-    /// the end of its text. Returns the primary cursor's new composition
-    /// range, or `None` (nothing done) when `range` isn't around the
-    /// primary cursor.
+    /// Monaco `_emitTypeEvent` and `compositionType` across cursors:
+    /// replaces `range` (bytes), which must be on the collapsed primary
+    /// cursor's line, by `text` at every cursor. The replaced counts are
+    /// measured against the primary cursor, and the text between the range
+    /// and the cursor is padded into the inserted text, so each cursor
+    /// replaces the same characters before and after it and stays after
+    /// the padded text, `position_delta` UTF-16 units from its end. Returns
+    /// the primary cursor's new composition range (where `text` landed), or
+    /// `None` (nothing done) when `range` isn't on the primary cursor's
+    /// line.
     fn composition_type_at_cursors(
         &mut self,
         range: Range<usize>,
@@ -2874,25 +2877,45 @@ impl CodeEditor {
         if !primary.is_empty() || start.row != head.row || end.row != head.row {
             return None;
         }
-        if start > head || head > end {
-            return None;
-        }
+        let head_offset = self.snapshot.point_utf16_to_offset(head);
+        let replace_prev = head.column.saturating_sub(start.column);
+        let replace_next = end.column.saturating_sub(head.column);
+        // The text between the cursor and a range after it goes before
+        // `text`; between a range before it and the cursor, after.
+        let before = if head_offset < range.start {
+            self.snapshot.text_for_range(head_offset..range.start)
+        } else {
+            String::new()
+        };
+        let after = if range.end < head_offset {
+            self.snapshot.text_for_range(range.end..head_offset)
+        } else {
+            String::new()
+        };
+        let padded = if before.is_empty() && after.is_empty() {
+            None
+        } else {
+            Some(format!("{before}{text}{after}"))
+        };
         let operation = cursor::composition_type(
             self.snapshot.rope(),
             &self.cursors,
-            text,
-            head.column - start.column,
-            end.column - head.column,
+            padded.as_deref().unwrap_or(text),
+            replace_prev,
+            replace_next,
             position_delta,
             self.prev_edit_kind,
         );
         self.apply(operation, cx);
         let head = self.cursors.primary().position;
-        let len = text.encode_utf16().count() as i64;
+        let len = (before.encode_utf16().count()
+            + text.encode_utf16().count()
+            + after.encode_utf16().count()) as i64;
         let column = (head.column as i64 - position_delta as i64 - len).max(0) as u32;
         let start = self
             .snapshot
-            .point_utf16_to_offset(PointUtf16::new(head.row, column));
+            .point_utf16_to_offset(PointUtf16::new(head.row, column))
+            + before.len();
         Some(start..start + text.len())
     }
 
@@ -7029,15 +7052,14 @@ impl EntityInputHandler for CodeEditor {
             self.type_text(text, cx);
             return;
         }
-        // Monaco commits a composition at every cursor. Replacing text
-        // around the cursor without one (macOS press-and-hold swapping `e`
-        // for `é`, or autocorrect) is also a `compositionType` with
-        // `replacePrevCharCnt`/`replaceNextCharCnt`, at every cursor: a
+        // Monaco commits a composition at every cursor, with one cursor
+        // too. Replacing text on the cursor's line without one (macOS
+        // press-and-hold swapping `e` for `é`, or autocorrect) is also a
+        // `compositionType` with `replacePrevCharCnt`/`replaceNextCharCnt`
+        // and the text up to the cursor padded in, at every cursor: a
         // `TypingOther` edit that joins the typing before it in one undo
         // step.
-        if (self.cursors.all().len() > 1 || marked.is_none())
-            && let Some(range) = explicit.clone()
-            && (marked.is_some() || !range.is_empty())
+        if let Some(range) = explicit.clone()
             && self
                 .composition_type_at_cursors(range, text, 0, cx)
                 .is_some()
@@ -7089,11 +7111,11 @@ impl EntityInputHandler for CodeEditor {
             cx.emit(CodeEditorEvent::CompositionStarted);
         }
         let was_marked = self.marked_range.is_some();
-        // Monaco composes at every cursor (`compositionType`): the primary
-        // cursor's text, typed at each of them. A composition starting over
-        // selections first replaces them.
-        let multi = self.cursors.all().len() > 1;
-        if multi && starting && range == self.primary_selection_offsets().0 {
+        // Monaco composes at every cursor, one cursor included
+        // (`compositionType`, a `TypingOther` edit that joins the typing's
+        // undo step): the primary cursor's text, typed at each of them. A
+        // composition starting over selections first replaces them.
+        if starting && range == self.primary_selection_offsets().0 {
             let selections = self.cursors.selections();
             if selections.iter().any(|s| !s.is_empty()) {
                 self.run_edit(cx, |c, m, s| cursor::type_text(c, m, s, "", None));
@@ -7101,14 +7123,10 @@ impl EntityInputHandler for CodeEditor {
             }
         }
         let len_utf16 = new_text.encode_utf16().count();
-        let composed = if multi {
-            let delta = new_selected_range_utf16
-                .as_ref()
-                .map_or(0, |selected| selected.end as i64 - len_utf16 as i64);
-            self.composition_type_at_cursors(range.clone(), new_text, delta as i32, cx)
-        } else {
-            None
-        };
+        let delta = new_selected_range_utf16
+            .as_ref()
+            .map_or(0, |selected| selected.end as i64 - len_utf16 as i64);
+        let composed = self.composition_type_at_cursors(range.clone(), new_text, delta as i32, cx);
         let composed_at_cursors = composed.is_some();
         let composition = match composed {
             Some(composition) => composition,
