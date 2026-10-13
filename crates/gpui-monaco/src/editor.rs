@@ -1032,7 +1032,7 @@ impl CodeEditor {
                 this.scrollbar_drag = None;
                 this.scrollbar_arrow_task = None;
                 this.minimap_drag = None;
-                this.dnd_cancel(cx);
+                this.dnd_blur(cx);
                 this.message_blurred(cx);
                 // Monaco's Cmd/Ctrl+D session ends on `onDidBlurEditorText`.
                 this.end_multi_cursor_session(cx);
@@ -5558,13 +5558,33 @@ impl CodeEditor {
         if let Some(row) = self.fold_line_end_at(&mouse, event.position) {
             self.folding_mouse_down(Some(row), false);
         }
+        // Monaco `_onMouseDown`: as for the left button, only the text (and
+        // the line numbers with `selectOnLineNumbers`) takes focus and
+        // starts the mouse-down operation; the gutter, scrollbars, minimap
+        // and sticky lines don't.
+        use crate::mouse_target::MouseTargetKind;
+        let handles = match mouse.target.kind {
+            MouseTargetKind::ContentText | MouseTargetKind::ContentEmpty { .. } => true,
+            MouseTargetKind::GutterLineNumbers => self.options.select_on_line_numbers,
+            _ => false,
+        };
+        if handles {
+            window.focus(&self.focus_handle, cx);
+        } else {
+            // Also keeps GPUI from focusing the editor's root on the click.
+            window.prevent_default();
+        }
+        // Monaco `MiddleScrollController` starts on any target, after the
+        // mouse handler focused the text, so its key-down can end it.
         if self.options.scroll_on_middle_click {
             self.animation.middle_scroll =
                 Some(crate::view::animation::MiddleScroll::new(event.position));
             cx.notify();
             return;
         }
-        window.focus(&self.focus_handle, cx);
+        if !handles {
+            return;
+        }
         // Monaco `mouseMiddleClickAction`: the link gesture notes the click,
         // to open a link (or act like a Cmd/Ctrl+click) on mouse-up.
         self.click_link_mouse_down(&mouse);
@@ -6590,6 +6610,13 @@ impl CodeEditor {
         self.drag_mouse_cursor()
     }
 
+    /// Where the drop caret (Monaco's `dnd-target`) is, for a dragged
+    /// selection or dragged files. For tests.
+    #[doc(hidden)]
+    pub fn dnd_target_for_tests(&self) -> Option<PointUtf16> {
+        self.dnd.target
+    }
+
     /// The pointer the editor and its widgets show over the whole window in
     /// the last frame, during a drag that captured it: the editor's own
     /// ([`Self::drag_mouse_cursor`]), the hover's, find widget's, quick
@@ -6613,8 +6640,9 @@ impl CodeEditor {
     /// its own): the I-beam (`mouseStyle`) for the text, a hand over a
     /// link, or `mouseStyle` while dragging the selection.
     pub(crate) fn root_mouse_cursor(&self) -> MouseCursor {
-        if self.dnd.target.is_some() || self.dnd.copy {
-            // Monaco's `mouseStyle` while dragging the selection.
+        if self.dnd.dragging() || self.dnd.target.is_some() || self.dnd.copy {
+            // Monaco's `mouseStyle` while dragging the selection, from its
+            // first step wherever the mouse is (its own selection too).
             if self.dnd.copy {
                 MouseCursor::DragCopy
             } else {
@@ -8201,7 +8229,9 @@ impl Render for CodeEditor {
             .on_drag_move::<gpui::ExternalPaths>(cx.listener(
                 |this, event: &gpui::DragMoveEvent<gpui::ExternalPaths>, window, cx| {
                     let inside = event.bounds.contains(&event.event.position);
-                    let target = (inside && this.options.drop_into_editor.enabled)
+                    // Monaco `isDropIntoEnabled`: not in a read-only editor.
+                    let enabled = !this.options.read_only && this.options.drop_into_editor.enabled;
+                    let target = (inside && enabled)
                         .then(|| this.position_for_point(event.event.position, window, cx));
                     if this.dnd.target != target {
                         this.dnd.target = target;

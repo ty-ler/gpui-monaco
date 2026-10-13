@@ -38,6 +38,14 @@ pub(crate) struct DragAndDrop {
     pub copy: bool,
 }
 
+impl DragAndDrop {
+    /// The selection is being dragged (the mouse moved since it went down
+    /// on it).
+    pub fn dragging(&self) -> bool {
+        self.selection.is_some()
+    }
+}
+
 /// Monaco `DragAndDropCommand`: the edits that move (or copy) `selection` to
 /// `target`, in current coordinates, and the selection after them.
 pub(crate) fn drag_and_drop_edits(
@@ -265,6 +273,15 @@ impl CodeEditor {
         };
         cx.notify();
         true
+    }
+
+    /// Monaco `onEditorBlur`: the drag ends and the copy modifier is
+    /// forgotten, as its key-up may go elsewhere.
+    pub(crate) fn dnd_blur(&mut self, cx: &mut Context<Self>) {
+        let drag = std::mem::take(&mut self.dnd);
+        if drag.active || drag.target.is_some() || drag.copy {
+            cx.notify();
+        }
     }
 
     /// Monaco `onEditorKeyDown`/`onEditorKeyUp`: the copy modifier.

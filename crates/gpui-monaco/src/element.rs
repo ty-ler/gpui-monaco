@@ -2724,8 +2724,8 @@ pub struct PrepaintState {
     callbacks: crate::widgets::PendingCallbacks,
     /// The placeholder's lines and where they go.
     placeholder: Vec<(ShapedLine, gpui::Point<Pixels>)>,
-    /// Where a dragged selection would drop.
-    dnd_target: Option<Bounds<Pixels>>,
+    /// Where a dragged selection would drop, and its color.
+    dnd_target: Option<(Bounds<Pixels>, Hsla)>,
     /// Replaced minimap images to free.
     minimap_stale: Vec<std::sync::Arc<gpui::RenderImage>>,
     sticky: Vec<(usize, Pixels, LineLayout, Option<ShapedLine>)>,
@@ -6385,13 +6385,17 @@ fn prepaint_editor(
             ));
         }
     }
-    // Monaco's `dnd-target`: a 2px dotted line where the drag would drop.
+    // Monaco's `dnd-target`: a 2px dotted line where the drag would drop,
+    // in the theme type's fixed color.
     let dnd_target = editor.dnd.target.and_then(|position| {
         let line = layout.line_for_point(position)?;
         let x = layout.text_origin_x() + line.x_for_column(position.column);
-        Some(Bounds::new(
-            point(x, layout.text_top(line.view_line)),
-            size(px(2.), line_height),
+        Some((
+            Bounds::new(
+                point(x, layout.text_top(line.view_line)),
+                size(px(2.), line_height),
+            ),
+            editor.theme.dnd_target_color(),
         ))
     });
     layout.line_highlights = current_line_highlights(
@@ -6488,7 +6492,9 @@ fn prepaint_editor(
         overlay_elements: Vec::new(),
         hitbox: None,
         cursor_areas: Vec::new(),
-        cursor_areas_enabled: editor.dnd.target.is_none() && !editor.dnd.copy,
+        cursor_areas_enabled: !editor.dnd.dragging()
+            && editor.dnd.target.is_none()
+            && !editor.dnd.copy,
         drag_cursor: editor.drag_mouse_cursor(),
         overflow_bounds: Vec::new(),
         widgets_keeping_focus: Vec::new(),
@@ -6793,7 +6799,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                     paint_fold_placeholder(*x, *top, layout, colors, window, cx);
                 }
 
-                if let Some(target) = state.dnd_target {
+                if let Some((target, color)) = state.dnd_target {
                     // Dotted: 2px dashes with 2px gaps.
                     let mut y = target.top();
                     while y < target.bottom() {
@@ -6801,7 +6807,7 @@ fn paint_editor(state: &mut PrepaintState, window: &mut Window, cx: &mut App) {
                             point(target.left(), y),
                             size(target.size.width, px(2.).min(target.bottom() - y)),
                         );
-                        window.paint_quad(fill(dash, colors.cursor));
+                        window.paint_quad(fill(dash, color));
                         y += px(4.);
                     }
                 }
