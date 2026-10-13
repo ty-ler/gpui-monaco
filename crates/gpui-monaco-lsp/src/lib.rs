@@ -3,7 +3,8 @@
 //!
 //! An [`LspClient`] starts a server (or connects to one), registers
 //! gpui-monaco providers for the features it supports (completion, hover,
-//! go to definition, document highlights and signature help) and turns its
+//! go to definition, code actions, code lenses, links, colors, linked
+//! editing and more; the book's LSP chapter has the full list) and turns its
 //! diagnostics into markers. Attach each model the server should know
 //! about; edits are synced as they happen.
 //!

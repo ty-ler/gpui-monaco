@@ -131,7 +131,7 @@ Block comments and regions are found by kind when a folding range provider gives
 
 ## Smart select
 
-Expand Selection grows each selection through the enclosing syntax nodes: word part, word, call, statement, block and so on. Shrink Selection steps back. The keys are Ctrl+Cmd+Shift+Right/Left (or Ctrl+Shift+Right/Left) on macOS and Shift+Alt+Right/Left elsewhere; the methods are `expand_selection` and `shrink_selection`.
+Expand Selection grows each selection through the ranges around it. They come from [selection range providers](providers.md) (such as a language server's) plus words. With no provider registered, a language with a tree-sitter grammar grows through the enclosing syntax nodes (word part, word, call, statement, block and so on), and other text through brackets and lines. Monaco uses brackets there; see [Differences](differences.md). Shrink Selection steps back. The keys are Ctrl+Cmd+Shift+Right/Left (or Ctrl+Shift+Right/Left) on macOS and Shift+Alt+Right/Left elsewhere; the methods are `expand_selection` and `shrink_selection`.
 
 - **Range sources:** `SelectionRangeProvider`s (for example a language server's). Without one, the syntax tree's nodes are used, or bracket pairs when there's no grammar. Monaco's word ranges are always added: camelCase and snake_case parts, the word and the whole text.
 - **Whole lines:** when a step crosses onto new lines, the lines without and with their indentation come in between (`smart_select.select_leading_and_trailing_whitespace`). `smart_select.select_subwords` turns off the word parts.

@@ -54,7 +54,7 @@ Issues are linked by number.
 | Insert final new line | `insertFinalNewLine` | ✅ | #202 |
 | In-place replace, with the `vs` theme's outline flash | `inPlaceReplace` | ✅ | #80, #328 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
-| Smart select (expand and shrink) | `smartSelect` | ✅ | #82 |
+| Smart select (expand and shrink) | `smartSelect` | ✅ with no provider registered, tree-sitter syntax nodes where Monaco uses brackets (brackets without a grammar), a documented difference; the fallback is left out once any provider is registered, as in Monaco | #82, #493 |
 | Linked editing (HTML tags) | `linkedEditing` | ✅ the default word pattern ends it for a language without one; option, provider, model and language changes reinitialize it; the mirror edit joins the triggering edit's undo step, a paste's or cut's too (`popUndoStop`) | #101, #402, #473 |
 | Snippet syntax: parser, variables (path variables of non-`file:` URIs from their path), transforms | `snippet` | ✅ | #55, #351 |
 | Snippet sessions: tab stops, choices (offered again while active, as the exclusive `snippetChoiceCompletions` provider), nesting, completion integration, `overwriteBefore`/`overwriteAfter` from the head of a selection, `$SELECTION` from text typed over a selection (`OvertypingCapturer`) | `snippet`, `suggestOvertypingCapturer` | ✅ | #55, #302, #351 |
@@ -235,7 +235,7 @@ Issues are linked by number.
 | Selection ranges | `smartSelect` | ✅ | #82 |
 | Folding ranges | `folding` | ✅ | #102 |
 | Linked editing ranges | `linkedEditing` | ✅ | #101 |
-| LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, completion, hover, definition, highlights, signature help with the editor's `isRetrigger` and `activeSignatureHelp`, code lenses, document links, colors, linked editing) | `monaco-languageclient` | ✅ documents are named by `resource()` (`model.uri.toString()`) and server uris are normalized; diagnostics reach documents that aren't attached; `workspace/applyEdit` goes through the bulk edit service; code actions send the published diagnostics back; code lenses with `codeLens/resolve` and `workspace/codeLens/refresh`, document links with `documentLink/resolve`, document colors and presentations, and linked editing ranges with the server's word pattern | #54, #417, #471, #482 |
+| LSP bridge (`gpui-monaco-lsp`: sync, diagnostics, and a provider per server capability (the book's LSP Features table): completion, hover, definition, highlights, signature help with the editor's `isRetrigger` and `activeSignatureHelp`, code lenses, document links, colors, linked editing) | `monaco-languageclient` | ✅ documents are named by `resource()` (`model.uri.toString()`) and server uris are normalized; diagnostics reach documents that aren't attached; `workspace/applyEdit` goes through the bulk edit service; code actions send the published diagnostics back; code lenses with `codeLens/resolve` and `workspace/codeLens/refresh`, document links with `documentLink/resolve`, document colors and presentations, and linked editing ranges with the server's word pattern | #54, #417, #471, #482, #493 |
 
 ## Other
 

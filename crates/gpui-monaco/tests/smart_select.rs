@@ -1,7 +1,12 @@
 //! Expand and shrink selection (Monaco `contrib/smartSelect`).
 
-use gpui::{AppContext as _, Entity, Focusable, TestAppContext, VisualTestContext};
+use std::ops::Range;
+
+use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
 use gpui_monaco::cursor::Selection;
+use gpui_monaco::providers::{
+    LanguageSelector, ProviderContext, SelectionRangeProvider, register_selection_range_provider,
+};
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{CodeEditor, TextModel};
 
@@ -94,6 +99,32 @@ fn grows_through_syntax_nodes(cx: &mut TestAppContext) {
         e.set_selections(&[Selection::collapsed(p(1, 9))], cx)
     });
     assert_eq!(step(&editor, cx, true), "total");
+}
+
+#[gpui::test]
+fn registered_provider_replaces_brackets(cx: &mut TestAppContext) {
+    // Monaco adds brackets only when no provider is registered: one that
+    // answers nothing still leaves just the words (and lines). The same
+    // goes for the syntax tree's ranges.
+    struct Silent;
+    impl SelectionRangeProvider for Silent {
+        fn provide_selection_ranges(
+            &self,
+            _: &ProviderContext,
+            _: &[PointUtf16],
+            _: &mut App,
+        ) -> Task<anyhow::Result<Vec<Vec<Range<PointUtf16>>>>> {
+            Task::ready(Ok(Vec::new()))
+        }
+    }
+    let _provider =
+        cx.update(|cx| register_selection_range_provider(cx, LanguageSelector::All, Silent));
+    let (editor, cx) = setup("a (b c) d\nnext", None, cx);
+    editor.update(cx, |e, cx| {
+        e.set_selections(&[Selection::collapsed(p(0, 3))], cx)
+    });
+    let grown: Vec<String> = (0..3).map(|_| step(&editor, cx, true)).collect();
+    assert_eq!(grown, ["b", "a (b c) d", "a (b c) d\nnext"]);
 }
 
 #[gpui::test]
