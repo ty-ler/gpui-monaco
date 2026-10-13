@@ -706,7 +706,8 @@ fn main() {
             let documents: Vec<_> = pairs
                 .split(',')
                 .filter_map(|pair| pair.split_once(':'))
-                .map(|(original, modified)| {
+                .enumerate()
+                .map(|(ix, (original, modified))| {
                     let path = if modified.is_empty() {
                         original
                     } else {
@@ -723,6 +724,12 @@ fn main() {
                         original,
                         modified,
                         binary: original_binary || modified_binary,
+                        // For `PLAYGROUND_MULTI_DIFF_ACTIONS`' `when`.
+                        context_keys: if ix == 0 {
+                            vec![("playgroundFirstFile".into(), true.into())]
+                        } else {
+                            Vec::new()
+                        },
                         ..Default::default()
                     }
                 })
@@ -750,6 +757,13 @@ fn main() {
                                 .and_then(|top| top.parse::<f32>().ok())
                             {
                                 multi.set_scroll_top(px(top), cx);
+                            }
+                            // `PLAYGROUND_MULTI_DIFF_ACTIONS=1` adds a file
+                            // action showing or hiding a file's unchanged
+                            // regions, toggled while they all show, and one
+                            // only on the first file (its `when`).
+                            if std::env::var_os("PLAYGROUND_MULTI_DIFF_ACTIONS").is_some() {
+                                multi_diff_actions(&mut multi, cx);
                             }
                             multi
                         })
@@ -924,6 +938,58 @@ impl Render for DemoGlyph {
 
 /// A view zone, a content widget, an overlay widget and a glyph margin
 /// widget.
+/// `PLAYGROUND_MULTI_DIFF_ACTIONS`' file actions: Monaco's toggled
+/// "Show/Hide Unchanged Regions" style button, and one only on the file
+/// with the `playgroundFirstFile` key.
+fn multi_diff_actions(
+    multi: &mut gpui_monaco::MultiDiffEditor,
+    cx: &mut gpui::Context<gpui_monaco::MultiDiffEditor>,
+) {
+    let this = cx.entity().downgrade();
+    multi.add_file_action(
+        gpui_monaco::MultiDiffFileAction::new(
+            "unchanged",
+            "Show Unchanged Regions",
+            "$(unfold)",
+            std::rc::Rc::new(move |index, _, _, cx| {
+                let this = this.clone();
+                // The list is busy running the action.
+                cx.defer(move |cx| {
+                    let Some(diff) = this
+                        .upgrade()
+                        .and_then(|multi| multi.read(cx).diff_editor(index).cloned())
+                    else {
+                        return;
+                    };
+                    diff.update(cx, |diff, cx| {
+                        if diff.all_unchanged_regions_shown() {
+                            diff.collapse_all_unchanged_regions(cx)
+                        } else {
+                            diff.show_all_unchanged_regions(cx)
+                        }
+                    });
+                });
+            }),
+        )
+        .with_toggled(gpui_monaco::MultiDiffFileActionToggle {
+            condition: "multiDiffEditorItemAllUnchangedRegionsShown".into(),
+            icon: Some("$(fold)".into()),
+            label: Some("Hide Unchanged Regions".into()),
+        }),
+        cx,
+    );
+    multi.add_file_action(
+        gpui_monaco::MultiDiffFileAction::new(
+            "first",
+            "Only on the First File",
+            "$(star-full)",
+            std::rc::Rc::new(|_, _, _, _| {}),
+        )
+        .with_when("playgroundFirstFile"),
+        cx,
+    );
+}
+
 fn add_demo_widgets(editor: &Entity<CodeEditor>, cx: &mut App) {
     use gpui::{hsla, rgb};
     use gpui_monaco::{

@@ -342,19 +342,70 @@ pub enum MultiDiffEditorEvent {
 /// document.
 pub type MultiDiffFileHandler = Rc<dyn Fn(usize, &MultiDiffDocument, &mut Window, &mut App)>;
 
+/// Options every file takes over its own (Monaco's widget-level
+/// `diffEditorOptions`, spread after each file's), from
+/// [`MultiDiffEditor::set_options_override`]: it changes the options a
+/// file would otherwise have, such as `|o| o.ignore_trim_whitespace = true`.
+pub type MultiDiffOptionsOverride = Rc<dyn Fn(&mut DiffEditorOptions)>;
+
 /// A button in each file header's toolbar (a Monaco
 /// `MultiDiffEditorFileToolbar` menu item), from
 /// [`MultiDiffEditor::add_file_action`].
+///
+/// Its [`when`](Self::when) and [`toggled`](Self::toggled) conditions are
+/// context key expressions (GPUI's syntax: `a && !b`, `key == value`) over
+/// each file's keys: the list's ([`MultiDiffEditor::context_keys`]), the
+/// file's [`MultiDiffDocument::context_keys`] and
+/// `multiDiffEditorItemAllUnchangedRegionsShown` (Monaco's toolbar context
+/// key scope).
 #[derive(Clone)]
 pub struct MultiDiffFileAction {
     /// Its id, for [`MultiDiffEditor::remove_file_action`].
     pub id: SharedString,
     /// Its tooltip and screen reader label.
     pub label: SharedString,
-    /// The button's text (Monaco shows a codicon).
+    /// The button's label: text, where `$(name)` is the codicon `name`,
+    /// such as `"$(unfold)"` (Monaco shows the menu item's codicon).
     pub icon: SharedString,
+    /// The files whose header shows it (Monaco's menu item `when`); `None`
+    /// shows it on every file, and one that doesn't parse on none.
+    pub when: Option<SharedString>,
+    /// When it shows as toggled on (Monaco's menu item `toggled`, with the
+    /// toolbar's `highlightToggledItems`); `None` for a plain button.
+    pub toggled: Option<MultiDiffFileActionToggle>,
     /// Runs it.
     pub run: MultiDiffFileHandler,
+}
+
+impl MultiDiffFileAction {
+    /// A button shown on every file, never toggled.
+    pub fn new(
+        id: impl Into<SharedString>,
+        label: impl Into<SharedString>,
+        icon: impl Into<SharedString>,
+        run: MultiDiffFileHandler,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            label: label.into(),
+            icon: icon.into(),
+            when: None,
+            toggled: None,
+            run,
+        }
+    }
+
+    /// Sets [`MultiDiffFileAction::when`].
+    pub fn with_when(mut self, when: impl Into<SharedString>) -> Self {
+        self.when = Some(when.into());
+        self
+    }
+
+    /// Sets [`MultiDiffFileAction::toggled`].
+    pub fn with_toggled(mut self, toggled: MultiDiffFileActionToggle) -> Self {
+        self.toggled = Some(toggled);
+        self
+    }
 }
 
 impl std::fmt::Debug for MultiDiffFileAction {
@@ -362,7 +413,91 @@ impl std::fmt::Debug for MultiDiffFileAction {
         f.debug_struct("MultiDiffFileAction")
             .field("id", &self.id)
             .field("label", &self.label)
+            .field("icon", &self.icon)
+            .field("when", &self.when)
+            .field("toggled", &self.toggled)
             .finish_non_exhaustive()
+    }
+}
+
+/// When a [`MultiDiffFileAction`] is toggled on, and how it shows then
+/// (Monaco `ICommandActionToggleInfo`): highlighted
+/// (`actionBar.toggledBackground`), with its own icon and label if set.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MultiDiffFileActionToggle {
+    /// The condition (Monaco `condition`); one that doesn't parse never
+    /// holds.
+    pub condition: SharedString,
+    /// The icon while toggled on (Monaco `icon`), else the action's.
+    pub icon: Option<SharedString>,
+    /// The tooltip and label while toggled on (Monaco `title`), else the
+    /// action's.
+    pub label: Option<SharedString>,
+}
+
+impl MultiDiffFileActionToggle {
+    /// Toggled on while `condition` holds, keeping the action's icon and
+    /// label.
+    pub fn new(condition: impl Into<SharedString>) -> Self {
+        Self {
+            condition: condition.into(),
+            icon: None,
+            label: None,
+        }
+    }
+}
+
+/// A parsed context key condition; `None` if it doesn't parse (never
+/// holds).
+type Condition = Option<Rc<gpui::KeyBindingContextPredicate>>;
+
+fn parse_condition(when: &str) -> Condition {
+    gpui::KeyBindingContextPredicate::parse(when)
+        .ok()
+        .map(Rc::new)
+}
+
+fn holds(condition: &Condition, context: &gpui::KeyContext) -> bool {
+    condition
+        .as_ref()
+        .is_some_and(|p| p.eval(std::slice::from_ref(context)))
+}
+
+/// A [`MultiDiffFileAction`] with its conditions parsed.
+struct FileAction {
+    action: MultiDiffFileAction,
+    when: Option<Condition>,
+    toggled: Option<Condition>,
+}
+
+impl FileAction {
+    fn new(action: MultiDiffFileAction) -> Self {
+        Self {
+            when: action.when.as_deref().map(parse_condition),
+            toggled: action
+                .toggled
+                .as_ref()
+                .map(|t| parse_condition(&t.condition)),
+            action,
+        }
+    }
+
+    /// Whether it shows on a file with `context` (Monaco's menu `when`).
+    fn visible(&self, context: &gpui::KeyContext) -> bool {
+        self.when.as_ref().is_none_or(|when| holds(when, context))
+    }
+
+    /// Whether it's toggled on for a file with `context`; `None` for a
+    /// plain button.
+    fn toggled(&self, context: &gpui::KeyContext) -> Option<bool> {
+        self.toggled
+            .as_ref()
+            .map(|condition| holds(condition, context))
+    }
+
+    /// Whether it tests the file's keys at all.
+    fn conditional(&self) -> bool {
+        self.when.is_some() || self.toggled.is_some()
     }
 }
 
@@ -702,7 +837,7 @@ pub struct MultiDiffEditor {
     /// The file whose header the mouse is over, and the file it's over.
     hovered_header: Option<usize>,
     hovered_entry: Option<usize>,
-    file_actions: Vec<MultiDiffFileAction>,
+    file_actions: Vec<FileAction>,
     /// Opens a binary file's diff elsewhere (Monaco
     /// `IWorkbenchUIElementFactory.openDiffEditor`).
     open_binary_diff: Option<MultiDiffFileHandler>,
@@ -735,6 +870,9 @@ pub struct MultiDiffEditor {
     /// and the variant's choice (Monaco `diffEditorOptions`'
     /// `hideOriginalLineNumbers`).
     hide_original_line_numbers: Option<bool>,
+    /// Options over every file's own (Monaco's widget `diffEditorOptions`
+    /// in `_optionsOverride`).
+    options_override: Option<MultiDiffOptionsOverride>,
     /// Don't focus the first change when files load (Monaco
     /// `setPreserveFocusOnLoad`).
     preserve_focus_on_load: bool,
@@ -807,6 +945,7 @@ impl MultiDiffEditor {
             loading: false,
             padding_bottom: px(0.),
             hide_original_line_numbers: None,
+            options_override: None,
             preserve_focus_on_load: false,
             pending_doc_states: None,
             pending_active_item: None,
@@ -1270,15 +1409,18 @@ impl MultiDiffEditor {
     }
 
     /// Monaco's item options (`DiffEditorItemTemplate.setItem`): the
-    /// file's options, else the list's, then the list's layout
-    /// (`_optionsOverride`), with unchanged regions hidden and no overview
-    /// ruler. Original line numbers follow the list's choice, else the
-    /// file's, else the variant (Monaco's `override` before
+    /// file's options, else the list's, then the list's override and
+    /// layout (`_optionsOverride`), with unchanged regions hidden and no
+    /// overview ruler. Original line numbers follow the list's choice, else
+    /// the file's, else the variant (Monaco's `override` before
     /// `options.hideOriginalLineNumbers` before the variant).
     fn item_options(&self, document: Option<&MultiDiffDocument>) -> DiffEditorOptions {
         let mut options = document
             .and_then(|document| document.options.clone())
             .unwrap_or_else(|| self.options.clone());
+        if let Some(options_override) = &self.options_override {
+            options_override(&mut options);
+        }
         let layout = self.diff_layout;
         if let Some(side_by_side) = layout.render_side_by_side {
             options.render_side_by_side = side_by_side;
@@ -1307,9 +1449,28 @@ impl MultiDiffEditor {
         &self.options
     }
 
-    /// Replaces the options of the files without their own.
+    /// Replaces the options of the files without their own. To change
+    /// options in every file, over their own (Monaco's widget-level
+    /// `diffEditorOptions`), use [`MultiDiffEditor::set_options_override`].
     pub fn update_options(&mut self, options: DiffEditorOptions, cx: &mut Context<Self>) {
         self.options = options;
+        self.configure_bound_templates(cx);
+        cx.notify();
+    }
+
+    /// Sets the options every file takes over its own (Monaco's widget
+    /// `diffEditorOptions`, which `_optionsOverride` spreads after each
+    /// file's options): `options_override` changes each file's options
+    /// (its [`MultiDiffDocument::options`], else
+    /// [`MultiDiffEditor::options`]) before the list's layout
+    /// ([`MultiDiffEditor::diff_layout_options`]) applies. `None` removes
+    /// it.
+    pub fn set_options_override(
+        &mut self,
+        options_override: Option<MultiDiffOptionsOverride>,
+        cx: &mut Context<Self>,
+    ) {
+        self.options_override = options_override;
         self.configure_bound_templates(cx);
         cx.notify();
     }
@@ -1604,21 +1765,64 @@ impl MultiDiffEditor {
         self.active
     }
 
-    /// Adds a button to every file header's toolbar (Monaco's
-    /// `MultiDiffEditorFileToolbar` menu). One with the same id is
-    /// replaced. The compact variants show the toolbar only while the
+    /// Adds a button to the file headers' toolbar (Monaco's
+    /// `MultiDiffEditorFileToolbar` menu): every file's, or those its
+    /// [`when`](MultiDiffFileAction::when) holds for. One with the same id
+    /// is replaced. The compact variants show the toolbar only while the
     /// mouse is over the file or it has focus.
     pub fn add_file_action(&mut self, action: MultiDiffFileAction, cx: &mut Context<Self>) {
-        self.file_actions.retain(|a| a.id != action.id);
-        self.file_actions.push(action);
+        self.file_actions.retain(|a| a.action.id != action.id);
+        self.file_actions.push(FileAction::new(action));
         cx.notify();
+    }
+
+    /// The keys file `index`'s toolbar tests (Monaco's context key scope
+    /// for the item's actions): the list's
+    /// ([`MultiDiffEditor::context_keys`]), the file's
+    /// [`MultiDiffDocument::context_keys`] and
+    /// `multiDiffEditorItemAllUnchangedRegionsShown` (Monaco
+    /// `allUnchangedRegionsShown` of the file's diff editor; true for a file
+    /// without one, which has no unchanged regions).
+    pub fn file_context_keys(&self, index: usize, cx: &App) -> gpui::KeyContext {
+        let mut context = self.context_keys(cx);
+        let Some(item) = self.items.get(index) else {
+            return context;
+        };
+        let all_shown = self
+            .bound
+            .iter()
+            .find(|t| t.item == index)
+            .is_none_or(|t| t.diff.read(cx).all_unchanged_regions_shown());
+        if all_shown {
+            context.add("multiDiffEditorItemAllUnchangedRegionsShown");
+        }
+        for (key, value) in &item.document.context_keys {
+            value.apply(key, &mut context);
+        }
+        context
+    }
+
+    /// The ids of the actions file `index`'s toolbar shows (their `when`
+    /// holds), each with whether it's toggled on (`None` for a plain
+    /// button).
+    pub fn visible_file_actions(
+        &self,
+        index: usize,
+        cx: &App,
+    ) -> Vec<(SharedString, Option<bool>)> {
+        let context = self.file_context_keys(index, cx);
+        self.file_actions
+            .iter()
+            .filter(|a| a.visible(&context))
+            .map(|a| (a.action.id.clone(), a.toggled(&context)))
+            .collect()
     }
 
     /// Removes a [`MultiDiffEditor::add_file_action`] button; `false` if
     /// there was none with this id.
     pub fn remove_file_action(&mut self, id: &str, cx: &mut Context<Self>) -> bool {
         let before = self.file_actions.len();
-        self.file_actions.retain(|a| a.id != id);
+        self.file_actions.retain(|a| a.action.id != id);
         cx.notify();
         self.file_actions.len() != before
     }
@@ -2550,31 +2754,69 @@ impl MultiDiffEditor {
         // The compact variants show the toolbar only while the mouse is
         // over the file or it has focus.
         let show_actions = !config.compact || state.hovered || state.focused;
-        let actions = self.file_actions.iter().enumerate().map(|(ix, action)| {
-            let action = action.clone();
+        // Monaco's toolbar context key scope, read only when an action tests
+        // it.
+        let context = (show_actions && self.file_actions.iter().any(FileAction::conditional))
+            .then(|| self.file_context_keys(index, cx));
+        // Monaco's `actionBar.toggledBackground` (`inputOption.activeBackground`).
+        let checked_background = colors.input_option_active_background;
+        let actions = self
+            .file_actions
+            .iter()
+            .enumerate()
+            .filter_map(|(ix, file_action)| {
+                let toggled = match &context {
+                    Some(context) if !file_action.visible(context) => return None,
+                    Some(context) => file_action.toggled(context),
+                    None => None,
+                };
+                Some((ix, file_action.action.clone(), toggled))
+            })
+            .collect::<Vec<_>>();
+        let has_actions = !actions.is_empty();
+        let actions = actions.into_iter().map(|(ix, action, toggled)| {
             let document = item.document.clone();
-            let label = action.label.clone();
-            div()
-                .id(("multi-diff-file-action", ix))
-                .tooltip(crate::tooltip::tooltip(label.clone(), colors))
-                .role(gpui::Role::Button)
-                .aria_label(label)
-                .flex()
-                .items_center()
-                .justify_center()
-                .min_w(px(22.))
-                .h(px(22.))
-                .p(if config.compact { px(4.) } else { px(3.) })
-                .rounded(px(5.))
-                .cursor_pointer()
-                .hover(|style| colors.toolbar_hover(style))
-                .child(action.icon.clone())
-                .on_click(cx.listener(move |this, _, window, cx| {
-                    cx.stop_propagation();
-                    this.active = Some(index);
-                    (action.run)(index, &document, window, cx);
-                    cx.notify();
-                }))
+            let on = toggled == Some(true);
+            let toggle = action.toggled.as_ref().filter(|_| on);
+            let label = toggle
+                .and_then(|t| t.label.clone())
+                .unwrap_or_else(|| action.label.clone());
+            let icon = toggle
+                .and_then(|t| t.icon.clone())
+                .unwrap_or_else(|| action.icon.clone());
+            let id = action.id.clone();
+            // Monaco's `ActionViewItem`: a checkbox for an action with a
+            // toggled state.
+            let aria = match toggled {
+                Some(checked) => {
+                    crate::accessibility::AriaNode::new(gpui::Role::CheckBox, label.clone())
+                        .checked(checked)
+                }
+                None => crate::accessibility::AriaNode::new(gpui::Role::Button, label.clone()),
+            };
+            aria.apply(
+                div()
+                    .id(("multi-diff-file-action", ix))
+                    .debug_selector(move || format!("multi-diff-file-action-{index}-{id}")),
+            )
+            .tooltip(crate::tooltip::tooltip(label, colors))
+            .when(on, |button| button.bg(checked_background))
+            .flex()
+            .items_center()
+            .justify_center()
+            .min_w(px(22.))
+            .h(px(22.))
+            .p(if config.compact { px(4.) } else { px(3.) })
+            .rounded(px(5.))
+            .cursor_pointer()
+            .hover(|style| colors.toolbar_hover(style))
+            .children(crate::diff_editor::label_with_icons(&icon))
+            .on_click(cx.listener(move |this, _, window, cx| {
+                cx.stop_propagation();
+                this.active = Some(index);
+                (action.run)(index, &document, window, cx);
+                cx.notify();
+            }))
         });
         let focus_border = colors.focus_border;
         let chevron_button = div()
@@ -2702,7 +2944,7 @@ impl MultiDiffEditor {
                         },
                     ),
             )
-            .when(!self.file_actions.is_empty() && show_actions, |header| {
+            .when(has_actions && show_actions, |header| {
                 header.child(
                     div()
                         .id(("multi-diff-file-actions", index))

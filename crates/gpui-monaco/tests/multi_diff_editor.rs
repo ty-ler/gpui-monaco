@@ -187,14 +187,14 @@ fn header_file_actions(cx: &mut TestAppContext) {
     let log = runs.clone();
     multi.update(cx, |m, cx| {
         m.add_file_action(
-            MultiDiffFileAction {
-                id: "open".into(),
-                label: "Open File".into(),
-                icon: "↗".into(),
-                run: Rc::new(move |index, document, _, _| {
+            MultiDiffFileAction::new(
+                "open",
+                "Open File",
+                "↗",
+                Rc::new(move |index, document, _, _| {
                     log.borrow_mut().push((index, document.label.to_string()))
                 }),
-            },
+            ),
             cx,
         )
     });
@@ -208,6 +208,144 @@ fn header_file_actions(cx: &mut TestAppContext) {
     paint(cx);
     assert_eq!(*runs.borrow(), vec![(0, "a.rs".to_string())]);
     assert!(multi.update(cx, |m, cx| m.remove_file_action("open", cx)));
+}
+
+/// Monaco's file toolbar (`MenuId.MultiDiffEditorFileToolbar` with
+/// `highlightToggledItems`): menu items' `when` and `toggled` over the
+/// item's context key scope, which has
+/// `multiDiffEditorItemAllUnchangedRegionsShown` and the document's
+/// `contextKeys`, with codicons (audit 5 §E.6).
+#[gpui::test]
+fn file_actions_when_toggled_and_codicons(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let mut documents = many_documents(2, cx);
+        documents[1].context_keys = vec![("reviewFile".into(), true.into())];
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    let noop: gpui_monaco::MultiDiffFileHandler = Rc::new(|_, _, _, _| {});
+    multi.update(cx, |m, cx| {
+        m.add_file_action(
+            MultiDiffFileAction::new("unfold", "Show All Unchanged", "$(unfold)", noop.clone())
+                .with_toggled(gpui_monaco::MultiDiffFileActionToggle {
+                    condition: "multiDiffEditorItemAllUnchangedRegionsShown".into(),
+                    icon: Some("$(fold)".into()),
+                    label: Some("Collapse Unchanged".into()),
+                }),
+            cx,
+        );
+        m.add_file_action(
+            MultiDiffFileAction::new("review", "Review", "$(check)", noop.clone())
+                .with_when("reviewFile"),
+            cx,
+        );
+        m.add_file_action(
+            MultiDiffFileAction::new("broken", "Broken", "x", noop.clone()).with_when("&&"),
+            cx,
+        );
+    });
+    paint(cx);
+    let actions = |index: usize, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            m.visible_file_actions(index, cx)
+                .into_iter()
+                .map(|(id, toggled)| (id.to_string(), toggled))
+                .collect::<Vec<_>>()
+        })
+    };
+    // `when`: the review action only on the file with the key; one that
+    // doesn't parse on none.
+    assert_eq!(actions(0, cx), vec![("unfold".to_string(), Some(false))]);
+    assert_eq!(
+        actions(1, cx),
+        vec![
+            ("unfold".to_string(), Some(false)),
+            ("review".to_string(), None)
+        ]
+    );
+    assert!(cx.debug_bounds("multi-diff-file-action-0-review").is_none());
+    assert!(cx.debug_bounds("multi-diff-file-action-1-review").is_some());
+    // The icon is a codicon, not the literal `$(unfold)`.
+    let button = cx
+        .debug_bounds("multi-diff-file-action-0-unfold")
+        .expect("the unfold button");
+    assert!(button.size.width < px(30.), "{button:?}");
+
+    // `toggled`: on once every unchanged region of the file shows.
+    let has_key = |index: usize, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            m.file_context_keys(index, cx)
+                .contains("multiDiffEditorItemAllUnchangedRegionsShown")
+        })
+    };
+    assert!(!has_key(0, cx));
+    multi.update(cx, |m, cx| {
+        m.diff_editor(0)
+            .cloned()
+            .unwrap()
+            .update(cx, |diff, cx| diff.show_all_unchanged_regions(cx))
+    });
+    paint(cx);
+    assert!(has_key(0, cx));
+    assert!(!has_key(1, cx));
+    assert_eq!(actions(0, cx), vec![("unfold".to_string(), Some(true))]);
+    let button = cx
+        .debug_bounds("multi-diff-file-action-0-unfold")
+        .expect("the toggled button");
+    assert!(button.size.width < px(30.), "{button:?}");
+    // The list's keys are in the scope too.
+    assert!(multi.read_with(cx, |m, cx| {
+        m.file_context_keys(0, cx).contains("inMultiDiffEditor")
+    }));
+}
+
+/// Monaco's widget-level `diffEditorOptions` are spread after each file's
+/// own options (`_optionsOverride`, `diffEditorItemTemplate.ts`), so they
+/// win over them (audit 5 §E.7).
+#[gpui::test]
+fn list_options_override_file_options(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let mut documents = many_documents(2, cx);
+        documents[1].options = Some(gpui_monaco::DiffEditorOptions {
+            ignore_trim_whitespace: false,
+            render_side_by_side: false,
+            ..Default::default()
+        });
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    let options = |index: usize, cx: &mut VisualTestContext| {
+        multi.read_with(cx, |m, cx| {
+            let options = m.diff_editor(index).unwrap().read(cx).options();
+            (options.ignore_trim_whitespace, options.render_side_by_side)
+        })
+    };
+    assert_eq!(options(1, cx), (false, false));
+    multi.update(cx, |m, cx| {
+        m.set_options_override(
+            Some(Rc::new(|options| options.ignore_trim_whitespace = true)),
+            cx,
+        )
+    });
+    // The override wins over the file's own option, and leaves the rest.
+    assert_eq!(options(1, cx), (true, false));
+    assert_eq!(options(0, cx), (true, true));
+    // The list's layout still applies after it.
+    multi.update(cx, |m, cx| {
+        m.set_options_override(
+            Some(Rc::new(|options| options.render_side_by_side = false)),
+            cx,
+        );
+        m.set_render_side_by_side(true, false, cx);
+    });
+    assert_eq!(options(1, cx), (false, true));
+    multi.update(cx, |m, cx| m.set_options_override(None, cx));
+    assert_eq!(options(1, cx), (false, true));
+    assert_eq!(options(0, cx), (true, true));
 }
 
 #[gpui::test]
