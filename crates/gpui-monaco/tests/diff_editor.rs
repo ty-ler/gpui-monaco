@@ -2733,25 +2733,15 @@ fn the_whole_file_region_keeps_its_state(cx: &mut TestAppContext) {
         diff.read_with(cx, |d, _| d.unchanged_bars_for_tests()),
         (0, 0)
     );
-    // The cursor reveals line 40 in it.
-    let (_, modified) = editors(&diff, cx);
-    modified.update(cx, |e, cx| {
-        e.set_selections(
-            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
-                39, 0,
-            ))],
-            cx,
-        )
-    });
-    // After a change at line 80, line 40 still shows; the rest started
-    // hidden.
+    // Showing it all carries over.
+    diff.update(cx, |d, cx| d.show_all_unchanged_regions(cx));
+    // After a change at line 80, everything still shows.
     edit_modified(&diff, cx, |text| {
         let start = text.find("line 80\n").unwrap();
         (start..start + 4, "changed".into())
     });
     let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
-    assert!(hidden.iter().all(|r| !r.contains(&40)), "{hidden:?}");
-    assert_eq!(hidden.last(), Some(&(84..102)), "{hidden:?}");
+    assert!(hidden.is_empty(), "{hidden:?}");
 }
 
 /// Monaco `_hide = !sideBySide`: inline, the original column's bars have no
@@ -3120,4 +3110,207 @@ fn a_pending_reveal_does_not_outlive_the_models(cx: &mut TestAppContext) {
     });
     paint(cx);
     assert_eq!(head(cx), PointUtf16::new(60, 0));
+}
+
+/// Monaco `computeStagedValue` goes through `TextModelText`, whose
+/// `getValueOfRange` is `getValueInRange`: the value has the models' EOL.
+#[gpui::test]
+fn staged_values_keep_crlf(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\r\nb\r\nc\r\n", "a\r\nB\r\nc\r\n", cx);
+    let staged = std::rc::Rc::new(std::cell::RefCell::new(None));
+    let sink = staged.clone();
+    diff.update(cx, |d, cx| {
+        d.add_hunk_action(
+            gpui_monaco::DiffHunkAction {
+                id: "stage".into(),
+                label: "Stage".into(),
+                icon: "+".into(),
+                toolbar: gpui_monaco::DiffHunkToolbar::Hunk,
+                run: std::rc::Rc::new(move |context, _, _| {
+                    *sink.borrow_mut() = Some(context.original_with_modified_changes.clone());
+                }),
+            },
+            cx,
+        )
+    });
+    assert!(diff.update_in(cx, |d, window, cx| {
+        d.run_hunk_action_for_tests(0, "stage", window, cx)
+    }));
+    assert_eq!(staged.borrow().as_deref(), Some("a\r\nB\r\nc\r\n"));
+}
+
+/// Monaco's "Copy deleted lines", "Copy deleted line (N)" and selection
+/// copy use `getValueInRange`, with the original model's EOL.
+#[gpui::test]
+fn inline_deleted_lines_copy_with_crlf(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\r\nold one\r\n\r\nold two\r\nz", "a\r\nz", cx);
+    update_options(&diff, cx, |o| o.render_side_by_side = false);
+    diff.update(cx, |d, cx| d.run_deleted_menu_item_for_tests(0, 1, 0, cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("old one\r\n\r\nold two\r\n".to_string())
+    );
+    // An empty line copies as the model's line ending.
+    diff.update(cx, |d, cx| d.run_deleted_menu_item_for_tests(0, 2, 1, cx));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("\r\n".to_string())
+    );
+    assert!(diff.update(cx, |d, cx| {
+        d.copy_deleted_text_for_tests(0, PointUtf16::new(1, 4)..PointUtf16::new(3, 3), cx)
+    }));
+    assert_eq!(
+        cx.read_from_clipboard().and_then(|c| c.text()),
+        Some("one\r\n\r\nold".to_string())
+    );
+}
+
+/// Monaco `ensureModifiedLineIsVisible` does nothing while the diff has no
+/// changes, so a cursor in an identical diff doesn't reveal the whole-file
+/// region: once there's a change, everything but its context hides.
+#[gpui::test]
+fn cursor_moves_in_an_identical_diff_reveal_nothing(cx: &mut TestAppContext) {
+    let text: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let (diff, cx) = setup(&text, &text, cx);
+    hide_unchanged(&diff, cx);
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                49, 0,
+            ))],
+            cx,
+        )
+    });
+    paint(cx);
+    modified_editor.update(cx, |e, cx| e.type_text("x", cx));
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(300));
+    paint(cx);
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..47, 54..102]
+    );
+}
+
+/// Monaco's cursor listeners skip `CursorChangeReason.ContentFlush`.
+#[gpui::test]
+fn content_flushes_reveal_nothing(cx: &mut TestAppContext) {
+    let original: String = (0..100).map(|i| format!("line {i}\n")).collect();
+    let modified = original.replace("line 50\n", "changed\n");
+    let (diff, cx) = setup(&original, &modified, cx);
+    hide_unchanged(&diff, cx);
+    let modified_editor = diff.read_with(cx, |d, _| d.modified_editor().clone());
+    modified_editor.update(cx, |e, cx| {
+        e.set_selections(
+            &[gpui_monaco::cursor::Selection::collapsed(PointUtf16::new(
+                90, 0,
+            ))],
+            cx,
+        )
+    });
+    diff.update(cx, |d, cx| d.collapse_all_unchanged_regions(cx));
+    assert_eq!(
+        diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests()),
+        vec![1..48, 55..102]
+    );
+    // `set_value` flushes the content; the cursor goes to line 1, which is
+    // hidden, and it stays hidden.
+    let model = modified_editor.read_with(cx, |e, _| e.model().clone());
+    model.update(cx, |m, cx| m.set_value(&modified, cx));
+    paint(cx);
+    let hidden = diff.read_with(cx, |d, _| d.hidden_modified_ranges_for_tests());
+    assert!(hidden.iter().any(|r| r.contains(&1)), "{hidden:?}");
+}
+
+/// Monaco `DiffEditorDecorations` with `movedTextToCompare`: line
+/// backgrounds and `diffAddDecoration`/`diffDeleteDecoration`, without the
+/// whole-line `char-insert` of a pure insertion.
+#[gpui::test]
+fn compared_moves_get_the_compare_decorations(cx: &mut TestAppContext) {
+    let block: Vec<String> = (0..8)
+        .map(|i| format!("fn moved_{i}() {{ body_{i}(); }}\n"))
+        .collect();
+    let filler: String = (0..10).map(|i| format!("let x{i} = {i};\n")).collect();
+    let original = format!("{}{filler}", block.concat());
+    let mut moved = block.clone();
+    moved.insert(4, "let inserted = true;\n".to_string());
+    let modified = format!("{filler}{}", moved.concat());
+    let (diff, cx) = setup(&original, &modified, cx);
+    update_options(&diff, cx, |o| o.show_moves = true);
+    assert_eq!(diff.read_with(cx, |d, _| d.diff().unwrap().moves.len()), 1);
+    diff.update(cx, |d, cx| d.set_move_to_compare(Some(0), cx));
+    paint(cx);
+    let colors = diff.read_with(cx, |d, cx| d.modified_editor().read(cx).colors().clone());
+    let decorations = side_decorations(&diff, true, cx);
+    // The inserted line (modified line 15) gets the inserted line
+    // background, but no whole-line inserted text background.
+    assert!(
+        decorations.iter().any(|((start, _, _, _), o)| *start == 15
+            && o.is_whole_line
+            && o.background == Some(colors.diff_inserted_line_background)),
+        "{decorations:?}"
+    );
+    assert!(
+        !decorations
+            .iter()
+            .any(|(_, o)| o.is_whole_line
+                && o.background == Some(colors.diff_inserted_text_background)),
+        "{decorations:?}"
+    );
+    // No empty-range bars either.
+    assert!(!decorations.iter().any(|(_, o)| o.left_border.is_some()));
+}
+
+/// Monaco `WorkbenchToolBar`'s `overflowBehavior`: past the limit, actions
+/// go into a "More Actions..." menu.
+#[gpui::test]
+fn gutter_toolbars_overflow(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\nc\nd\ne", "a\nb\nC\nd\ne", cx);
+    let ran = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    for i in 0..4 {
+        let sink = ran.clone();
+        diff.update(cx, |d, cx| {
+            d.add_hunk_action(
+                gpui_monaco::DiffHunkAction {
+                    id: format!("action{i}").into(),
+                    label: format!("Action {i}").into(),
+                    icon: "+".into(),
+                    toolbar: gpui_monaco::DiffHunkToolbar::Hunk,
+                    run: std::rc::Rc::new(move |_, _, _| sink.borrow_mut().push(i)),
+                },
+                cx,
+            )
+        });
+    }
+    paint(cx);
+    let (shown, overflow) = diff
+        .update(cx, |d, cx| d.gutter_toolbar_for_tests(0, cx))
+        .unwrap();
+    assert_eq!(shown, ["Revert Block", "Action 0", "Action 1"]);
+    assert_eq!(overflow, ["Action 2", "Action 3"]);
+    assert!(diff.update_in(cx, |d, window, cx| {
+        d.run_gutter_overflow_for_tests(0, 1, window, cx)
+    }));
+    assert_eq!(*ran.borrow(), [3]);
+}
+
+/// Monaco renders the accessible diff viewer's rows with `renderViewLine2`
+/// and the side's `renderWhitespace` and `renderControlCharacters`.
+#[gpui::test]
+fn accessible_diff_viewer_rows_render_whitespace(cx: &mut TestAppContext) {
+    let (diff, cx) = setup("a\nb\u{7}\nc", "a\nb  \nc", cx);
+    let (original, modified) = editors(&diff, cx);
+    for editor in [&original, &modified] {
+        set_editor_options(editor, cx, |o| {
+            o.render_whitespace = gpui_monaco::options::RenderWhitespace::All;
+            o.render_control_characters = true;
+        });
+    }
+    cx.update(|window, cx| window.focus(&modified.read(cx).focus_handle(cx), cx));
+    cx.simulate_keystrokes("f7");
+    let rows = diff
+        .read_with(cx, |d, cx| d.accessible_viewer_row_texts_for_tests(cx))
+        .unwrap();
+    assert_eq!(rows, ["a", "b\u{2407}", "b\u{b7}\u{b7}", "c"]);
 }

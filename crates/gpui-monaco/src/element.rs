@@ -840,7 +840,7 @@ fn wrapped_content_width(
 }
 
 /// Monaco `renderOverflowingCharCount`.
-fn overflow_size(units: u32) -> String {
+pub(crate) fn overflow_size(units: u32) -> String {
     let n = units as f64;
     if units < 1024 {
         format!("{units} chars")
