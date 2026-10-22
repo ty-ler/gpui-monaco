@@ -89,6 +89,7 @@ Some server features have no editor UI in gpui-monaco, as in Monaco. `LspClient`
 
 - **Workspace symbols (`workspaceSymbolProvider`):** `workspace_symbols(query, cx)` sends `workspace/symbol` and returns `WorkspaceSymbol`s, from either flat `SymbolInformation` or `WorkspaceSymbol` results. A symbol whose `range` is `None` only names its document; `resolve_workspace_symbol(&symbol, cx)` sends `workspaceSymbol/resolve` to fill it in, as VS Code does before opening a symbol picked from "Go to Symbol in Workspace".
 - **Call hierarchy (`callHierarchyProvider`):** `prepare_call_hierarchy(&model, position, cx)` sends `textDocument/prepareCallHierarchy` for an attached model, after syncing its edits, and returns `CallHierarchyItem`s. `incoming_calls(&item, cx)` and `outgoing_calls(&item, cx)` send the server's item back as it sent it and return `IncomingCall`s (the caller and where it makes the calls) and `OutgoingCall`s (the callee and where the item calls it, in the item's own document).
+- **Type hierarchy (`typeHierarchyProvider`):** `prepare_type_hierarchy(&model, position, cx)` sends `textDocument/prepareTypeHierarchy` and returns `TypeHierarchyItem`s; `supertypes(&item, cx)` and `subtypes(&item, cx)` send the server's item back as it sent it. `lsp-types` has no `typeHierarchyProvider`, so `supports_type_hierarchy()` reads it from `raw_capabilities()`, the capabilities as the server sent them.
 
 ## Other transports and requests
 

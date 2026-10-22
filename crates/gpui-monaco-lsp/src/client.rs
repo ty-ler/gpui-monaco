@@ -154,6 +154,9 @@ pub struct LspClient {
     options: LspClientOptions,
     connection: Connection,
     capabilities: lsp::ServerCapabilities,
+    /// The capabilities as the server sent them, with any `lsp-types`
+    /// doesn't know (such as `typeHierarchyProvider`).
+    raw_capabilities: Value,
     server_info: Option<lsp::ServerInfo>,
     /// The attached documents, by [`TextModel::resource`].
     documents: HashMap<String, Document>,
@@ -241,10 +244,20 @@ impl LspClient {
     {
         let (connection, incoming, io) = Connection::new(reader, writer, cx.background_executor());
         tasks.extend(io);
+        // Sent raw so the capabilities `lsp-types` doesn't know are kept.
         let initialize = initialize_params(&options)
-            .map(|params| connection.request::<lsp::request::Initialize>(params));
+            .and_then(|params| Ok(serde_json::to_value(params)?))
+            .map(|params| {
+                connection.request_raw(
+                    <lsp::request::Initialize as lsp::request::Request>::METHOD,
+                    params,
+                )
+            });
         cx.spawn(async move |cx| {
-            let result = initialize?.await?;
+            let raw = initialize?.await?;
+            let raw_capabilities = raw.get("capabilities").cloned().unwrap_or(Value::Null);
+            let result: lsp::InitializeResult =
+                serde_json::from_value(raw).context("invalid initialize result")?;
             connection.notify::<lsp::notification::Initialized>(lsp::InitializedParams {})?;
             Ok(cx.new(|cx: &mut Context<Self>| {
                 tasks.push(cx.spawn(async move |this, cx| {
@@ -263,6 +276,7 @@ impl LspClient {
                     options,
                     connection,
                     capabilities: result.capabilities,
+                    raw_capabilities,
                     server_info: result.server_info,
                     documents: HashMap::new(),
                     diagnostics: HashMap::new(),
@@ -281,6 +295,13 @@ impl LspClient {
     /// What the server said it can do.
     pub fn capabilities(&self) -> &lsp::ServerCapabilities {
         &self.capabilities
+    }
+
+    /// The capabilities as the server sent them, including any that
+    /// [`LspClient::capabilities`] leaves out because `lsp-types` doesn't
+    /// have them.
+    pub fn raw_capabilities(&self) -> &Value {
+        &self.raw_capabilities
     }
 
     /// The server's name and version, if it gave them.
@@ -1114,6 +1135,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             },
             "foldingRange": { "lineFoldingOnly": true },
             "callHierarchy": {},
+            "typeHierarchy": {},
             "documentSymbol": {
                 "hierarchicalDocumentSymbolSupport": true,
                 "tagSupport": { "valueSet": [1] },

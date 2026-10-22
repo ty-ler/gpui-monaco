@@ -32,6 +32,7 @@ mod client;
 pub mod convert;
 mod features;
 pub mod rpc;
+mod type_hierarchy;
 mod workspace_symbols;
 
 #[cfg(test)]
@@ -44,4 +45,5 @@ pub use client::{
 };
 pub use lsp_types;
 pub use rpc::Connection;
+pub use type_hierarchy::TypeHierarchyItem;
 pub use workspace_symbols::WorkspaceSymbol;
