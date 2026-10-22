@@ -14,7 +14,7 @@ categories.workspace = true
 workspace = true
 
 [features]
-default = ["word-segmenter"]
+default = ["word-segmenter", "minimap-font"]
 # Monaco's `wordSegmenterLocales`: ICU4X word segmentation (with its compiled
 # data) for word navigation, deletion and selection in languages like
 # Japanese, Chinese and Thai. Without it the option has no effect.
@@ -23,6 +23,11 @@ word-segmenter = ["dep:icu_segmenter", "dep:icu_locale_core"]
 # apps that enable it must ship its attribution), registered with GPUI so
 # the widgets draw Monaco's icons. Without it they draw Unicode stand-ins.
 codicons = ["dep:gpui-monaco-codicons"]
+# Monaco samples the editor font for minimap glyphs at scales above 2
+# (`createSampleData`). GPUI can't rasterize into a buffer, so this finds the
+# font among the system's (`fontdb`) and rasterizes it with `swash`, in the
+# background. Without it those scales enlarge the scale-2 glyphs.
+minimap-font = ["dep:fontdb", "dep:swash"]
 
 [dependencies]
 # `Instant` that works in browsers (std's on other targets).
@@ -53,6 +58,11 @@ icu_locale_core = { version = "2.3", optional = true, default-features = false }
 # only the root data, not every locale's tailoring; hence the `~` pin.
 icu_collator = { version = "~2.3", features = ["unstable"] }
 gpui-monaco-codicons = { workspace = true, optional = true }
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# The versions GPUI's Linux text system (cosmic-text) uses.
+fontdb = { version = "0.23", optional = true }
+swash = { version = "0.2.10", optional = true }
 
 [dev-dependencies]
 async-channel = "2"

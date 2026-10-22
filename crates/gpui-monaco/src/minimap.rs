@@ -8,11 +8,14 @@
 //! change, when only the changed lines are drawn again), and the selections, decorations and section headers a layer
 //! on top of it (quads here, redrawn every frame).
 
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
+
+use futures::FutureExt as _;
 
 use gpui::{
-    Bounds, Context, Font, FontWeight, Hsla, MouseButton, MouseDownEvent, MouseMoveEvent, Pixels,
-    ShapedLine, Window, font, point, px, size,
+    AppContext as _, Bounds, Context, Font, FontWeight, Hsla, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, ShapedLine, SharedString, Window, font, point, px, size,
 };
 use text::PointUtf16;
 
@@ -83,6 +86,70 @@ pub(crate) struct MinimapCache {
     /// Monaco `_samplingState`, and the (view line count, minimap line
     /// count) it's for.
     pub sampling: Option<(Arc<SamplingState>, (u32, u64))>,
+    /// Waiting for this font family's samples ([`char_renderer`]), to draw
+    /// again when they're in.
+    font_sample_wait: Option<(SharedString, Arc<gpui::Task<()>>)>,
+}
+
+/// The editor fonts' minimap samples (Monaco `createSampleData`), by
+/// family: drawn once, in the background, for every editor.
+enum FontSample {
+    Loading(futures::future::Shared<gpui::Task<Option<Arc<[u8]>>>>),
+    Done(Option<Arc<[u8]>>),
+}
+
+static FONT_SAMPLES: OnceLock<Mutex<HashMap<SharedString, FontSample>>> = OnceLock::new();
+
+/// Monaco `MinimapCharRendererFactory.create`: the prebaked glyphs at
+/// scales 1 and 2, and `family`'s samples above. Those are drawn in the
+/// background; until they're in, the scale-2 glyphs are enlarged and the
+/// minimap draws again when they land.
+fn char_renderer(
+    editor: &mut CodeEditor,
+    family: &SharedString,
+    font_scale: u32,
+    cx: &mut Context<CodeEditor>,
+) -> Arc<CharRenderer> {
+    if font_scale <= 2 {
+        return CharRenderer::create(font_scale);
+    }
+    let samples = FONT_SAMPLES.get_or_init(Default::default);
+    let mut samples = samples.lock().unwrap_or_else(|e| e.into_inner());
+    let sample = samples.entry(family.clone()).or_insert_with(|| {
+        let family = family.clone();
+        FontSample::Loading(
+            cx.background_spawn(
+                async move { crate::view::minimap_font_sample(&family).map(Arc::from) },
+            )
+            .shared(),
+        )
+    });
+    match sample {
+        FontSample::Done(Some(sample)) => CharRenderer::for_font(font_scale, family, sample),
+        FontSample::Done(None) => CharRenderer::create(font_scale),
+        FontSample::Loading(task) => {
+            let waiting = editor
+                .minimap_cache
+                .font_sample_wait
+                .as_ref()
+                .is_some_and(|(waiting, _)| waiting == family);
+            if !waiting {
+                let (task, key) = (task.clone(), family.clone());
+                let wait = cx.spawn(async move |this, cx| {
+                    let sample = task.await;
+                    if let Some(samples) = FONT_SAMPLES.get() {
+                        samples
+                            .lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .insert(key, FontSample::Done(sample));
+                    }
+                    this.update(cx, |_, cx| cx.notify()).ok();
+                });
+                editor.minimap_cache.font_sample_wait = Some((family.clone(), Arc::new(wait)));
+            }
+            CharRenderer::create(font_scale)
+        }
+    }
 }
 
 /// Rows whose highlights changed: byte ranges of the text at `version`.
@@ -395,6 +462,7 @@ pub(crate) fn prepaint(
     // The text image (Monaco `renderLines`).
     let background = colors.minimap_background.unwrap_or(colors.background);
     let font_scale = (info.minimap_scale.max(1.)) as u32;
+    let renderer = char_renderer(editor, &options.font_family, font_scale, cx);
     let style = {
         let default_background = Rgba8::from_hsla(colors.background);
         let background = Rgba8::from_hsla(background);
@@ -436,6 +504,8 @@ pub(crate) fn prepaint(
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         wrap_column.hash(&mut hasher);
         tab_size.hash(&mut hasher);
+        // The glyphs: a font's samples replace the enlarged scale-2 ones.
+        (Arc::as_ptr(&renderer) as usize).hash(&mut hasher);
         hasher.finish()
     };
     let style_key: StyleKey = (
@@ -556,6 +626,7 @@ pub(crate) fn prepaint(
                 (view_lines.clone(), snapshot.clone(), theme.clone());
             let lines = lines.clone();
             let width = info.minimap_canvas_inner_width;
+            let renderer = renderer.clone();
             move || {
                 let lines_to = |lines: &[u32]| {
                     render_lines(
@@ -565,6 +636,7 @@ pub(crate) fn prepaint(
                         &snapshot,
                         &theme,
                         lines,
+                        &renderer,
                         &style,
                         width,
                         canvas_background,
@@ -687,7 +759,7 @@ pub(crate) fn prepaint(
     } else {
         u32::MAX
     };
-    let mut contents: std::collections::HashMap<u32, (Vec<u16>, u32)> = Default::default();
+    let mut contents: HashMap<u32, (Vec<u16>, u32)> = Default::default();
     let mut content_of = |line: u32| -> (Vec<u16>, u32) {
         contents
             .entry(line)
@@ -1113,6 +1185,7 @@ fn render_lines(
     snapshot: &text::BufferSnapshot,
     theme: &Theme,
     lines: &[u32],
+    renderer: &CharRenderer,
     style: &LineStyle,
     width: u32,
     background: Rgba8,
@@ -1121,7 +1194,6 @@ fn render_lines(
     if width == 0 || height == 0 {
         return None;
     }
-    let renderer = CharRenderer::create(style.font_scale);
     let mut image = ImageData::filled(width, height, background);
     let default_color = Rgba8::from_hsla(theme.colors.foreground);
     let (first, last) = (*lines.first()?, *lines.last()?);
@@ -1263,7 +1335,7 @@ fn render_lines(
             content.extend_from_slice(&row_content[shown.clone()]);
             line_colors.extend_from_slice(&row_colors[shown]);
         }
-        render_line(&mut image, &renderer, style, dy, &content, |i| {
+        render_line(&mut image, renderer, style, dy, &content, |i| {
             line_colors[i]
         });
         dy += style.minimap_line_height;
