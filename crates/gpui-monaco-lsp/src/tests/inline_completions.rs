@@ -87,6 +87,8 @@ async fn inline_completions_reach_the_server(cx: &mut TestAppContext) {
     // The item without `insertText` is dropped.
     assert_eq!(list.items.len(), 3);
     assert_eq!(list.items[0].insert_text, "len()");
+    assert_eq!(list.items[0].filter_text.as_deref(), Some("len"));
+    assert_eq!(list.items[1].filter_text, None);
     assert!(!list.items[0].is_snippet);
     assert_eq!(list.items[0].range, Some(p(0, 2)..p(0, 3)));
     let command = list.items[0].command.as_ref().unwrap();
