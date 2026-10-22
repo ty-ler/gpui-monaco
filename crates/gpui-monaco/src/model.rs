@@ -390,8 +390,24 @@ struct Syntax {
     /// at each use).
     registry: Arc<LanguageRegistry>,
     latest: Option<(HighlightState, BufferSnapshot)>,
+    /// How `latest` differs from the parse before it.
+    change: Option<Arc<ParseChange>>,
     task: Option<Task<()>>,
     dirty: bool,
+}
+
+/// What a parse changed from the parse before it, so what was read from
+/// the earlier one can be reused where nothing changed.
+pub(crate) struct ParseChange {
+    /// The earlier parse.
+    pub from: syntax::HighlightStateId,
+    /// The parse this describes.
+    pub to: syntax::HighlightStateId,
+    /// The edits from the earlier parse's text to this one's.
+    pub patch: Patch,
+    /// The rows of this parse's text whose highlights may have changed
+    /// (the [`TextModelEvent::SyntaxUpdated`] ranges).
+    pub rows: Arc<[RangeInclusive<u32>]>,
 }
 
 /// Per-model options (Monaco `ITextModelUpdateOptions`).
@@ -1261,6 +1277,7 @@ impl TextModel {
             },
             registry,
             latest: None,
+            change: None,
             task: None,
             dirty: false,
         });
@@ -1339,6 +1356,12 @@ impl TextModel {
         self.language_pending = true;
         self.resolve_language(cx);
         cx.notify();
+    }
+
+    /// What the latest parse changed from the one before it, if it was
+    /// parsed from it.
+    pub(crate) fn parse_change(&self) -> Option<Arc<ParseChange>> {
+        self.syntax.as_ref()?.change.clone()
     }
 
     /// The latest highlight state, if the model has a grammar and a parse has
@@ -1734,6 +1757,7 @@ impl TextModel {
         syntax.task = None;
         syntax.dirty = false;
         syntax.latest = None;
+        syntax.change = None;
         let snapshot = self.buffer.snapshot();
         let start = web_time::Instant::now();
         let state = syntax.highlighter.update(None, &snapshot);
@@ -1777,6 +1801,7 @@ impl TextModel {
         let carry = previous
             .as_ref()
             .map(|(_, text, patch)| (self.syntax_generation, text.rope().clone(), patch.clone()));
+        let previous_id = previous.as_ref().map(|(state, _, _)| state.id());
         syntax.task = Some(cx.spawn(async move |this, cx| {
             let parse_snapshot = snapshot.clone();
             let (state, ranges) = cx
@@ -1796,6 +1821,16 @@ impl TextModel {
                     return;
                 };
                 let rope = snapshot.rope().clone();
+                syntax.change = previous_id
+                    .zip(carry.as_ref())
+                    .map(|(from, (_, _, patch))| {
+                        Arc::new(ParseChange {
+                            from,
+                            to: state.id(),
+                            patch: patch.clone(),
+                            rows: ranges.clone(),
+                        })
+                    });
                 syntax.latest = Some((state, snapshot));
                 syntax.task = None;
                 let dirty = std::mem::take(&mut syntax.dirty);

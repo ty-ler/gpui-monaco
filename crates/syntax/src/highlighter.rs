@@ -34,7 +34,23 @@ impl HighlightState {
     pub fn ptr_eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.0, &other.0)
     }
+
+    /// An id for this state that doesn't keep it alive.
+    pub fn id(&self) -> HighlightStateId {
+        HighlightStateId(Arc::downgrade(&self.0))
+    }
+
+    /// Whether `id` is this state's [`id`](Self::id).
+    pub fn has_id(&self, id: &HighlightStateId) -> bool {
+        std::ptr::addr_eq(Arc::as_ptr(&self.0), id.0.as_ptr())
+    }
 }
+
+/// Identifies a [`HighlightState`] without keeping it alive. It stays
+/// unique while it exists: the state's memory isn't reused before the id is
+/// dropped.
+#[derive(Clone)]
+pub struct HighlightStateId(std::sync::Weak<dyn Any + Send + Sync>);
 
 /// Produces highlight spans for a buffer.
 ///
