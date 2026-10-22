@@ -20,6 +20,7 @@ mod inline_completions;
 mod inline_values;
 mod registration;
 mod type_hierarchy;
+mod watched_files;
 mod workspace_symbols;
 
 /// Answers a request, or `None` to never answer it.

@@ -99,6 +99,9 @@ pub enum LspClientEvent {
     /// changed, so a host showing them asks for them again
     /// ([`LspClient::inline_values`]).
     InlineValuesRefresh,
+    /// The server registered or unregistered file watchers: watch what
+    /// [`LspClient::file_watchers`] lists now.
+    FileWatchersChanged,
     /// The server stopped; its features are unregistered.
     Exited,
 }
@@ -1151,6 +1154,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<Value> {
             "codeLens": { "refreshSupport": true },
             "configuration": true,
             "didChangeConfiguration": {},
+            "didChangeWatchedFiles": { "dynamicRegistration": true, "relativePatternSupport": true },
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
         },

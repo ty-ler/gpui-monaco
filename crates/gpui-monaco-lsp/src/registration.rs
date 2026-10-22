@@ -187,14 +187,16 @@ fn document_selector(options: &Value) -> Option<LanguageSelector> {
 impl LspClient {
     /// `client/registerCapability`: registers each registration's providers
     /// (for a feature the bridge has) and adds its options to
-    /// [`LspClient::capabilities`] and [`LspClient::raw_capabilities`]. A registration for an id that's
-    /// registered already replaces it. Registrations for other methods are
-    /// kept with their options, for the bridge's notifications.
+    /// [`LspClient::capabilities`] and [`LspClient::raw_capabilities`]. A
+    /// registration for an id that's registered already replaces it.
+    /// Registrations for other methods are kept with their options, such as
+    /// the [file watchers](LspClient::file_watchers).
     pub(crate) fn register_capabilities(
         &mut self,
         params: lsp::RegistrationParams,
         cx: &mut Context<Self>,
     ) {
+        let watchers = self.file_watchers();
         for registration in params.registrations {
             self.remove_registration(&registration.id, cx);
             let options = registration.register_options.unwrap_or(Value::Null);
@@ -236,6 +238,7 @@ impl LspClient {
             });
         }
         self.update_capabilities();
+        self.file_watchers_changed(&watchers, cx);
     }
 
     /// `client/unregisterCapability`: removes each registration's providers
@@ -245,10 +248,12 @@ impl LspClient {
         params: lsp::UnregistrationParams,
         cx: &mut Context<Self>,
     ) {
+        let watchers = self.file_watchers();
         for unregistration in params.unregisterations {
             self.remove_registration(&unregistration.id, cx);
         }
         self.update_capabilities();
+        self.file_watchers_changed(&watchers, cx);
     }
 
     fn remove_registration(&mut self, id: &str, cx: &mut App) {
