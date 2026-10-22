@@ -95,6 +95,10 @@ Some server features have no editor UI in gpui-monaco, as in Monaco. `LspClient`
 - **Type hierarchy (`typeHierarchyProvider`):** `prepare_type_hierarchy(&model, position, cx)` sends `textDocument/prepareTypeHierarchy` and returns `TypeHierarchyItem`s; `supertypes(&item, cx)` and `subtypes(&item, cx)` send the server's item back as it sent it. `lsp-types` has no `typeHierarchyProvider`, so `supports_type_hierarchy()` reads it from `raw_capabilities()`, the capabilities as the server sent them.
 - **Inline values (`inlineValueProvider`):** for hosts that embed a debugger. `inline_values(&model, range, InlineValueContext { frame_id, stopped_location }, cx)` sends `textDocument/inlineValue` for the rows in `range` while execution is paused, and returns `InlineValue`s: text to show, a variable to look up or an expression to evaluate, each with its range. Showing them is up to the host, for example as injected text after the line, as VS Code's debugger does. `workspace/inlineValue/refresh` emits `LspClientEvent::InlineValuesRefresh`, so the host asks again.
 
+## Watched files
+
+gpui-monaco doesn't watch files, so servers that need to hear about changes on disk, such as rust-analyzer for `Cargo.toml` or typescript-language-server for `tsconfig.json`, rely on the host. Servers register file watchers with `client/registerCapability`; `client.file_watchers()` lists their glob patterns (plain or relative to a base uri) and kinds, and `LspClientEvent::FileWatchersChanged` fires when they change. Watch what they match and report changes with `client.did_change_watched_files(events)`, which sends `workspace/didChangeWatchedFiles`, as `vscode-languageclient` does with VS Code's file watchers.
+
 ## Other transports and requests
 
 - **Other transports:** `LspClient::from_transport(reader, writer, options, cx)` connects over any async byte streams, such as a socket or an in-process server.

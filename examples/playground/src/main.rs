@@ -148,7 +148,9 @@ fn start_language_server(
                         eprintln!("language server: {message} {titles:?}");
                     }
                     // No debugger, so no inline values to refresh.
-                    LspClientEvent::InlineValuesRefresh | LspClientEvent::Exited => {}
+                    LspClientEvent::InlineValuesRefresh
+                    | LspClientEvent::FileWatchersChanged
+                    | LspClientEvent::Exited => {}
                 }
             })
             .detach();

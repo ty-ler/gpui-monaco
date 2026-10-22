@@ -36,6 +36,7 @@ mod inline_values;
 mod registration;
 pub mod rpc;
 mod type_hierarchy;
+mod watched_files;
 mod workspace_symbols;
 
 #[cfg(test)]
