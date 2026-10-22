@@ -2153,9 +2153,10 @@ pub struct FontInfo {
     pub font_feature_settings: gpui::SharedString,
     /// The window's scale factor (Monaco `pixelRatio`).
     pub pixel_ratio: f32,
-    /// The ligatures are off and `n`, a space, the digits, `→`, `·` and
-    /// `|/-_ilm%` (also italic and bold) are equally wide (Monaco
-    /// `isMonospace`). Full-width characters take two cells only then.
+    /// A space, the digits, `→`, `·` and `|/-_ilm%` (also italic and bold)
+    /// are as wide as `n`, and with ligatures on, `fi`, `<=`, `=>` and `===`
+    /// as wide as that many (Monaco `isMonospace`, within 0.005px).
+    /// Full-width characters take two cells only then.
     pub is_monospace: bool,
     /// The width of a typical half-width character, an `n` (Monaco
     /// `typicalHalfwidthCharacterWidth`).

@@ -62,7 +62,7 @@ editor.update(cx, |editor, cx| {
 | `word_break` | `wordBreak` | `Normal`, or `KeepAll` to not break between CJK characters |
 | `wrap_on_escaped_line_feeds` | `wrapOnEscapedLineFeeds` | while wrapping, a line with a quote also breaks after each literal `\n` (off) |
 | `wrapping_strategy` | `wrappingStrategy` | `Simple` counts monospace columns; `Advanced` measures characters, for proportional fonts, and (as Monaco's DOM line-break computer) indents continuation lines by the existing indent plus `tab_size` per extra indent, without rounding to a tab stop |
-| `fullwidth_character_width` | `fullwidthCharacterWidth` | `Font` (default) or `TwoCells`: with a monospace font and the ligatures off (Monaco's `isMonospace`, which `font_info()` reports), full-width characters are centered in two cells, so columns line up; carets, clicks and measured wrapping follow the cells. Characters drawn with several glyphs and right-to-left lines keep the font's width, and so does ghost text |
+| `fullwidth_character_width` | `fullwidthCharacterWidth` | `Font` (default) or `TwoCells`: with a monospace font (Monaco's `isMonospace`, which `font_info()` reports; with ligatures on, `fi`, `<=`, `=>` and `===` must keep the width of their characters), full-width characters are centered in two cells, so columns line up; carets, clicks and measured wrapping follow the cells. Characters drawn with several glyphs and right-to-left lines keep the font's width, and so does ghost text |
 | `folding`, `show_folding_controls` | `folding`, `showFoldingControls` | |
 | `scroll_beyond_last_line`, `mouse_wheel_scroll_sensitivity` | same names | |
 | `allow_variable_line_heights` | `allowVariableLineHeights` | decorations' `line_height` applies (default on) |
