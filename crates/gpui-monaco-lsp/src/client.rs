@@ -91,6 +91,10 @@ pub enum LspClientEvent {
         /// Answers the server.
         respond: MessageResponder,
     },
+    /// `workspace/inlineValue/refresh`: the server's inline values
+    /// changed, so a host showing them asks for them again
+    /// ([`LspClient::inline_values`]).
+    InlineValuesRefresh,
     /// The server stopped; its features are unregistered.
     Exited,
 }
@@ -930,6 +934,10 @@ impl LspClient {
                 gpui_monaco::providers::refresh_inlay_hints(cx);
                 Ok(Value::Null)
             }
+            lsp_types::request::InlineValueRefreshRequest::METHOD => {
+                cx.emit(LspClientEvent::InlineValuesRefresh);
+                Ok(Value::Null)
+            }
             lsp_types::request::SemanticTokensRefresh::METHOD => {
                 gpui_monaco::providers::refresh_semantic_tokens(cx);
                 Ok(Value::Null)
@@ -1069,6 +1077,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
                 "resolveSupport": { "properties": ["location.range"] },
             },
             "inlayHint": { "refreshSupport": true },
+            "inlineValue": { "refreshSupport": true },
             "semanticTokens": { "refreshSupport": true },
             "codeLens": { "refreshSupport": true },
             "configuration": true,
@@ -1136,6 +1145,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "foldingRange": { "lineFoldingOnly": true },
             "callHierarchy": {},
             "typeHierarchy": {},
+            "inlineValue": {},
             "documentSymbol": {
                 "hierarchicalDocumentSymbolSupport": true,
                 "tagSupport": { "valueSet": [1] },

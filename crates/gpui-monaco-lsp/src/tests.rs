@@ -14,6 +14,7 @@ use crate::rpc::read_message;
 use crate::{LspClient, LspClientEvent, LspClientOptions};
 
 mod call_hierarchy;
+mod inline_values;
 mod type_hierarchy;
 mod workspace_symbols;
 
@@ -109,6 +110,7 @@ fn capabilities() -> Value {
         "workspaceSymbolProvider": { "resolveProvider": true },
         "callHierarchyProvider": true,
         "typeHierarchyProvider": true,
+        "inlineValueProvider": true,
     })
 }
 
