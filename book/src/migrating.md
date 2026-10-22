@@ -26,6 +26,8 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `monaco.editor.setModelMarkers(model, owner, markers)` | `model.set_markers(owner, markers, cx)`, or `set_markers_for_uri(cx, owner, uri, markers)` for a uri without a model (Monaco's `IMarkerService.changeOne`) |
 | `monaco.editor.getModelMarkers({ owner, resource, take })` | `model_markers(cx, &MarkerFilter { owner, resource, take })` |
 | `monaco.editor.removeAllMarkers(owner)` | `remove_all_markers(cx, owner)` |
+| `IMarkerService.changeOne(owner, resource, markers, { isTruncated })`, `isSourceTruncated(resource)` | `set_markers_for_uri_with_options(cx, owner, uri, markers, MarkerChangeOptions { is_truncated })` or `model.set_markers_with_options(owner, markers, options, cx)`, `is_source_truncated(cx, uri)` |
+| `IMarkerDecorationsService.getMarkerLimits(uri)` | `marker_limits(cx, uri)` or `model.marker_limit()`, a `MarkerLimit` |
 | `monaco.editor.defineTheme(name, data)` | `define_theme(cx, Theme::define(name, &base, inherit, rules, &colors))`, or a theme from `Theme::from_vscode_json` |
 | `monaco.editor.setTheme(name)` | `set_theme(cx, name)` (every editor), or `editor.set_theme(Arc::new(theme), cx)` (one) |
 | `monaco.editor.colorize(text, lang, opts)` | `colorize::colorize(text, lang, &theme, &registry, opts)` or `colorize_element` |
@@ -174,6 +176,7 @@ Monaco's global `monaco.editor.on…` events are free functions returning a gpui
 | `CommandsRegistry.registerCommand(id, handler)` | `register_command(cx, id, handler)`, returning a `Disposable`; the newest handler for an id runs |
 | `onDidChangeModelLanguage` | `on_did_change_model_language(cx, …)` (the model and its old language id) |
 | `onDidChangeMarkers` | `on_did_change_markers(cx, …)` (the changed uris) |
+| `IMarkerDecorationsService.onDidChangeMarkerLimit` | `on_did_change_marker_limit(cx, …)` (the model) |
 
 ## Keybindings
 

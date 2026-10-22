@@ -177,9 +177,34 @@ impl Marker {
     }
 }
 
-/// Monaco `MarkerDecorationsService._updateDecorations`: only the first
-/// 500 markers of a resource are decorated (`read({ resource, take: 500 })`).
-pub const MAX_DECORATED_MARKERS: usize = 500;
+/// Monaco `MarkerDecorations.MAX_MARKER_DECORATIONS_LIMIT`: only the first
+/// 5000 markers of a resource are decorated. A model's
+/// [`MarkerLimit::is_markers_truncated`] says when it has more.
+pub const MAX_DECORATED_MARKERS: usize = 5000;
+
+/// How [`set_markers_for_uri_with_options`] and
+/// [`TextModel::set_markers_with_options`] set markers (Monaco
+/// `IMarkerChangeOptions`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkerChangeOptions {
+    /// The owner (e.g. a language server) sent only part of its markers
+    /// for the uri. A model with the uri reports it in
+    /// [`MarkerLimit::is_markers_source_truncated`] until the owner's
+    /// markers there are set again without it or removed.
+    pub is_truncated: bool,
+}
+
+/// Monaco `IMarkerLimit`: whether a model shows all the markers of its uri
+/// ([`marker_limits`], [`TextModel::marker_limit`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MarkerLimit {
+    /// An owner's markers of the uri are truncated at their source: they
+    /// were set with [`MarkerChangeOptions::is_truncated`].
+    pub is_markers_source_truncated: bool,
+    /// [`MAX_DECORATED_MARKERS`] when the uri has more markers than that,
+    /// so only the first are decorated; `None` when all are.
+    pub is_markers_truncated: Option<usize>,
+}
 
 /// Monaco `MarkerService`: every marker, by owner and resource uri, apart
 /// from the models. Markers outlive their model (only an in-memory model's
@@ -196,8 +221,13 @@ struct MarkerService {
     by_resource: Vec<(SharedString, Vec<SharedString>)>,
 }
 
-/// A resource's markers of one owner.
-type ResourceMarkers = (SharedString, Vec<Rc<Marker>>);
+/// A resource's markers of one owner (Monaco `IMarkers`).
+struct ResourceMarkers {
+    resource: SharedString,
+    markers: Vec<Rc<Marker>>,
+    /// The owner sent only part of them (Monaco `isTruncated`).
+    is_truncated: bool,
+}
 
 /// An owner, a resource and its markers of the owner.
 type MarkerEntry<'a> = (&'a SharedString, &'a SharedString, &'a Vec<Rc<Marker>>);
@@ -205,7 +235,13 @@ type MarkerEntry<'a> = (&'a SharedString, &'a SharedString, &'a Vec<Rc<Marker>>)
 impl Global for MarkerService {}
 
 impl MarkerService {
-    fn set(&mut self, owner: SharedString, resource: SharedString, markers: Vec<Rc<Marker>>) {
+    fn set(
+        &mut self,
+        owner: SharedString,
+        resource: SharedString,
+        markers: Vec<Rc<Marker>>,
+        is_truncated: bool,
+    ) {
         let resources = match self.by_owner.iter().position(|(o, _)| *o == owner) {
             Some(ix) => &mut self.by_owner[ix].1,
             None => {
@@ -213,9 +249,16 @@ impl MarkerService {
                 &mut self.by_owner.last_mut().unwrap().1
             }
         };
-        match resources.iter_mut().find(|(r, _)| *r == resource) {
-            Some((_, old)) => *old = markers,
-            None => resources.push((resource.clone(), markers)),
+        match resources.iter_mut().find(|r| r.resource == resource) {
+            Some(old) => {
+                old.markers = markers;
+                old.is_truncated = is_truncated;
+            }
+            None => resources.push(ResourceMarkers {
+                resource: resource.clone(),
+                markers,
+                is_truncated,
+            }),
         }
         let owners = match self.by_resource.iter().position(|(r, _)| *r == resource) {
             Some(ix) => &mut self.by_resource[ix].1,
@@ -235,7 +278,7 @@ impl MarkerService {
             return false;
         };
         let resources = &mut self.by_owner[ix].1;
-        let Some(rx) = resources.iter().position(|(r, _)| r == resource) else {
+        let Some(rx) = resources.iter().position(|r| r.resource == resource) else {
             return false;
         };
         resources.remove(rx);
@@ -257,8 +300,17 @@ impl MarkerService {
         self.by_owner
             .iter()
             .find(|(o, _)| o == owner)
-            .map(|(_, resources)| resources.iter().map(|(r, _)| r.clone()).collect())
+            .map(|(_, resources)| resources.iter().map(|r| r.resource.clone()).collect())
             .unwrap_or_default()
+    }
+
+    /// Monaco `MarkerService.isSourceTruncated`: whether any owner's
+    /// markers of `resource` are truncated.
+    fn is_source_truncated(&self, resource: &str) -> bool {
+        self.by_owner
+            .iter()
+            .flat_map(|(_, resources)| resources)
+            .any(|r| r.resource == resource && r.is_truncated)
     }
 
     /// The owners with markers for `resource`.
@@ -285,9 +337,8 @@ impl MarkerService {
                         .filter_map(move |owner| {
                             let (owner, resources) =
                                 self.by_owner.iter().find(|(o, _)| o == owner)?;
-                            let (resource, markers) =
-                                resources.iter().find(|(r, _)| r == resource)?;
-                            Some((owner, resource, markers))
+                            let r = resources.iter().find(|r| r.resource == *resource)?;
+                            Some((owner, &r.resource, &r.markers))
                         }),
                 ),
                 (owner, None) => Box::new(
@@ -297,7 +348,7 @@ impl MarkerService {
                         .flat_map(|(owner, resources)| {
                             resources
                                 .iter()
-                                .map(move |(resource, markers)| (owner, resource, markers))
+                                .map(move |r| (owner, &r.resource, &r.markers))
                         }),
                 ),
             };
@@ -327,11 +378,13 @@ fn sanitize(markers: Vec<Marker>) -> Vec<Rc<Marker>> {
 
 /// Monaco `MarkerService.changeOne`: replaces `owner`'s markers of
 /// `resource`, queueing an [`on_did_change_markers`](crate::on_did_change_markers)
-/// event. Removing nothing isn't a change; whether it changed.
+/// event. Removing them clears their truncation too. Removing nothing
+/// isn't a change; whether it changed.
 fn change_one(
     owner: SharedString,
     resource: SharedString,
     markers: Vec<Marker>,
+    options: MarkerChangeOptions,
     cx: &mut App,
 ) -> bool {
     let service = cx.default_global::<MarkerService>();
@@ -340,7 +393,12 @@ fn change_one(
             return false;
         }
     } else {
-        service.set(owner, resource.clone(), sanitize(markers));
+        service.set(
+            owner,
+            resource.clone(),
+            sanitize(markers),
+            options.is_truncated,
+        );
     }
     crate::registry::markers_changed(resource, cx);
     true
@@ -370,7 +428,7 @@ pub(crate) fn model_disposed(resource: &SharedString, cx: &mut App) {
         return;
     };
     for owner in service.owners_of(resource) {
-        change_one(owner, resource.clone(), Vec::new(), cx);
+        change_one(owner, resource.clone(), Vec::new(), Default::default(), cx);
     }
 }
 
@@ -396,15 +454,29 @@ impl TextModel {
     /// As in Monaco, markers belong to the uri rather than the model: they
     /// outlive it (but for an `inmemory:` one) and decorate the next model
     /// with the uri. Only the first [`MAX_DECORATED_MARKERS`] of the uri
-    /// are drawn; [`model_markers`] has them all.
+    /// are drawn ([`TextModel::marker_limit`] says when there are more);
+    /// [`model_markers`] has them all.
     pub fn set_markers(
         &mut self,
         owner: impl Into<SharedString>,
         markers: Vec<Marker>,
         cx: &mut Context<Self>,
     ) {
+        self.set_markers_with_options(owner, markers, MarkerChangeOptions::default(), cx);
+    }
+
+    /// [`TextModel::set_markers`] with Monaco's `IMarkerChangeOptions`,
+    /// such as whether the owner sent only part of its markers (Monaco
+    /// `IMarkerService.changeOne`'s `options`).
+    pub fn set_markers_with_options(
+        &mut self,
+        owner: impl Into<SharedString>,
+        markers: Vec<Marker>,
+        options: MarkerChangeOptions,
+        cx: &mut Context<Self>,
+    ) {
         let resource = self.resource().clone();
-        if !change_one(owner.into(), resource.clone(), markers, cx) {
+        if !change_one(owner.into(), resource.clone(), markers, options, cx) {
             return;
         }
         crate::registry::track_model(&cx.entity(), cx);
@@ -412,19 +484,26 @@ impl TextModel {
         update_models(&[resource], Some(cx.entity_id()), cx);
     }
 
-    /// Monaco `MarkerDecorations.update`: decorates the first
-    /// [`MAX_DECORATED_MARKERS`] markers of the model's resource, keeping
-    /// the decorations of markers that didn't change, and emits
-    /// [`TextModelEvent::MarkersChanged`](crate::TextModelEvent::MarkersChanged)
-    /// if any did.
+    /// Whether the model shows all the markers of its uri (Monaco
+    /// `IMarkerDecorationsService.getMarkerLimits`); see [`marker_limits`]
+    /// to ask by uri. [`on_did_change_marker_limit`](crate::on_did_change_marker_limit)
+    /// reports changes.
+    pub fn marker_limit(&self) -> MarkerLimit {
+        self.marker_limit
+    }
+
+    /// Monaco `MarkerDecorationsService._updateDecorations`: decorates the
+    /// first [`MAX_DECORATED_MARKERS`] markers of the model's resource,
+    /// reading one more to tell whether there are more, and updates the
+    /// model's [`MarkerLimit`].
     pub(crate) fn update_marker_decorations(&mut self, cx: &mut Context<Self>) {
-        let markers: Vec<Rc<Marker>> = cx
-            .try_global::<MarkerService>()
+        let service = cx.try_global::<MarkerService>();
+        let mut markers: Vec<Rc<Marker>> = service
             .map(|service| {
                 service
                     .read(&MarkerFilter {
                         resource: Some(self.resource().clone()),
-                        take: Some(MAX_DECORATED_MARKERS),
+                        take: Some(MAX_DECORATED_MARKERS + 1),
                         ..Default::default()
                     })
                     .into_iter()
@@ -432,6 +511,39 @@ impl TextModel {
                     .collect()
             })
             .unwrap_or_default();
+        let is_marker_limit_exceeded = markers.len() > MAX_DECORATED_MARKERS;
+        markers.truncate(MAX_DECORATED_MARKERS);
+        let is_markers_source_truncated =
+            service.is_some_and(|service| service.is_source_truncated(self.resource()));
+        self.decorate_markers(markers, cx);
+        self.update_marker_limit(is_markers_source_truncated, is_marker_limit_exceeded, cx);
+    }
+
+    /// Monaco `MarkerDecorations.updateMarkerLimit`: queues an
+    /// [`on_did_change_marker_limit`](crate::on_did_change_marker_limit)
+    /// event if either flag changed.
+    fn update_marker_limit(
+        &mut self,
+        is_markers_source_truncated: bool,
+        is_marker_limit_exceeded: bool,
+        cx: &mut Context<Self>,
+    ) {
+        let limit = MarkerLimit {
+            is_markers_source_truncated,
+            is_markers_truncated: is_marker_limit_exceeded.then_some(MAX_DECORATED_MARKERS),
+        };
+        if limit == self.marker_limit {
+            return;
+        }
+        let old = std::mem::replace(&mut self.marker_limit, limit);
+        crate::registry::marker_limit_changed(cx.weak_entity(), old, cx);
+    }
+
+    /// Monaco `MarkerDecorations.update`: decorates `markers`, keeping the
+    /// decorations of markers that didn't change, and emits
+    /// [`TextModelEvent::MarkersChanged`](crate::TextModelEvent::MarkersChanged)
+    /// if any did.
+    fn decorate_markers(&mut self, markers: Vec<Rc<Marker>>, cx: &mut Context<Self>) {
         let key = |marker: &Rc<Marker>| Rc::as_ptr(marker) as usize;
         let new: std::collections::HashSet<usize> = markers.iter().map(key).collect();
         let old: std::collections::HashSet<usize> =
@@ -557,6 +669,34 @@ impl TextModel {
             .collect();
         found.sort_by_key(|m| (std::cmp::Reverse(m.severity), m.range.start));
         found
+    }
+
+    /// Whether a decorated marker that `include` accepts intersects
+    /// `range` (an empty one touching it doesn't), at its decoration's
+    /// current place, without copying the markers as [`TextModel::markers`]
+    /// does: the editor asks on every frame (`editorSelectionHasDiagnostics`).
+    pub(crate) fn has_marker_intersecting(
+        &self,
+        range: Range<PointUtf16>,
+        include: impl Fn(&Marker) -> bool,
+    ) -> bool {
+        let buffer = self.buffer();
+        let start = buffer.point_utf16_to_offset(range.start);
+        let end = buffer.point_utf16_to_offset(range.end);
+        self.markers.iter().any(|decorated| {
+            if !include(&decorated.marker) {
+                return false;
+            }
+            let marker = match self.decoration(decorated.id) {
+                Some(decoration) => decoration.range.clone(),
+                None => {
+                    let range = &decorated.marker.range;
+                    buffer.point_utf16_to_offset(range.start)
+                        ..buffer.point_utf16_to_offset(range.end)
+                }
+            };
+            marker.start < end && start < marker.end
+        })
     }
 
     /// The decorated markers (the first [`MAX_DECORATED_MARKERS`] of the
@@ -690,15 +830,50 @@ pub fn set_markers_for_uri(
     uri: &str,
     markers: Vec<Marker>,
 ) {
+    set_markers_for_uri_with_options(cx, owner, uri, markers, MarkerChangeOptions::default());
+}
+
+/// [`set_markers_for_uri`] with Monaco's `IMarkerChangeOptions`, such as
+/// whether the owner sent only part of its markers for `uri` (Monaco
+/// `IMarkerService.changeOne`'s `options`).
+pub fn set_markers_for_uri_with_options(
+    cx: &mut App,
+    owner: impl Into<SharedString>,
+    uri: &str,
+    markers: Vec<Marker>,
+    options: MarkerChangeOptions,
+) {
     let resource: SharedString = crate::normalize_uri(uri).into();
-    if change_one(owner.into(), resource.clone(), markers, cx) {
+    if change_one(owner.into(), resource.clone(), markers, options, cx) {
         update_models(&[resource], None, cx);
     }
 }
 
-/// Removes `owner`'s markers everywhere (Monaco `editor.removeAllMarkers`),
-/// with one [`on_did_change_markers`](crate::on_did_change_markers) event
-/// for all of them.
+/// Monaco `MarkerService.isSourceTruncated`: whether an owner's markers of
+/// `uri` were set with [`MarkerChangeOptions::is_truncated`], whether or
+/// not a model with the uri is open. `uri` is compared in
+/// [`normalize_uri`](crate::normalize_uri)'s form.
+pub fn is_source_truncated(cx: &App, uri: &str) -> bool {
+    cx.try_global::<MarkerService>()
+        .is_some_and(|service| service.is_source_truncated(&crate::normalize_uri(uri)))
+}
+
+/// The [`MarkerLimit`] of the live model with `uri` (Monaco
+/// `IMarkerDecorationsService.getMarkerLimits`), `None` without one. `uri`
+/// is compared in [`normalize_uri`](crate::normalize_uri)'s form.
+pub fn marker_limits(cx: &App, uri: &str) -> Option<MarkerLimit> {
+    let resource = crate::normalize_uri(uri);
+    crate::registry::models(cx)
+        .into_iter()
+        .map(|model| model.read(cx))
+        .find(|model| model.resource().as_ref() == resource)
+        .map(TextModel::marker_limit)
+}
+
+/// Removes `owner`'s markers everywhere (Monaco `editor.removeAllMarkers`,
+/// `IMarkerService.changeAll(owner, [])`), and so their truncation, with
+/// one [`on_did_change_markers`](crate::on_did_change_markers) event for
+/// all of them.
 pub fn remove_all_markers(cx: &mut App, owner: &str) {
     let Some(service) = cx.try_global::<MarkerService>() else {
         return;
@@ -706,7 +881,13 @@ pub fn remove_all_markers(cx: &mut App, owner: &str) {
     let resources = service.resources_of(owner);
     let owner = SharedString::from(owner.to_string());
     for resource in &resources {
-        change_one(owner.clone(), resource.clone(), Vec::new(), cx);
+        change_one(
+            owner.clone(),
+            resource.clone(),
+            Vec::new(),
+            Default::default(),
+            cx,
+        );
     }
     update_models(&resources, None, cx);
 }

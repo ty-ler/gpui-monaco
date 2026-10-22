@@ -1,7 +1,7 @@
 //! Monaco's global editor and model registries (`standaloneEditor.ts` over
 //! `ICodeEditorService` and `IModelService`): every live [`CodeEditor`],
 //! [`DiffEditor`] and [`TextModel`], and events when they're created,
-//! released, change language or change markers.
+//! released, change language, change markers or change marker limits.
 //!
 //! Editors and diff editors register themselves when they're created.
 //! Models are noticed when they're created once [`crate::init`] (or any
@@ -20,6 +20,7 @@ use gpui::{App, Context, Entity, EntityId, Global, SharedString, Subscription, W
 
 use crate::diff_editor::DiffEditor;
 use crate::editor::CodeEditor;
+use crate::markers::MarkerLimit;
 use crate::model::TextModel;
 
 /// Listeners of one global event (Monaco `Emitter`).
@@ -98,6 +99,10 @@ struct Registry {
     markers_changed: Emitter<MarkersListener>,
     /// Uris whose markers changed since the last `markers_changed` event.
     pending_marker_uris: Vec<SharedString>,
+    marker_limit_changed: Emitter<ModelListener>,
+    /// Models whose marker limit changed since the last
+    /// `marker_limit_changed` event, with their limit before.
+    pending_marker_limits: Vec<(WeakEntity<TextModel>, MarkerLimit)>,
 }
 
 impl Global for Registry {}
@@ -251,6 +256,43 @@ pub(crate) fn markers_changed(uri: SharedString, cx: &mut App) {
     }
 }
 
+/// Queues `model`, whose [`MarkerLimit`] was `old`, for the next
+/// `on_did_change_marker_limit` event (Monaco
+/// `IMarkerDecorationsService.onDidChangeMarkerLimit`). Changes in one
+/// update are merged, as Monaco redecorates a model once for the marker
+/// changes of a tick: each model is announced once, and not if its limit
+/// is back to `old`.
+pub(crate) fn marker_limit_changed(model: WeakEntity<TextModel>, old: MarkerLimit, cx: &mut App) {
+    let registry = cx.default_global::<Registry>();
+    let schedule = registry.pending_marker_limits.is_empty();
+    let id = model.entity_id();
+    if !registry
+        .pending_marker_limits
+        .iter()
+        .any(|(m, _)| m.entity_id() == id)
+    {
+        registry.pending_marker_limits.push((model, old));
+    }
+    if schedule {
+        cx.defer(|cx| {
+            let registry = cx.global_mut::<Registry>();
+            let pending = std::mem::take(&mut registry.pending_marker_limits);
+            let listeners = registry.marker_limit_changed.listeners();
+            for (model, old) in pending {
+                let Some(model) = model.upgrade() else {
+                    continue;
+                };
+                if model.read(cx).marker_limit() == old {
+                    continue;
+                }
+                for listener in &listeners {
+                    listener(&model, cx);
+                }
+            }
+        });
+    }
+}
+
 /// Every live code editor, in creation order (Monaco `editor.getEditors`),
 /// including the two inside each diff editor, but not the editors' own
 /// inputs (find, replace, rename, quick input).
@@ -373,6 +415,23 @@ pub fn on_did_change_markers(
     ensure(cx);
     cx.global::<Registry>()
         .markers_changed
+        .subscribe(Rc::new(listener))
+}
+
+/// Calls `listener` with each model whose
+/// [`marker_limit`](TextModel::marker_limit) changed (Monaco
+/// `IMarkerDecorationsService.onDidChangeMarkerLimit`): its markers became
+/// truncated at their source or no longer are, or it got more markers than
+/// [`MAX_DECORATED_MARKERS`](crate::MAX_DECORATED_MARKERS) or no longer
+/// has. Changes made in one update arrive after it, each model once, and
+/// only if its limit differs from before the update.
+pub fn on_did_change_marker_limit(
+    cx: &mut App,
+    listener: impl Fn(&Entity<TextModel>, &mut App) + 'static,
+) -> Subscription {
+    ensure(cx);
+    cx.global::<Registry>()
+        .marker_limit_changed
         .subscribe(Rc::new(listener))
 }
 

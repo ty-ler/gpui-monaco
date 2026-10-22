@@ -197,8 +197,9 @@ pub use layout_info::{LayoutInfo, MinimapLayoutInfo, OverviewRulerPosition, Rend
 #[doc(hidden)]
 pub use markers::MarkerZoneState;
 pub use markers::{
-    MAX_DECORATED_MARKERS, Marker, MarkerFilter, MarkerSeverity, MarkerTag, MarkerZone,
-    ModelMarker, RelatedInformation, model_markers, remove_all_markers, set_markers_for_uri,
+    MAX_DECORATED_MARKERS, Marker, MarkerChangeOptions, MarkerFilter, MarkerLimit, MarkerSeverity,
+    MarkerTag, MarkerZone, ModelMarker, RelatedInformation, is_source_truncated, marker_limits,
+    model_markers, remove_all_markers, set_markers_for_uri, set_markers_for_uri_with_options,
 };
 pub use model::{
     EditKind, ModelOptions, SyntaxSnapshot, TextModel, TextModelEvent, create_model,
@@ -210,8 +211,9 @@ pub use mouse_target::{
 pub use openers::{register_editor_opener, register_link_opener};
 pub use options::EditorOptions;
 pub use registry::{
-    Disposable, diff_editors, editors, models, on_did_change_markers, on_did_change_model_language,
-    on_did_create_diff_editor, on_did_create_editor, on_did_create_model, on_will_dispose_model,
+    Disposable, diff_editors, editors, models, on_did_change_marker_limit, on_did_change_markers,
+    on_did_change_model_language, on_did_create_diff_editor, on_did_create_editor,
+    on_did_create_model, on_will_dispose_model,
 };
 pub use signature_help::SignatureHelpWidget;
 pub use snippet_session::{SnippetInsertOptions, set_snippet_workspace};

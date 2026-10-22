@@ -602,6 +602,9 @@ pub struct TextModel {
     pub(crate) ignore_unusual_line_terminators: bool,
     /// The decorated markers of `resource`.
     pub(crate) markers: Vec<crate::markers::DecoratedMarker>,
+    /// Whether `markers` are all of `resource`'s (Monaco
+    /// `MarkerDecorations.markerLimit`).
+    pub(crate) marker_limit: crate::markers::MarkerLimit,
     /// Set when `language_id` hasn't been resolved against the registry yet.
     language_pending: bool,
     /// Parse the text: set once [`TextModel::ensure_syntax`] runs, when an
@@ -805,6 +808,7 @@ impl TextModel {
             decorations: DecorationSet::default(),
             ignore_unusual_line_terminators: false,
             markers: Vec::new(),
+            marker_limit: Default::default(),
             // Plain text, resolved when created (once `init` has run).
             language_pending: true,
             parse_requested: false,

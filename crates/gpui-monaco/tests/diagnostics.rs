@@ -1,11 +1,16 @@
-//! Diagnostic tags, related information and `render_validation_decorations`
-//! (Monaco's `markerDecorationsService` and marker hover).
+//! Diagnostic tags, related information, marker limits and
+//! `render_validation_decorations` (Monaco's `markerDecorationsService`,
+//! ported from `markerDecorationsService.test.ts`, and marker hover).
 
-use gpui::{AppContext as _, Entity, Focusable, TestAppContext, VisualTestContext};
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
+
+use gpui::{AppContext as _, Entity, Focusable, SharedString, TestAppContext, VisualTestContext};
 use gpui_monaco::options::RenderValidationDecorations;
 use gpui_monaco::text::PointUtf16;
 use gpui_monaco::{
-    CodeEditor, EditorOptions, Marker, MarkerSeverity, MarkerTag, RelatedInformation, TextModel,
+    CodeEditor, DecorationId, EditorOptions, Marker, MarkerChangeOptions, MarkerFilter,
+    MarkerLimit, MarkerSeverity, MarkerTag, RelatedInformation, TextModel, TextModelEvent,
 };
 
 fn setup<'a>(
@@ -200,9 +205,9 @@ fn a_whole_line_marker_starts_at_the_first_non_whitespace(cx: &mut TestAppContex
 }
 
 #[gpui::test]
-fn only_the_first_500_markers_are_decorated(cx: &mut TestAppContext) {
-    let (editor, cx) = setup(&"x\n".repeat(600), |_| {}, cx);
-    let markers = (0..600)
+fn only_the_first_5000_markers_are_decorated(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(&"x\n".repeat(5100), |_| {}, cx);
+    let markers = (0..5100)
         .map(|row| marker(MarkerSeverity::Error, at(row, 0)..at(row, 1)))
         .collect();
     set_markers(&editor, cx, markers);
@@ -213,8 +218,9 @@ fn only_the_first_500_markers_are_decorated(cx: &mut TestAppContext) {
             gpui_monaco::model_markers(cx, &Default::default()).len(),
         )
     });
+    assert_eq!(gpui_monaco::MAX_DECORATED_MARKERS, 5000);
     assert_eq!(live, gpui_monaco::MAX_DECORATED_MARKERS);
-    assert_eq!(all, 600);
+    assert_eq!(all, 5100);
     // Another owner's markers come after: none of them is decorated, until
     // the first owner's go.
     editor.update(cx, |e, cx| {
@@ -279,6 +285,323 @@ fn unchanged_markers_keep_their_decorations(cx: &mut TestAppContext) {
     let both = ids(cx);
     assert_eq!(both.len(), 2);
     assert!(both.contains(&first[0]));
+}
+
+// ----- marker limits (markerDecorationsService.test.ts) -----------------------
+//
+// Not ported: "honors resource filters" and "preserves suppression after
+// applying the decoration limit", as there's no `installResourceFilter` or
+// `addMarkerSuppression` here.
+
+const DIAGNOSTICS_URI: &str = "file:///diagnostics.txt";
+
+/// Monaco's `createModel`: 5100 lines of `value`.
+fn limit_model(uri: &str, cx: &mut TestAppContext) -> Entity<TextModel> {
+    let text = vec!["value"; 5100].join("\n");
+    let uri = uri.to_string();
+    cx.new(|_| TextModel::new(&text).with_uri(uri))
+}
+
+/// Monaco's `createMarkers`: one marker per line, cycling through the
+/// severities.
+fn limit_markers(count: u32) -> Vec<Marker> {
+    let severities = [
+        MarkerSeverity::Error,
+        MarkerSeverity::Warning,
+        MarkerSeverity::Info,
+        MarkerSeverity::Hint,
+    ];
+    (0..count)
+        .map(|row| Marker {
+            message: format!("problem {}", row + 1).into(),
+            ..marker(severities[row as usize % 4], at(row, 0)..at(row, 1))
+        })
+        .collect()
+}
+
+/// Monaco's `changeMarkers`: `IMarkerService.changeOne`, then the events.
+fn change_markers(uri: &str, count: u32, owner: &str, is_truncated: bool, cx: &mut TestAppContext) {
+    cx.update(|cx| {
+        gpui_monaco::set_markers_for_uri_with_options(
+            cx,
+            owner.to_string(),
+            uri,
+            limit_markers(count),
+            MarkerChangeOptions { is_truncated },
+        )
+    });
+    cx.run_until_parked();
+}
+
+fn limited(uri: &str, cx: &mut TestAppContext) -> Option<usize> {
+    cx.read(|cx| gpui_monaco::marker_limits(cx, uri))
+        .and_then(|limit| limit.is_markers_truncated)
+}
+
+fn live_markers(model: &Entity<TextModel>, cx: &mut TestAppContext) -> usize {
+    model.read_with(cx, |m, _| m.markers().len())
+}
+
+fn decoration_ids(model: &Entity<TextModel>, cx: &mut TestAppContext) -> Vec<DecorationId> {
+    let mut ids: Vec<_> = model.update(cx, |m, _| {
+        m.all_decorations(None).iter().map(|d| d.id).collect()
+    });
+    ids.sort();
+    ids
+}
+
+/// Counts the model's [`TextModelEvent::MarkersChanged`] (Monaco
+/// `onDidChangeMarker`).
+fn count_marker_changes(
+    model: &Entity<TextModel>,
+    cx: &mut TestAppContext,
+) -> (Rc<Cell<usize>>, gpui::Subscription) {
+    let count = Rc::new(Cell::new(0));
+    let subscription = cx.update(|cx| {
+        let count = count.clone();
+        cx.subscribe(model, move |_, event: &TextModelEvent, _| {
+            if matches!(event, TextModelEvent::MarkersChanged) {
+                count.set(count.get() + 1);
+            }
+        })
+    });
+    (count, subscription)
+}
+
+/// What [`log_limit_changes`] saw: each model's resource and limit.
+type LimitLog = Rc<RefCell<Vec<(SharedString, MarkerLimit)>>>;
+
+/// Logs [`gpui_monaco::on_did_change_marker_limit`] events: each model's
+/// resource and limit when it arrives.
+fn log_limit_changes(cx: &mut TestAppContext) -> (LimitLog, gpui::Subscription) {
+    let log = LimitLog::default();
+    let subscription = cx.update(|cx| {
+        let log = log.clone();
+        gpui_monaco::on_did_change_marker_limit(cx, move |model, cx| {
+            let resource = model.read(cx).resource().clone();
+            let limit = gpui_monaco::marker_limits(cx, &resource).unwrap();
+            assert_eq!(limit, model.read(cx).marker_limit());
+            log.borrow_mut().push((resource, limit));
+        })
+    });
+    (log, subscription)
+}
+
+#[gpui::test]
+fn the_limit_is_reported_only_above_5000_and_every_marker_is_kept(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = limit_model(DIAGNOSTICS_URI, cx);
+    let mut states = Vec::new();
+    for count in [4999, 5000, 5001, 5100, 5000, 0] {
+        change_markers(DIAGNOSTICS_URI, count, "test", false, cx);
+        let diagnostics = cx.read(|cx| {
+            gpui_monaco::model_markers(
+                cx,
+                &MarkerFilter {
+                    resource: Some(DIAGNOSTICS_URI.into()),
+                    ..Default::default()
+                },
+            )
+            .len()
+        });
+        states.push((
+            diagnostics,
+            live_markers(&model, cx),
+            limited(DIAGNOSTICS_URI, cx),
+        ));
+    }
+    assert_eq!(
+        states,
+        vec![
+            (4999, 4999, None),
+            (5000, 5000, None),
+            (5001, 5000, Some(5000)),
+            (5100, 5000, Some(5000)),
+            (5000, 5000, None),
+            (0, 0, None),
+        ]
+    );
+}
+
+#[gpui::test]
+fn only_a_limit_change_notifies_without_replacing_decorations(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = limit_model(DIAGNOSTICS_URI, cx);
+    change_markers(DIAGNOSTICS_URI, 5000, "test", false, cx);
+    let ids = decoration_ids(&model, cx);
+    let (marker_changes, _markers) = count_marker_changes(&model, cx);
+    let (limit_changes, _limits) = log_limit_changes(cx);
+
+    change_markers(DIAGNOSTICS_URI, 1, "overflow", false, cx);
+    change_markers(DIAGNOSTICS_URI, 2, "overflow", false, cx);
+    change_markers(DIAGNOSTICS_URI, 0, "overflow", false, cx);
+
+    assert_eq!(marker_changes.get(), 0);
+    assert_eq!(
+        limit_changes
+            .borrow()
+            .iter()
+            .map(|(resource, limit)| (resource.to_string(), limit.is_markers_truncated))
+            .collect::<Vec<_>>(),
+        vec![
+            (DIAGNOSTICS_URI.to_string(), Some(5000)),
+            (DIAGNOSTICS_URI.to_string(), None),
+        ]
+    );
+    assert_eq!(decoration_ids(&model, cx), ids);
+}
+
+#[gpui::test]
+fn source_truncation_is_reported_apart_from_the_decoration_limit(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = limit_model(DIAGNOSTICS_URI, cx);
+    change_markers(DIAGNOSTICS_URI, 5001, "test", false, cx);
+    let ids = decoration_ids(&model, cx);
+    let (marker_changes, _markers) = count_marker_changes(&model, cx);
+    let (limit_changes, _limits) = log_limit_changes(cx);
+
+    change_markers(DIAGNOSTICS_URI, 1, "truncated", true, cx);
+    let truncated_ids = decoration_ids(&model, cx);
+    change_markers(DIAGNOSTICS_URI, 1, "truncated", false, cx);
+    let restored_ids = decoration_ids(&model, cx);
+    change_markers(DIAGNOSTICS_URI, 0, "test", false, cx);
+    change_markers(DIAGNOSTICS_URI, 1, "truncated", true, cx);
+
+    let limit = |source, truncated| MarkerLimit {
+        is_markers_source_truncated: source,
+        is_markers_truncated: truncated,
+    };
+    assert_eq!(
+        limit_changes
+            .borrow()
+            .iter()
+            .map(|(_, limit)| *limit)
+            .collect::<Vec<_>>(),
+        vec![
+            limit(true, Some(5000)),
+            limit(false, Some(5000)),
+            limit(false, None),
+            limit(true, None),
+        ]
+    );
+    // Removing the 5001 markers, then replacing the truncated owner's one.
+    assert_eq!(marker_changes.get(), 2);
+    // Over the limit, the truncated owner's marker isn't decorated: the
+    // decorations stay as they were.
+    assert_eq!(truncated_ids, ids);
+    assert_eq!(restored_ids, ids);
+}
+
+#[gpui::test]
+fn limits_are_kept_apart_for_uris_with_the_same_path(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let remote = "vscode-remote://first/diagnostics.txt";
+    let other_remote = "vscode-remote://second/diagnostics.txt";
+    let _models = [DIAGNOSTICS_URI, remote, other_remote].map(|uri| limit_model(uri, cx));
+    change_markers(DIAGNOSTICS_URI, 5001, "test", false, cx);
+    change_markers(remote, 5000, "test", false, cx);
+    change_markers(other_remote, 5100, "test", false, cx);
+    assert_eq!(
+        [DIAGNOSTICS_URI, remote, other_remote].map(|uri| limited(uri, cx)),
+        [Some(5000), None, Some(5000)]
+    );
+}
+
+#[gpui::test]
+fn the_limit_goes_with_the_model_and_comes_back_with_the_next(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = limit_model(DIAGNOSTICS_URI, cx);
+    change_markers(DIAGNOSTICS_URI, 5001, "test", false, cx);
+    assert_eq!(limited(DIAGNOSTICS_URI, cx), Some(5000));
+    drop(model);
+    cx.update(|_| {});
+    cx.run_until_parked();
+    assert_eq!(
+        cx.read(|cx| gpui_monaco::marker_limits(cx, DIAGNOSTICS_URI)),
+        None
+    );
+
+    let reopened = limit_model(DIAGNOSTICS_URI, cx);
+    assert_eq!(limited(DIAGNOSTICS_URI, cx), Some(5000));
+    assert_eq!(live_markers(&reopened, cx), 5000);
+}
+
+/// Monaco's "initializes limits for existing models and diagnostics": a
+/// new `MarkerDecorationsService` picks up the models; here a model made
+/// before `init` is picked up when registered.
+#[gpui::test]
+fn a_model_registered_later_gets_its_limit(cx: &mut TestAppContext) {
+    let model = limit_model(DIAGNOSTICS_URI, cx);
+    change_markers(DIAGNOSTICS_URI, 5001, "test", false, cx);
+    assert_eq!(
+        cx.read(|cx| gpui_monaco::marker_limits(cx, DIAGNOSTICS_URI)),
+        None
+    );
+    assert_eq!(live_markers(&model, cx), 0);
+
+    cx.update(|cx| gpui_monaco::register_model(cx, &model));
+    assert_eq!(limited(DIAGNOSTICS_URI, cx), Some(5000));
+    assert_eq!(live_markers(&model, cx), 5000);
+}
+
+/// A model's own markers can be truncated at their source too, and the
+/// limit event comes once per update, only when the limit changed by its
+/// end.
+#[gpui::test]
+fn a_models_markers_can_be_truncated_at_their_source(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let model = cx.new(|_| TextModel::new("let value = 1;\n").with_uri("file:///main.rs"));
+    let (limit_changes, _limits) = log_limit_changes(cx);
+    let truncated = MarkerChangeOptions { is_truncated: true };
+    let set = |owner: &'static str, options, cx: &mut TestAppContext| {
+        model.update(cx, |m, cx| {
+            m.set_markers_with_options(
+                owner,
+                vec![marker(MarkerSeverity::Error, at(0, 4)..at(0, 9))],
+                options,
+                cx,
+            )
+        })
+    };
+    set("lsp", truncated, cx);
+    cx.run_until_parked();
+    assert!(model.read_with(cx, |m, _| m.marker_limit().is_markers_source_truncated));
+    assert!(cx.read(|cx| gpui_monaco::is_source_truncated(cx, "file:///main.rs")));
+    assert_eq!(limit_changes.borrow().len(), 1);
+
+    // Truncated again, by another owner: no change.
+    set("other", truncated, cx);
+    cx.run_until_parked();
+    assert_eq!(limit_changes.borrow().len(), 1);
+
+    // Cleared and truncated again in one update: no change by its end.
+    cx.update(|cx| {
+        gpui_monaco::remove_all_markers(cx, "lsp");
+        gpui_monaco::remove_all_markers(cx, "other");
+        model.update(cx, |m, cx| {
+            m.set_markers_with_options(
+                "lsp",
+                vec![marker(MarkerSeverity::Error, at(0, 4)..at(0, 9))],
+                truncated,
+                cx,
+            )
+        });
+    });
+    cx.run_until_parked();
+    assert_eq!(limit_changes.borrow().len(), 1);
+
+    // Set again without it: the source is whole.
+    set("lsp", MarkerChangeOptions::default(), cx);
+    cx.run_until_parked();
+    assert!(!cx.read(|cx| gpui_monaco::is_source_truncated(cx, "file:///main.rs")));
+    assert_eq!(
+        limit_changes
+            .borrow()
+            .iter()
+            .map(|(_, limit)| limit.is_markers_source_truncated)
+            .collect::<Vec<_>>(),
+        vec![true, false]
+    );
 }
 
 fn hover_markers(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<Marker> {
