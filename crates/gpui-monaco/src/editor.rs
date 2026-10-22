@@ -4728,7 +4728,7 @@ impl CodeEditor {
         // Monaco `onWillPaste`, before anything handles it.
         let metadata = Self::clipboard_metadata(&item);
         cx.emit(CodeEditorEvent::WillPaste(ClipboardPasteEvent {
-            text: item.text().unwrap_or_default(),
+            text: crate::drop_paste::pasted_text(&item).unwrap_or_default(),
             is_from_empty_selection: metadata
                 .as_ref()
                 .is_some_and(|meta| meta.is_from_empty_selection),
@@ -4792,7 +4792,7 @@ impl CodeEditor {
     }
 
     fn paste_clipboard_item(&mut self, item: ClipboardItem, cx: &mut Context<Self>) {
-        let Some(mut text) = item.text() else {
+        let Some(mut text) = crate::drop_paste::pasted_text(&item) else {
             return;
         };
         if self.options.single_line {

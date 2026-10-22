@@ -211,6 +211,64 @@ fn pasting_copied_files_inserts_their_paths(cx: &mut TestAppContext) {
     assert_eq!(text(&editor, cx), "/tmp/a.txt");
 }
 
+/// Monaco `clipboardUtils.test.ts`, `pasting files copied in a file manager
+/// generates text from their paths`: a paste of a clipboard with only files
+/// (as after a copy in Windows' File Explorer) has their paths, one per line,
+/// as its `onWillPaste` text, and the editor's own paste (`pasteAs` off)
+/// inserts that. With `pasteAs` on, Monaco's uri-list provider (`PathProvider`)
+/// inserts them separated by spaces. A clipboard with text as well (macOS'
+/// Finder adds the files' names) pastes the text.
+#[gpui::test]
+fn pasting_copied_files_inserts_one_path_per_line(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("", cx);
+    let will_paste = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+    let _subscription = cx.update(|_, cx| {
+        let will_paste = will_paste.clone();
+        cx.subscribe(
+            &editor,
+            move |_, event: &gpui_monaco::CodeEditorEvent, _| {
+                if let gpui_monaco::CodeEditorEvent::WillPaste(e) = event {
+                    will_paste.borrow_mut().push(e.text.clone());
+                }
+            },
+        )
+    });
+    let files = || {
+        gpui::ClipboardEntry::ExternalPaths(gpui::ExternalPaths(
+            vec![
+                PathBuf::from("/home/john/Downloads/example.txt"),
+                PathBuf::from("/home/john/Downloads/my folder/notes #1.md"),
+            ]
+            .into(),
+        ))
+    };
+    let paths = "/home/john/Downloads/example.txt\n/home/john/Downloads/my folder/notes #1.md";
+    let paste = |item: ClipboardItem, cx: &mut VisualTestContext| {
+        editor.update(cx, |e, cx| e.set_value("", cx));
+        cx.write_to_clipboard(item);
+        cx.dispatch_action(Paste);
+        paint(cx);
+        text(&editor, cx)
+    };
+    assert_eq!(
+        paste(ClipboardItem::from(files()), cx),
+        "/home/john/Downloads/example.txt /home/john/Downloads/my folder/notes #1.md"
+    );
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.paste_as.enabled = false, cx)
+    });
+    assert_eq!(paste(ClipboardItem::from(files()), cx), paths);
+    let names = "example.txt\nnotes #1.md";
+    let with_names = ClipboardItem {
+        entries: vec![
+            files(),
+            gpui::ClipboardEntry::String(gpui::ClipboardString::new(names.into())),
+        ],
+    };
+    assert_eq!(paste(with_names, cx), names);
+    assert_eq!(*will_paste.borrow(), [paths, paths, names]);
+}
+
 #[gpui::test]
 fn middle_click(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, point, px};
