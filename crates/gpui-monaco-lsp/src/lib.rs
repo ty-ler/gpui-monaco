@@ -31,6 +31,7 @@ mod client;
 pub mod convert;
 mod features;
 pub mod rpc;
+mod workspace_symbols;
 
 #[cfg(test)]
 mod tests;
@@ -38,3 +39,4 @@ mod tests;
 pub use client::{LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions};
 pub use lsp_types;
 pub use rpc::Connection;
+pub use workspace_symbols::WorkspaceSymbol;
