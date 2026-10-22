@@ -390,10 +390,8 @@ impl CodeEditor {
             context,
             "editorSelectionHasDiagnostics",
             model.has_markers()
-                && model.markers().iter().any(|marker| {
+                && model.has_marker_intersecting(primary.start()..primary.end(), |marker| {
                     marker.severity != crate::MarkerSeverity::Hint
-                        && marker.range.start < primary.end()
-                        && primary.start() < marker.range.end
                 }),
         );
 

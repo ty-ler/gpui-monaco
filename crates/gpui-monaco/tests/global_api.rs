@@ -304,6 +304,40 @@ fn markers_change_one_and_all_clear(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn diagnostic_truncation_is_tracked_per_uri_across_owners(cx: &mut TestAppContext) {
+    let (_, cx) = setup("", cx);
+    let resource = "file:///path/file.ts";
+    let other = "file:///path/other.ts";
+    let truncated = gpui_monaco::MarkerChangeOptions { is_truncated: true };
+    cx.update(|_, cx| {
+        gpui_monaco::set_markers_for_uri_with_options(
+            cx,
+            "first",
+            resource,
+            vec![marker("a")],
+            truncated,
+        );
+        gpui_monaco::set_markers_for_uri(cx, "second", resource, vec![marker("b")]);
+        gpui_monaco::set_markers_for_uri(cx, "first", resource, vec![marker("c")]);
+        gpui_monaco::set_markers_for_uri_with_options(
+            cx,
+            "first",
+            other,
+            vec![marker("d")],
+            truncated,
+        );
+    });
+    let truncation = |cx: &mut VisualTestContext| {
+        cx.update(|_, cx| [resource, other].map(|uri| gpui_monaco::is_source_truncated(cx, uri)))
+    };
+    let before_clear = truncation(cx);
+    // Monaco `changeAll(owner, [])`.
+    cx.update(|_, cx| gpui_monaco::remove_all_markers(cx, "first"));
+    assert_eq!(before_clear, [false, true]);
+    assert_eq!(truncation(cx), [false, false]);
+}
+
+#[gpui::test]
 fn removing_all_markers_sends_one_event(cx: &mut TestAppContext) {
     let (_, cx) = setup("", cx);
     let first = model_with_uri("file:///c/path", cx);

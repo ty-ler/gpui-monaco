@@ -44,7 +44,7 @@ Marker ranges follow edits. `model.markers()` returns the current ranges, sorted
 - An empty range covers the word at its position. On an empty line or after the line's last non-whitespace character it stays empty and is drawn one character wide.
 - A whole-line marker, from column 0 to `u32::MAX` (Monaco's `Number.MAX_VALUE`), starts at the line's first non-whitespace character.
 - Markers without a message are dropped, and an end before the start moves to the start's line.
-- Only the first 500 markers of a model are drawn (`MAX_DECORATED_MARKERS`).
+- Only the first 5000 markers of a model's uri are drawn (`MAX_DECORATED_MARKERS`, Monaco's `MAX_MARKER_DECORATIONS_LIMIT`). The model's [marker limit](#marker-limits) says when there are more.
 
 ## Markers across models
 
@@ -72,6 +72,36 @@ gpui_monaco::on_did_change_markers(cx, |uris, cx| refresh_problems_panel(uris, c
 Unlike `model.markers()`, `model_markers` returns markers as they were set, as Monaco's marker service does. Changes made in one update arrive as one event, each uri once (Monaco debounces it).
 
 As in Monaco, markers belong to the uri rather than the model. A model without a uri has Monaco's `inmemory://model/N` as its `resource()`, so its markers are reported and filtered like any other's. When a model is released, its markers stay for the next model with that uri, unless the uri is `inmemory:`, `internal:` or `vscode:`.
+
+## Marker limits
+
+A model tells whether it shows all of its uri's markers (Monaco's `getMarkerLimits`), so the host can say so, e.g. in a status bar:
+
+```rust,ignore
+use gpui_monaco::{MarkerChangeOptions, MarkerLimit};
+
+// The linter sent only part of its diagnostics (Monaco `changeOne`'s `isTruncated`).
+gpui_monaco::set_markers_for_uri_with_options(
+    cx,
+    "my-linter",
+    uri,
+    markers,
+    MarkerChangeOptions { is_truncated: true },
+);
+
+// Monaco `onDidChangeMarkerLimit`.
+gpui_monaco::on_did_change_marker_limit(cx, |model, cx| {
+    let MarkerLimit { is_markers_source_truncated, is_markers_truncated } =
+        model.read(cx).marker_limit();
+    update_problems_status(is_markers_source_truncated, is_markers_truncated, cx);
+})
+.detach();
+```
+
+- `is_markers_source_truncated`: an owner's markers of the uri were set with `is_truncated` (`set_markers_for_uri_with_options` or `model.set_markers_with_options`). It holds until the owner sets them again without it or they're removed. `is_source_truncated(cx, uri)` asks the marker service, with or without a model. The LSP bridge never sets it, as LSP diagnostics have no such flag.
+- `is_markers_truncated`: `Some(5000)` when the uri has more than 5000 markers, so only the first 5000 are drawn; `None` otherwise. `model_markers` still has them all.
+
+`marker_limits(cx, uri)` is the limit of the live model with the uri, `None` without one. The event comes after the update that changed a model's limit, once per model, and not when the limit ends the update as it began.
 
 ## Navigation
 

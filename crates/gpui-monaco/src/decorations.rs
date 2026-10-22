@@ -613,7 +613,15 @@ pub struct DecorationSet {
     /// Whether a glyph picks its glyph margin lane, computed when asked
     /// after a change.
     has_glyph_lanes: std::cell::Cell<Option<bool>>,
+    /// Each decoration's position in `decorations`, built when a lookup by
+    /// id needs it and dropped when decorations are added, removed or
+    /// reordered (see [`DecorationSet::get`]).
+    index: std::cell::OnceCell<std::collections::HashMap<DecorationId, usize>>,
 }
+
+/// How many decorations [`DecorationSet::get`] scans before it looks ids up
+/// in an index instead.
+const INDEX_THRESHOLD: usize = 32;
 
 impl DecorationSet {
     /// The number of decorations, for all editors.
@@ -702,8 +710,16 @@ impl DecorationSet {
     ) -> Vec<DecorationId> {
         if !old.is_empty() {
             let mut removed = Vec::new();
+            // Replacing many decorations (thousands of markers) would be
+            // quadratic with a scan of `old` per decoration.
+            let old_set: Option<std::collections::HashSet<DecorationId>> =
+                (old.len() > INDEX_THRESHOLD).then(|| old.iter().copied().collect());
+            let is_old = |id: &DecorationId| match &old_set {
+                Some(set) => set.contains(id),
+                None => old.contains(id),
+            };
             self.decorations.retain(|d| {
-                let keep = !old.contains(&d.id);
+                let keep = !is_old(&d.id);
                 if !keep && d.options.has_injected_text() {
                     removed.push(d.range.clone());
                 }
@@ -731,13 +747,14 @@ impl DecorationSet {
         self.sorted = false;
         self.version += 1;
         self.has_glyph_lanes.set(None);
+        self.index.take();
         ids
     }
 
     /// Replaces the options of decoration `id`, keeping its range and id
     /// (Monaco `changeDecorationOptions`). Returns whether it exists.
     pub fn change_options(&mut self, id: DecorationId, options: DecorationOptions) -> bool {
-        match self.decorations.iter().position(|d| d.id == id) {
+        match self.position(id) {
             Some(ix) => {
                 let old = std::mem::replace(&mut self.decorations[ix].options, Arc::new(options));
                 let new = self.decorations[ix].options.clone();
@@ -765,6 +782,7 @@ impl DecorationSet {
                 change.with(&d.options)
             });
         self.decorations.clear();
+        self.index.take();
         self.max_len = 0;
         self.version += 1;
         if self.injected_text_count > 0 {
@@ -804,6 +822,7 @@ impl DecorationSet {
         }
         if change.is_some() {
             self.version += 1;
+            self.index.take();
         }
         change
     }
@@ -815,13 +834,38 @@ impl DecorationSet {
 
     /// The decoration with `id`, if it still exists.
     pub fn get(&self, id: DecorationId) -> Option<&Decoration> {
-        self.decorations.iter().find(|d| d.id == id)
+        self.position(id).map(|ix| &self.decorations[ix])
+    }
+
+    /// Where the decoration with `id` is in `decorations`: a scan of a few,
+    /// and otherwise an index of all of them, kept until they're added,
+    /// removed or reordered, so looking up each of thousands of markers'
+    /// decorations isn't quadratic.
+    fn position(&self, id: DecorationId) -> Option<usize> {
+        if self.decorations.len() <= INDEX_THRESHOLD {
+            return self.decorations.iter().position(|d| d.id == id);
+        }
+        self.index
+            .get_or_init(|| {
+                self.decorations
+                    .iter()
+                    .enumerate()
+                    .map(|(ix, d)| (d.id, ix))
+                    .collect()
+            })
+            .get(&id)
+            .copied()
     }
 
     fn ensure_sorted(&mut self) {
         if !self.sorted {
-            self.decorations
-                .sort_by_key(|d| (d.range.start, d.range.end, d.id));
+            let key = |d: &Decoration| (d.range.start, d.range.end, d.id);
+            // Edits mostly shift decorations without reordering them; the
+            // index stays valid then.
+            if !self.decorations.is_sorted_by_key(key) {
+                self.decorations.sort_by_key(key);
+                self.index.take();
+            }
             self.sorted = true;
         }
     }
@@ -1557,5 +1601,75 @@ mod tests {
         set.delta(None, &[], [(0..1, DecorationOptions::default())]);
         assert_eq!(set.in_range(0..1, Some(editor)).len(), 2);
         assert_eq!(set.in_range(0..1, None).len(), 1);
+    }
+
+    /// Looking decorations up by id among many (an index past
+    /// `INDEX_THRESHOLD`) finds each after it's added, after edits, sorting,
+    /// removals and option changes, and nothing for removed ids.
+    #[test]
+    fn lookups_by_id_among_many_decorations() {
+        let count = INDEX_THRESHOLD * 4;
+        let text = "x".repeat(count * 2);
+        let mut buffer = Buffer::new(&text);
+        let mut set = DecorationSet::default();
+        let editor = EntityId::from(7u64);
+        // Added out of order, so sorting reorders them.
+        let mut ids = set.delta(
+            None,
+            &[],
+            (0..count).rev().map(|i| {
+                (
+                    i * 2..i * 2 + 1,
+                    with_stickiness(Stickiness::NeverGrowsWhenTypingAtEdges),
+                )
+            }),
+        );
+        ids.reverse();
+        let check = |set: &DecorationSet, ids: &[DecorationId], shift: usize| {
+            for (i, id) in ids.iter().enumerate() {
+                let start = i * 2 + shift;
+                assert_eq!(
+                    set.get(*id).map(|d| d.range.clone()),
+                    Some(start..start + 1)
+                );
+            }
+        };
+        check(&set, &ids, 0);
+        // Sorting reorders the decorations.
+        assert_eq!(set.in_range(0..1, None).len(), 1);
+        check(&set, &ids, 0);
+        // An edit before them all shifts them without reordering.
+        edit(&mut buffer, &mut set, &[(0..0, "ab")], &[]);
+        assert_eq!(set.in_range(2..3, None).len(), 1);
+        check(&set, &ids, 2);
+        // Removing many and adding one.
+        let removed: Vec<DecorationId> = ids.drain(..count / 2).collect();
+        let owned = set.delta(
+            Some(editor),
+            &removed,
+            [(0..1, DecorationOptions::default())],
+        );
+        assert!(removed.iter().all(|id| set.get(*id).is_none()));
+        assert_eq!(set.get(owned[0]).map(|d| d.range.clone()), Some(0..1));
+        for (i, id) in ids.iter().enumerate() {
+            let start = (i + count / 2) * 2 + 2;
+            assert_eq!(
+                set.get(*id).map(|d| d.range.clone()),
+                Some(start..start + 1)
+            );
+        }
+        // Changing options keeps the place.
+        let options = DecorationOptions {
+            z_index: 3,
+            ..with_stickiness(Stickiness::NeverGrowsWhenTypingAtEdges)
+        };
+        assert!(set.change_options(ids[0], options));
+        assert_eq!(set.get(ids[0]).unwrap().options.z_index, 3);
+        // Removing an editor's decorations.
+        assert!(set.remove_owned_by(editor).is_some());
+        assert!(set.get(owned[0]).is_none());
+        assert!(set.get(ids[1]).is_some());
+        assert!(set.clear().is_some());
+        assert!(ids.iter().all(|id| set.get(*id).is_none()));
     }
 }
