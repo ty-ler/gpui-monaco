@@ -29,7 +29,7 @@ use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor;
 use crate::decorations::GlyphMarginLane;
 use crate::editor::CodeEditor;
-use crate::markdown::{MarkdownStyle, render_markdown};
+use crate::markdown::MarkdownStyle;
 use crate::options::{HoverEnabled, MultiCursorModifier};
 use crate::providers::{
     Hover, HoverContext, HoverProvider, HoverVerbosityRequest, MarkdownString, hover_providers,
@@ -1222,9 +1222,26 @@ impl HoverWidget {
             .gap(px(8.))
             .px(px(8.))
             .py(px(4.));
+        // The contents' text is selected across them, as in Monaco's DOM.
+        let blocks = crate::selectable_text::Blocks::default();
+        let mut columns = div().flex().flex_col().gap(px(8.));
         for content in &part.contents {
-            contents = contents.child(render_markdown(content, &self.style, &self.theme, cx));
+            columns = columns.child(crate::markdown::render_markdown_column(
+                content,
+                &self.style,
+                &self.theme,
+                None,
+                &blocks,
+                cx,
+            ));
         }
+        let all: String = part.contents.iter().map(|c| c.value.as_ref()).collect();
+        contents = contents.child(crate::selectable_text::SelectionRoot::new(
+            crate::markdown::selection_id(&all),
+            columns.into_any_element(),
+            blocks,
+            self.theme.colors.selection_background,
+        ));
         if part.long_line_warning {
             let editor = self.editor.clone();
             contents = contents.child(
