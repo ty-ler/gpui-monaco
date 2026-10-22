@@ -1450,24 +1450,64 @@ async fn collect_edits(tasks: EditTasks) -> Vec<ProvidedEdit> {
 /// files.
 pub(crate) fn clipboard_data(item: &gpui::ClipboardItem) -> DataTransfer {
     let mut data = DataTransfer::default();
-    if let Some(text) = item.text() {
+    if let Some(text) = clipboard_string(item) {
         data.insert(TEXT_PLAIN, DataTransferItem::Text(text));
     }
     // Copied files, as Monaco's clipboard `files` and uri-list.
-    let paths: Vec<PathBuf> = item
+    let paths = clipboard_paths(item);
+    if !paths.is_empty() {
+        data.insert(URI_LIST, DataTransferItem::Text(uri_list(&paths)));
+        data.insert(FILES, DataTransferItem::Files(paths));
+    }
+    data
+}
+
+/// The clipboard's text, from its string entries only: GPUI's
+/// `ClipboardItem::text` falls back to copied files' paths, run together.
+fn clipboard_string(item: &gpui::ClipboardItem) -> Option<String> {
+    let text: String = item
         .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            gpui::ClipboardEntry::String(string) => Some(string.text().as_str()),
+            _ => None,
+        })
+        .collect();
+    (!text.is_empty()).then_some(text)
+}
+
+/// The paths of files copied to the clipboard (in a file manager).
+fn clipboard_paths(item: &gpui::ClipboardItem) -> Vec<PathBuf> {
+    item.entries()
         .iter()
         .filter_map(|entry| match entry {
             gpui::ClipboardEntry::ExternalPaths(paths) => Some(paths.paths().to_vec()),
             _ => None,
         })
         .flatten()
-        .collect();
-    if !paths.is_empty() {
-        data.insert(URI_LIST, DataTransferItem::Text(uri_list(&paths)));
-        data.insert(FILES, DataTransferItem::Files(paths));
+        .collect()
+}
+
+/// The text a paste inserts (Monaco `ClipboardEventUtils.getTextData`):
+/// the clipboard's text. Without text or editor metadata but with copied
+/// files, it's their paths, one per line (microsoft/vscode#342695), as
+/// after a copy in Windows' File Explorer, which puts only the files on
+/// the clipboard.
+pub(crate) fn pasted_text(item: &gpui::ClipboardItem) -> Option<String> {
+    if let Some(text) = clipboard_string(item) {
+        return Some(text);
     }
-    data
+    if CodeEditor::clipboard_metadata(item).is_some() {
+        return None;
+    }
+    let paths = clipboard_paths(item);
+    (!paths.is_empty()).then(|| {
+        paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    })
 }
 
 #[cfg(test)]
