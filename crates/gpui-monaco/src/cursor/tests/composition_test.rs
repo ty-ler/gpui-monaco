@@ -4,7 +4,7 @@
 //! and ending it runs `compositionEndWithInterceptors`.
 
 use super::harness::{TestEditor, sel};
-use super::language_configs::auto_closing_language;
+use super::language_configs::{auto_closing_before_text_fallback_language, auto_closing_language};
 
 fn using_cursor(text: &[&str]) -> TestEditor {
     TestEditor::lines(text).with_language(auto_closing_language())
@@ -154,6 +154,20 @@ fn issue_82701_auto_close_does_not_execute_when_ime_is_canceled_via_backspace() 
     ed.composition_type("", 1, 0, 0);
     ed.end_composition();
     assert_eq!(ed.value(), "{}");
+}
+
+/// Monaco `autoClosingPairs - beforeText falls back to a shorter pair after
+/// composition`.
+#[test]
+fn auto_closing_pairs_before_text_falls_back_to_a_shorter_pair_after_composition() {
+    let mut ed = TestEditor::lines(&["prefixbegi"])
+        .with_language(auto_closing_before_text_fallback_language());
+    ed.set_selections(&[sel(1, 11, 1, 11)]);
+    ed.start_composition();
+    ed.type_keyboard("n");
+    ed.composition_type("n", 1, 0, 0);
+    ed.end_composition();
+    assert_eq!(ed.value(), "prefixbegin]");
 }
 
 /// Typing an opening bracket during a composition doesn't auto-close it

@@ -152,20 +152,31 @@ pub(crate) fn is_quote(ch: &str) -> bool {
 pub(crate) struct AutoClosingPair {
     pub open: String,
     pub close: String,
+    pub before_text: Option<Pattern>,
     in_string: bool,
     in_comment: bool,
     in_regex: bool,
 }
 
 impl AutoClosingPair {
-    fn new(open: &str, close: &str, not_in: &[NotIn]) -> Self {
+    fn new(open: &str, close: &str, not_in: &[NotIn], before_text: Option<&Pattern>) -> Self {
         Self {
             open: open.to_string(),
             close: close.to_string(),
+            before_text: before_text.cloned(),
             in_string: !not_in.contains(&NotIn::String),
             in_comment: !not_in.contains(&NotIn::Comment),
             in_regex: !not_in.contains(&NotIn::Regex),
         }
+    }
+
+    /// Monaco `shouldAutoCloseBefore`: whether `text`, the line's text
+    /// before the cursor ending with the typed opening text, matches
+    /// [`Self::before_text`]; always without one.
+    pub fn should_auto_close_before(&self, text: &str) -> bool {
+        self.before_text
+            .as_ref()
+            .is_none_or(|before_text| before_text.is_match(text))
     }
 
     pub fn open_len(&self) -> u32 {
@@ -330,15 +341,19 @@ impl<'a> LanguageSupport<'a> {
             .map_or(ctx.config, |language| &language.config);
         // Monaco `CharacterPairSupport`: `autoClosingPairs` when set (even
         // empty), else the brackets.
+        // A pair whose `beforeText` doesn't compile is left out, as VS Code's
+        // `LanguageConfigurationFileHandler._extractValidAutoClosingPairs`
+        // does.
         let mut auto_closing_pairs: Vec<AutoClosingPair> = match &config.auto_closing_pairs {
             Some(pairs) => pairs
                 .iter()
-                .map(|p| AutoClosingPair::new(&p.open, &p.close, &p.not_in))
+                .filter(|p| p.before_text.as_ref().is_none_or(|b| b.regex().is_some()))
+                .map(|p| AutoClosingPair::new(&p.open, &p.close, &p.not_in, p.before_text.as_ref()))
                 .collect(),
             None => config
                 .brackets()
                 .iter()
-                .map(|(open, close)| AutoClosingPair::new(open, close, &[]))
+                .map(|(open, close)| AutoClosingPair::new(open, close, &[], None))
                 .collect(),
         };
         // The deprecated `__electricCharacterSupport.docComment` closes too.
@@ -351,6 +366,7 @@ impl<'a> LanguageSupport<'a> {
                 &doc.open,
                 doc.close.as_deref().unwrap_or_default(),
                 &[],
+                None,
             ));
         }
         let surrounding_pairs = match &config.surrounding_pairs {

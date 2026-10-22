@@ -45,7 +45,7 @@ Issues are linked by number.
 | Paste as, Linux primary selection, reindent on paste | `clipboard`, `dropOrPasteInto`, `autoIndentOnPaste` | ✅ | #107 |
 | Copy with syntax highlighting | `copyWithSyntaxHighlighting` | ❌ (GPUI's clipboard has no HTML) | #107 |
 | Undo/redo with grouping, cursor restore (also in the focused editor for `model.undo()` from outside, `Cursor.onModelContentChanged`) | model | ✅ | #422 |
-| Auto-closing, overtype, auto-surround, also for IME and dead-key commits (`compositionEndWithInterceptors`) and closing characters inserted by snippets; auto-closed characters tracked through undo and edits from elsewhere | `cursor` | ✅ | #331 |
+| Auto-closing, overtype, auto-surround, also for IME and dead-key commits (`compositionEndWithInterceptors`) and closing characters inserted by snippets; auto-closed characters tracked through undo and edits from elsewhere; pairs' `beforeText` condition, falling back to a shorter pair | `cursor` | ✅ | #331, #534 |
 | Auto-indent (`onEnterRules`, `indentationRules`, electric characters), by the language at the cursor in embedded languages (scoped to its part of the line, mixed lines left alone, inherited indentation stopping at a language boundary), doc comment alignment when indenting and outdenting (`ShiftCommand`) | `indentation`, `shiftCommand`, `enterAction`, `autoIndent`, `indentationLineProcessor` | ✅ | #331, #481 |
 | Reindent lines | `indentation` | ✅ | #80 |
 | Indentation detection and conversion commands, tab size pickers starting on the current size | `indentation` | ✅ | #197, #328 |
