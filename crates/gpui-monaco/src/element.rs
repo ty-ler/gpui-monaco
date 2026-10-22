@@ -601,6 +601,38 @@ fn run(len: usize, font: &Font, color: Hsla) -> TextRun {
     }
 }
 
+/// Gives each run of only spaces a neighboring run's color, where that's
+/// all that tells them apart, so GPUI shapes them as one font run (it
+/// starts a new one, with its own sized font, at every color change).
+/// Spaces paint nothing, so this doesn't change how the line looks; runs
+/// with an underline, strikethrough or background keep their color.
+fn color_blank_runs_like_neighbors(display: &str, runs: &mut [TextRun]) {
+    let plain = |run: &TextRun| {
+        run.underline.is_none() && run.strikethrough.is_none() && run.background_color.is_none()
+    };
+    let mut start = 0;
+    for ix in 0..runs.len() {
+        let end = start + runs[ix].len;
+        let blank = display
+            .get(start..end)
+            .is_some_and(|text| !text.is_empty() && text.bytes().all(|b| b == b' '));
+        start = end;
+        if !blank || !plain(&runs[ix]) {
+            continue;
+        }
+        let like = |other: &TextRun| plain(other) && other.font == runs[ix].font;
+        let color = ix
+            .checked_sub(1)
+            .map(|prev| &runs[prev])
+            .filter(|prev| like(prev))
+            .or_else(|| runs.get(ix + 1).filter(|next| like(next)))
+            .map(|neighbor| neighbor.color);
+        if let Some(color) = color {
+            runs[ix].color = color;
+        }
+    }
+}
+
 /// Monaco `isControlCharacter` (`viewLineRenderer.ts`): C0 controls other
 /// than tab, DEL, and the Unicode directional formatting characters (LRE,
 /// RLE, PDF, LRO, RLO, LRI, RLI, FSI, PDI, LRM, RLM and ALM).
@@ -1505,6 +1537,7 @@ pub(crate) fn layout_segment<'a>(
         }
         runs.push(text_run);
     }
+    color_blank_runs_like_neighbors(&display, &mut runs);
     // Injected text in its own font size, or with room around it, is
     // shaped on its own.
     // An injected text's box, less its sides where it wraps.
@@ -10247,5 +10280,70 @@ mod shape_chunk_tests {
         let after = chunks(&long[..long.len() - 7]);
         let kept = after.iter().filter(|c| before.contains(c)).count();
         assert_eq!(kept + 1, after.len());
+    }
+}
+
+#[cfg(test)]
+mod blank_run_tests {
+    use super::{color_blank_runs_like_neighbors, run};
+    use gpui::{FontWeight, Hsla, UnderlineStyle, font, hsla, px};
+
+    fn colors(runs: &[gpui::TextRun]) -> Vec<Hsla> {
+        runs.iter().map(|run| run.color).collect()
+    }
+
+    #[test]
+    fn spaces_take_a_neighbors_color() {
+        let font = font("Menlo");
+        let (keyword, plain, name) = (
+            hsla(0.6, 1., 0.5, 1.),
+            hsla(0., 0., 0.8, 1.),
+            hsla(0.1, 1., 0.5, 1.),
+        );
+        // "    let x = 1;": indent, `let`, ` `, `x`, ` = 1;`.
+        let display = "    let x = 1;";
+        let mut runs = vec![
+            run(4, &font, plain),
+            run(3, &font, keyword),
+            run(1, &font, plain),
+            run(1, &font, name),
+            run(5, &font, plain),
+        ];
+        color_blank_runs_like_neighbors(display, &mut runs);
+        // The indent takes the next run's color, the space the previous
+        // one's; runs with text keep theirs.
+        assert_eq!(colors(&runs), [keyword, keyword, keyword, name, plain]);
+    }
+
+    #[test]
+    fn spaces_keep_their_color_where_it_shows_or_fonts_differ() {
+        let font = font("Menlo");
+        let bold = gpui::Font {
+            weight: FontWeight::BOLD,
+            ..font.clone()
+        };
+        let (a, b, c) = (
+            hsla(0.6, 1., 0.5, 1.),
+            hsla(0., 0., 0.8, 1.),
+            hsla(0.1, 1., 0.5, 1.),
+        );
+        let display = "a b c d";
+        let mut runs = vec![
+            run(1, &bold, a),
+            // Differs in font from both neighbors.
+            run(1, &font, b),
+            run(1, &bold, c),
+            // Underlined: its color shows.
+            run(1, &bold, b),
+            run(1, &bold, c),
+            run(2, &bold, a),
+        ];
+        runs[3].underline = Some(UnderlineStyle {
+            color: None,
+            thickness: px(1.),
+            wavy: false,
+        });
+        color_blank_runs_like_neighbors(display, &mut runs);
+        assert_eq!(colors(&runs), [a, b, c, b, c, a]);
     }
 }
