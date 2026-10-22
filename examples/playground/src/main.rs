@@ -135,8 +135,19 @@ fn start_language_server(
         };
         this.update(cx, |this, cx| {
             cx.subscribe(&client, |_, _, event: &LspClientEvent, _| {
-                if let LspClientEvent::ShowMessage { message, .. } = event {
-                    eprintln!("language server: {message}");
+                match event {
+                    LspClientEvent::ShowMessage { message, .. } => {
+                        eprintln!("language server: {message}");
+                    }
+                    // The playground has no prompt UI: dropping the
+                    // responder answers that the prompt was dismissed.
+                    LspClientEvent::ShowMessageRequest {
+                        message, actions, ..
+                    } => {
+                        let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
+                        eprintln!("language server: {message} {titles:?}");
+                    }
+                    LspClientEvent::Exited => {}
                 }
             })
             .detach();
