@@ -846,6 +846,11 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
         "workspace": {
             "applyEdit": true,
             "executeCommand": {},
+            "symbol": {
+                "symbolKind": { "valueSet": (1..=26).collect::<Vec<u32>>() },
+                "tagSupport": { "valueSet": [1] },
+                "resolveSupport": { "properties": ["location.range"] },
+            },
             "inlayHint": { "refreshSupport": true },
             "semanticTokens": { "refreshSupport": true },
             "codeLens": { "refreshSupport": true },

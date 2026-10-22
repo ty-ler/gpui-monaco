@@ -13,6 +13,8 @@ use crate::features::LspFeatures;
 use crate::rpc::read_message;
 use crate::{LspClient, LspClientEvent, LspClientOptions};
 
+mod workspace_symbols;
+
 /// Answers a request, or `None` to never answer it.
 type Handler = Box<dyn Fn(&str, &Value) -> Option<Value> + Send>;
 
@@ -102,6 +104,7 @@ fn capabilities() -> Value {
         "documentLinkProvider": { "resolveProvider": true },
         "colorProvider": true,
         "linkedEditingRangeProvider": true,
+        "workspaceSymbolProvider": { "resolveProvider": true },
     })
 }
 

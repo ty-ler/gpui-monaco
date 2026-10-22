@@ -83,6 +83,12 @@ The client also answers the requests a server sends:
 
 It emits `LspClientEvent::ShowMessage` for messages meant for the user, and `LspClientEvent::Exited` when the server stops.
 
+## Client APIs without editor UI
+
+Some server features have no editor UI in gpui-monaco, as in Monaco. `LspClient` has typed methods for them, so a host can build its own UI. Their results use the editor's types: positions are `PointUtf16`, kinds are `SymbolKind` and uris are normalized like `TextModel::resource()`. Each one returns nothing when the server doesn't support the feature or has stopped.
+
+- **Workspace symbols (`workspaceSymbolProvider`):** `workspace_symbols(query, cx)` sends `workspace/symbol` and returns `WorkspaceSymbol`s, from either flat `SymbolInformation` or `WorkspaceSymbol` results. A symbol whose `range` is `None` only names its document; `resolve_workspace_symbol(&symbol, cx)` sends `workspaceSymbol/resolve` to fill it in, as VS Code does before opening a symbol picked from "Go to Symbol in Workspace".
+
 ## Other transports and requests
 
 - **Other transports:** `LspClient::from_transport(reader, writer, options, cx)` connects over any async byte streams, such as a socket or an in-process server.
