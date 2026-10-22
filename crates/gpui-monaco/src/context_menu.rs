@@ -4,25 +4,30 @@
 //! that set a context menu group.
 //!
 //! Ports `contextmenu.ts` (MIT); the items and their groups and order come
-//! from the actions' `contextMenuOpts` and `MenuRegistry` entries.
+//! from the actions' `contextMenuOpts` and `MenuRegistry` entries. Items'
+//! alternatives under Alt port `menu.ts`'s `updateAlternativeAction` and
+//! `actions.ts`'s `getActionForAltMode` (MIT).
 
 use std::collections::BTreeMap;
 
 use gpui::{
     App, AppContext as _, Context, Entity, FocusHandle, FontWeight, InteractiveElement,
-    IntoElement, MouseButton, ParentElement, Pixels, Point, Render, Role, SharedString,
-    StatefulInteractiveElement, Styled, Task, WeakEntity, Window, div, px,
+    IntoElement, Modifiers, ModifiersChangedEvent, MouseButton, MouseUpEvent, ParentElement,
+    Pixels, Point, Render, Role, SharedString, StatefulInteractiveElement, Styled, Task,
+    WeakEntity, Window, div, px,
 };
 use text::PointUtf16;
 
 use crate::accessibility::AriaNode;
 use crate::actions::{
     ContextMenuFirst, ContextMenuHide, ContextMenuLast, ContextMenuNext, ContextMenuPrevious,
-    ContextMenuSelect, ContextMenuSubmenuClose, ContextMenuSubmenuOpen,
+    ContextMenuSelect, ContextMenuSelectAlternative, ContextMenuSubmenuClose,
+    ContextMenuSubmenuOpen,
 };
 use crate::codicons::{Codicon, icon as codicon};
 use crate::cursor::Selection;
 use crate::editor::CodeEditor;
+use crate::editor_actions::EditorActionDescriptor;
 use crate::keybinding_label::ui_text_width;
 use crate::options::LocationKind;
 use crate::providers::{Command, Location};
@@ -166,16 +171,54 @@ static PEEK_ITEMS: &[BuiltinItem] = &[
     BuiltinItem("peek", 6., "Peek References", "code_editor::PeekReferences", can_go_to_references),
 ];
 
+/// A menu item (Monaco's `IAction`): what it shows and what it runs.
+#[derive(Clone, Debug, PartialEq)]
+struct Item {
+    label: SharedString,
+    /// Its keybinding's label (Monaco `getKeyBinding(action)`).
+    keybinding: Option<SharedString>,
+    run: Run,
+    /// Monaco's `checked` actions (`menu-selection` before the label).
+    checked: bool,
+    /// Monaco `IAction.alt`: what the item shows and runs instead while
+    /// Alt (or Shift on Windows and Linux) is held. It's only set when the
+    /// alternative can run, and the menu only shows items that can run
+    /// (Monaco hides the others), so `getActionForAltMode`'s `enabled`
+    /// checks hold.
+    alt: Option<Box<Item>>,
+}
+
+impl Item {
+    fn new(label: SharedString, keybinding: Option<SharedString>, run: Run) -> Self {
+        Item {
+            label,
+            keybinding,
+            run,
+            checked: false,
+            alt: None,
+        }
+    }
+
+    /// Monaco `getActionForAltMode`: the alternative in alt mode, if the
+    /// item has one, else the item.
+    fn for_alt_mode(&self, alt_mode: bool) -> &Item {
+        match &self.alt {
+            Some(alt) if alt_mode => alt,
+            _ => self,
+        }
+    }
+}
+
+/// Whether `modifiers` show items' alternatives (Monaco
+/// `getActionForAltMode`): Alt, or Shift on Windows and Linux.
+fn is_alt_mode(modifiers: &Modifiers) -> bool {
+    modifiers.alt || (cfg!(any(target_os = "windows", target_os = "linux")) && modifiers.shift)
+}
+
 /// A row of the menu.
 #[derive(Clone, Debug, PartialEq)]
 enum Entry {
-    Item {
-        label: SharedString,
-        keybinding: Option<SharedString>,
-        run: Run,
-        /// Monaco's `checked` actions (`menu-selection` before the label).
-        checked: bool,
-    },
+    Item(Item),
     Submenu {
         label: SharedString,
         entries: Vec<Entry>,
@@ -186,18 +229,26 @@ enum Entry {
 impl Entry {
     fn label(&self) -> Option<&SharedString> {
         match self {
-            Entry::Item { label, .. } | Entry::Submenu { label, .. } => Some(label),
+            Entry::Item(Item { label, .. }) | Entry::Submenu { label, .. } => Some(label),
+            Entry::Separator => None,
+        }
+    }
+
+    /// What the row shows, in alt mode or not: its label, its keybinding
+    /// and whether it's checked (an item's alternative's in alt mode).
+    fn shown(&self, alt_mode: bool) -> Option<(&SharedString, Option<&SharedString>, bool)> {
+        match self {
+            Entry::Item(item) => {
+                let shown = item.for_alt_mode(alt_mode);
+                Some((&shown.label, shown.keybinding.as_ref(), shown.checked))
+            }
+            Entry::Submenu { label, .. } => Some((label, None, false)),
             Entry::Separator => None,
         }
     }
 
     fn item(label: SharedString, keybinding: Option<SharedString>, run: Run) -> Self {
-        Entry::Item {
-            label,
-            keybinding,
-            run,
-            checked: false,
-        }
+        Entry::Item(Item::new(label, keybinding, run))
     }
 }
 
@@ -243,6 +294,10 @@ pub struct ContextMenu {
     width: Pixels,
     /// The window's height: the list scrolls past it.
     max_height: Pixels,
+    /// Alt (or Shift on Windows and Linux) is held, so items show their
+    /// alternatives: Monaco's `ModifierKeyEmitter` key status, as it was
+    /// when the menu showed and after each modifier change.
+    alt_mode: bool,
 }
 
 /// Monaco's submenu `showDelayer`.
@@ -296,19 +351,38 @@ impl ContextMenu {
         }
     }
 
-    fn select(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let entry = match self.submenu {
+    /// The active row: the submenu's while one shows.
+    fn active_entry(&self) -> Option<&Entry> {
+        match self.submenu {
             Some((ix, Some(sub))) => match &self.entries[ix] {
-                Entry::Submenu { entries, .. } => entries.get(sub).cloned(),
+                Entry::Submenu { entries, .. } => entries.get(sub),
                 _ => None,
             },
             Some((_, None)) => None,
-            None => self.active.and_then(|ix| self.entries.get(ix).cloned()),
-        };
-        match entry {
-            Some(Entry::Item { run, .. }) => self.run(run, window, cx),
+            None => self.active.and_then(|ix| self.entries.get(ix)),
+        }
+    }
+
+    /// Runs the active item, its alternative in `alt_mode` (Monaco
+    /// `getActionToRun`), or opens its submenu.
+    fn select(&mut self, alt_mode: bool, window: &mut Window, cx: &mut Context<Self>) {
+        match self.active_entry() {
+            Some(Entry::Item(item)) => {
+                let run = item.for_alt_mode(alt_mode).run.clone();
+                self.run(run, window, cx);
+            }
             Some(Entry::Submenu { .. }) => self.open_submenu(cx),
             _ => {}
+        }
+    }
+
+    /// Enter or Space with Alt (or Shift on Windows and Linux): Monaco's
+    /// `isTriggerKeyEvent` takes them only on an item with an alternative,
+    /// and runs that.
+    fn select_alternative(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(Entry::Item(Item { alt: Some(alt), .. })) = self.active_entry() {
+            let run = alt.run.clone();
+            self.run(run, window, cx);
         }
     }
 
@@ -410,8 +484,11 @@ impl ContextMenu {
             .text_color(colors.menu_foreground)
             .children(entries.iter().enumerate().map(|(ix, entry)| {
                 let is_active = active == Some(ix);
-                match entry {
-                    Entry::Separator => div()
+                // An item shows its alternative in alt mode: its label,
+                // keybinding and checked state (Monaco
+                // `updateAlternativeAction`).
+                match entry.shown(self.alt_mode) {
+                    None => div()
                         .h(px(SEPARATOR_HEIGHT))
                         .flex()
                         .items_center()
@@ -423,15 +500,7 @@ impl ContextMenu {
                                 .bg(colors.menu_separator_background),
                         )
                         .into_any_element(),
-                    Entry::Item { label, .. } | Entry::Submenu { label, .. } => {
-                        let (keybinding, checked) = match entry {
-                            Entry::Item {
-                                keybinding,
-                                checked,
-                                ..
-                            } => (keybinding.clone(), *checked),
-                            _ => (None, false),
-                        };
+                    Some((label, keybinding, checked)) => {
                         let is_submenu = matches!(entry, Entry::Submenu { .. });
                         let id: SharedString = match submenu_of {
                             Some(parent) => format!("context-menu-{parent}-{ix}").into(),
@@ -447,7 +516,7 @@ impl ContextMenu {
                             AriaNode::new(Role::MenuItem, label.clone())
                         };
                         let aria = aria
-                            .keyshortcuts(keybinding.clone())
+                            .keyshortcuts(keybinding.cloned())
                             .active_descendant(claims_active && is_active);
                         let aria = if is_submenu {
                             aria.expanded(submenu_of.is_none() && open_submenu == Some(ix))
@@ -489,7 +558,7 @@ impl ContextMenu {
                                     .text_ellipsis()
                                     .child(label.clone()),
                             )
-                            .children(keybinding.map(|keys| {
+                            .children(keybinding.cloned().map(|keys| {
                                 div()
                                     .flex_none()
                                     .pl(px(KEYBINDING_PADDING))
@@ -518,10 +587,13 @@ impl ContextMenu {
                             }))
                             // VS Code's menu items run on mouse up, so a
                             // press can be dragged off the item to cancel.
+                            // With Alt (or Shift on Windows and Linux)
+                            // held, the alternative runs (Monaco
+                            // `getActionToRun(event)`).
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                             .on_mouse_up(
                                 MouseButton::Left,
-                                cx.listener(move |this, _, window, cx| {
+                                cx.listener(move |this, event: &MouseUpEvent, window, cx| {
                                     cx.stop_propagation();
                                     match submenu_of {
                                         Some(parent) => this.submenu = Some((parent, Some(ix))),
@@ -530,7 +602,7 @@ impl ContextMenu {
                                             this.submenu = None;
                                         }
                                     }
-                                    this.select(window, cx);
+                                    this.select(is_alt_mode(&event.modifiers), window, cx);
                                 }),
                             )
                             .into_any_element()
@@ -618,9 +690,23 @@ impl Render for ContextMenu {
                     this.move_active(isize::MAX / 2, cx)
                 }),
             )
+            .on_action(cx.listener(|this, _: &ContextMenuSelect, window, cx| {
+                this.select(this.alt_mode, window, cx)
+            }))
             .on_action(
-                cx.listener(|this, _: &ContextMenuSelect, window, cx| this.select(window, cx)),
+                cx.listener(|this, _: &ContextMenuSelectAlternative, window, cx| {
+                    this.select_alternative(window, cx)
+                }),
             )
+            // Monaco's menu follows `ModifierKeyEmitter`: each modifier
+            // change shows the items' alternatives, or the items again.
+            .on_modifiers_changed(cx.listener(|this, event: &ModifiersChangedEvent, _, cx| {
+                let alt_mode = is_alt_mode(&event.modifiers);
+                if this.alt_mode != alt_mode {
+                    this.alt_mode = alt_mode;
+                    cx.notify();
+                }
+            }))
             .on_action(cx.listener(|this, _: &ContextMenuSubmenuOpen, _, cx| this.open_submenu(cx)))
             .on_action(cx.listener(|this, _: &ContextMenuSubmenuClose, _, cx| {
                 this.submenu_timer = None;
@@ -653,23 +739,26 @@ fn submenu_left(
 /// The menu's measured width (Monaco's menu sizes to its widest row): the
 /// row margins and label padding, the label, the keybinding and the
 /// submenu indicator, at least Monaco's `min-width: 130px` and at most the
-/// window less a margin on each side.
+/// window less a margin on each side. Items' alternatives are measured
+/// too, so holding Alt doesn't resize the menu or push it out of the
+/// window.
 fn menu_width(entries: &[Entry], window_width: Pixels, window: &mut Window) -> Pixels {
+    let item_width = |item: &Item, window: &mut Window| {
+        let mut width = ui_text_width(&item.label, px(MENU_FONT_SIZE), FontWeight::NORMAL, window);
+        if let Some(keys) = &item.keybinding {
+            width += px(KEYBINDING_PADDING)
+                + ui_text_width(keys, px(KEYBINDING_FONT_SIZE), FontWeight::NORMAL, window);
+        }
+        width
+    };
     let mut widest = px(0.);
     for entry in entries {
         let width = match entry {
             Entry::Separator => continue,
-            Entry::Item {
-                label, keybinding, ..
-            } => {
-                let mut width =
-                    ui_text_width(label, px(MENU_FONT_SIZE), FontWeight::NORMAL, window);
-                if let Some(keys) = keybinding {
-                    width += px(KEYBINDING_PADDING)
-                        + ui_text_width(keys, px(KEYBINDING_FONT_SIZE), FontWeight::NORMAL, window);
-                }
-                width
-            }
+            Entry::Item(item) => match &item.alt {
+                Some(alt) => item_width(item, window).max(item_width(alt, window)),
+                None => item_width(item, window),
+            },
             Entry::Submenu { label, .. } => {
                 ui_text_width(label, px(MENU_FONT_SIZE), FontWeight::NORMAL, window) + px(8. + 16.)
             }
@@ -756,23 +845,51 @@ impl CodeEditor {
             if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
                 continue;
             }
-            let binding = window.highest_precedence_binding_for_action_in(
-                &crate::actions::RunAction {
-                    id: action.id.to_string(),
-                },
-                &self.focus_handle,
-            );
-            items.push((
-                group.clone(),
-                action.context_menu_order,
-                Entry::item(
-                    action.label.clone(),
-                    binding.map(|b| crate::keybinding_label::binding_label(&b)),
-                    Run::EditorAction(action.id.clone()),
-                ),
-            ));
+            let mut item = self.host_menu_item(action, window);
+            item.alt = action
+                .context_menu_alt
+                .as_ref()
+                .and_then(|id| self.alternative_item(id, window, cx))
+                .map(Box::new);
+            items.push((group.clone(), action.context_menu_order, Entry::Item(item)));
         }
         build_menu(items)
+    }
+
+    /// Host action `action` as a menu item, with its keybinding.
+    fn host_menu_item(&self, action: &EditorActionDescriptor, window: &Window) -> Item {
+        let binding = window.highest_precedence_binding_for_action_in(
+            &crate::actions::RunAction {
+                id: action.id.to_string(),
+            },
+            &self.focus_handle,
+        );
+        Item::new(
+            action.label.clone(),
+            binding.map(|b| crate::keybinding_label::binding_label(&b)),
+            Run::EditorAction(action.id.clone()),
+        )
+    }
+
+    /// An item's alternative, action `id` (Monaco's `MenuItemAction` for a
+    /// menu item's `alt` command): a host action or a labelled built-in
+    /// one, with its own label and keybinding (Monaco
+    /// `getKeyBinding(action)`). `None` for an unknown id or one that can't
+    /// run now, as `getActionForAltMode` never picks a disabled
+    /// alternative.
+    fn alternative_item(&self, id: &str, window: &Window, cx: &App) -> Option<Item> {
+        if let Some(action) = self.host_action(id, cx) {
+            let enabled = action.precondition.as_ref().is_none_or(|p| p(self, cx));
+            return enabled.then(|| self.host_menu_item(&action, window));
+        }
+        let (label, name) = crate::editor_actions::builtin_action(id)?;
+        if !self.action_enabled(id, cx) {
+            return None;
+        }
+        let action = cx.build_action(name, None).ok()?;
+        let keys =
+            crate::keybinding_label::editor_command_label(action.as_ref(), None, self, window, cx);
+        Some(Item::new(label.into(), keys, Run::Action(name)))
     }
 
     /// Shows the context menu at `position` (window coordinates), or at the
@@ -842,12 +959,14 @@ impl CodeEditor {
         cx: &mut Context<Self>,
     ) {
         self.hide_context_menu(cx);
-        let entries = vec![Entry::Item {
-            label: "Sticky Scroll".into(),
-            keybinding: None,
-            run: Run::Action("code_editor::ToggleStickyScroll"),
+        let entries = vec![Entry::Item(Item {
             checked: self.options.sticky_scroll.enabled,
-        }];
+            ..Item::new(
+                "Sticky Scroll".into(),
+                None,
+                Run::Action("code_editor::ToggleStickyScroll"),
+            )
+        })];
         self.show_menu(entries, Some(position), None, window, cx);
     }
 
@@ -903,14 +1022,16 @@ impl CodeEditor {
                 keys(&crate::actions::AcceptNextInlineLine),
                 Run::Action("code_editor::AcceptNextInlineLine"),
             ),
-            Entry::Item {
-                label: "Always Show Toolbar".into(),
-                keybinding: keys(&crate::actions::ToggleAlwaysShowInlineSuggestionToolbar),
-                run: Run::Action("code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
+            Entry::Item(Item {
                 // Toggled while `show_toolbar` is `Always`.
                 checked: self.options.inline_suggest.show_toolbar
                     == crate::options::InlineSuggestShowToolbar::Always,
-            },
+                ..Item::new(
+                    "Always Show Toolbar".into(),
+                    keys(&crate::actions::ToggleAlwaysShowInlineSuggestionToolbar),
+                    Run::Action("code_editor::ToggleAlwaysShowInlineSuggestionToolbar"),
+                )
+            }),
         ];
         if !self.inline.commands.is_empty() {
             entries.push(Entry::Separator);
@@ -990,6 +1111,7 @@ impl CodeEditor {
             origin,
             width,
             max_height,
+            alt_mode: is_alt_mode(&window.modifiers()),
         });
         let id = self.add_overflow_overlay_widget(
             OverlayPosition::Custom(offset),
@@ -1108,7 +1230,8 @@ impl CodeEditor {
     }
 
     /// The menu's rows as text (`---` for separators, `>` before the active
-    /// row, submenus nested with two spaces), for tests.
+    /// row, submenus nested with two spaces), each item as it shows (its
+    /// alternative while Alt is held), for tests.
     #[doc(hidden)]
     pub fn context_menu_rows_for_tests(&self, cx: &App) -> Vec<String> {
         let Some((menu, _)) = &self.context_menu.menu else {
@@ -1120,14 +1243,15 @@ impl CodeEditor {
             let active = if menu.active == Some(ix) { "> " } else { "" };
             match entry {
                 Entry::Separator => rows.push("---".to_string()),
-                Entry::Item { label, checked, .. } => {
+                Entry::Item(item) => {
+                    let Item { label, checked, .. } = item.for_alt_mode(menu.alt_mode);
                     let check = if *checked { "✓ " } else { "" };
                     rows.push(format!("{active}{check}{label}"))
                 }
                 Entry::Submenu { label, entries } => {
                     rows.push(format!("{active}{label} ›"));
                     for sub in entries {
-                        if let Some(label) = sub.label() {
+                        if let Some((label, ..)) = sub.shown(menu.alt_mode) {
                             rows.push(format!("  {label}"));
                         }
                     }
@@ -1191,5 +1315,141 @@ mod tests {
                 "Command Palette"
             ]
         );
+    }
+
+    /// Monaco `menu.test.ts` "Alt updates menu labels, mnemonics and state
+    /// without hover", in a menu and a submenu: a checked item with keys
+    /// and its unchecked alternative with its own, the modifier pressed
+    /// before the menu shows, then released and pressed again; Enter with
+    /// it runs the alternative. Mnemonics aren't ported (the editor's menu
+    /// has none).
+    #[gpui::test]
+    fn alt_swaps_the_label_keybinding_and_checked_state(cx: &mut gpui::TestAppContext) {
+        use std::cell::RefCell;
+        use std::rc::Rc;
+
+        use gpui::{Focusable as _, VisualTestContext};
+
+        use crate::editor_actions::EditorActionDescriptor;
+
+        cx.update(crate::init);
+        let shift_is_alt = cfg!(any(target_os = "windows", target_os = "linux"));
+        for submenu in [false, true] {
+            for (modifier, enter) in [
+                (Modifiers::alt(), "alt-enter"),
+                (Modifiers::shift(), "shift-enter"),
+            ] {
+                let (editor, cx) =
+                    cx.add_window_view(|window, cx| CodeEditor::with_text("abc", window, cx));
+                cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
+                let runs: Rc<RefCell<Vec<&str>>> = Rc::default();
+                editor.update(cx, |editor, cx| {
+                    for id in ["primary", "alternative"] {
+                        let runs = runs.clone();
+                        let _ = editor.add_action(
+                            EditorActionDescriptor::new(id, id, move |_, _, _| {
+                                runs.borrow_mut().push(id)
+                            }),
+                            cx,
+                        );
+                    }
+                });
+                cx.run_until_parked();
+                let item = Entry::Item(Item {
+                    checked: true,
+                    alt: Some(Box::new(Item::new(
+                        "Alternative".into(),
+                        Some("alternative-key".into()),
+                        Run::EditorAction("alternative".into()),
+                    ))),
+                    ..Item::new(
+                        "Primary".into(),
+                        Some("primary-key".into()),
+                        Run::EditorAction("primary".into()),
+                    )
+                });
+                let entries = if submenu {
+                    vec![Entry::Submenu {
+                        label: "Submenu".into(),
+                        entries: vec![item.clone(), item],
+                    }]
+                } else {
+                    vec![item.clone(), item]
+                };
+                cx.simulate_modifiers_change(modifier);
+                editor.update_in(cx, |editor, window, cx| {
+                    editor.show_menu(
+                        entries,
+                        Some(gpui::point(px(10.), px(10.))),
+                        None,
+                        window,
+                        cx,
+                    )
+                });
+                cx.simulate_keystrokes(if submenu { "down right" } else { "down" });
+                let read_items = |cx: &mut VisualTestContext| {
+                    cx.run_until_parked();
+                    crate::accessibility::record_aria_for_tests();
+                    cx.update(|window, cx| {
+                        window.refresh();
+                        window.draw(cx).clear(cx);
+                    });
+                    crate::accessibility::recorded_aria_for_tests()
+                        .into_iter()
+                        .filter(|n| n.label.as_ref().is_some_and(|l| l != "Submenu"))
+                        .filter(|n| matches!(n.role, Role::MenuItem | Role::MenuItemCheckBox))
+                        .map(|n| {
+                            let label = n.label.unwrap_or_default().to_string();
+                            let keys = n.keyshortcuts.map(|k| k.to_string());
+                            (label, keys, n.role, n.checked)
+                        })
+                        .collect::<Vec<_>>()
+                };
+                let mut states = vec![read_items(cx)];
+                cx.simulate_modifiers_change(Modifiers::none());
+                states.push(read_items(cx));
+                cx.simulate_modifiers_change(modifier);
+                states.push(read_items(cx));
+
+                let use_alternative = modifier.alt || shift_is_alt;
+                let primary = (
+                    "Primary".to_string(),
+                    Some("primary-key".to_string()),
+                    Role::MenuItemCheckBox,
+                    Some(true),
+                );
+                let alternative = (
+                    "Alternative".to_string(),
+                    Some("alternative-key".to_string()),
+                    Role::MenuItem,
+                    None,
+                );
+                let selected = if use_alternative {
+                    alternative
+                } else {
+                    primary.clone()
+                };
+                assert_eq!(
+                    states,
+                    [
+                        [selected.clone(), selected.clone()],
+                        [primary.clone(), primary],
+                        [selected.clone(), selected]
+                    ],
+                    "submenu: {submenu}, {modifier:?}"
+                );
+
+                // Monaco presses Enter with Shift only where it selects the
+                // alternative.
+                cx.simulate_keystrokes(if use_alternative { enter } else { "enter" });
+                cx.run_until_parked();
+                let ran = if use_alternative {
+                    "alternative"
+                } else {
+                    "primary"
+                };
+                assert_eq!(*runs.borrow(), [ran], "submenu: {submenu}, {modifier:?}");
+            }
+        }
     }
 }

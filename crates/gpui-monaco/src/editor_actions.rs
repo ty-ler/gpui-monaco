@@ -53,6 +53,13 @@ pub struct EditorActionDescriptor {
     pub context_menu_group_id: Option<SharedString>,
     /// Its order in the group (Monaco `contextMenuOrder`).
     pub context_menu_order: f32,
+    /// The id of the action its context menu item shows and runs instead
+    /// while Alt is held, or Shift on Windows and Linux (Monaco's menu
+    /// item `alt`): another host action, or a built-in one such as
+    /// `"editor.action.formatDocument"`, with its own label and
+    /// keybinding. It's left out while it can't run (its precondition
+    /// doesn't hold when the menu opens), and so is an unknown id.
+    pub context_menu_alt: Option<SharedString>,
     /// Runs it.
     pub run: ActionRun,
 }
@@ -86,6 +93,7 @@ impl EditorActionDescriptor {
             precondition: None,
             context_menu_group_id: None,
             context_menu_order: 0.,
+            context_menu_alt: None,
             run: Rc::new(run),
         }
     }
@@ -112,6 +120,14 @@ impl EditorActionDescriptor {
     pub fn context_menu(mut self, group: impl Into<SharedString>, order: f32) -> Self {
         self.context_menu_group_id = Some(group.into());
         self.context_menu_order = order;
+        self
+    }
+
+    /// Sets the action its context menu item shows and runs while Alt (or
+    /// Shift on Windows and Linux) is held, by id; see
+    /// [`context_menu_alt`](field@Self::context_menu_alt).
+    pub fn context_menu_alt(mut self, id: impl Into<SharedString>) -> Self {
+        self.context_menu_alt = Some(id.into());
         self
     }
 
@@ -659,6 +675,12 @@ pub(crate) fn monaco_id(name: &str) -> Option<&'static str> {
 
 fn builtin(id: &str) -> Option<&'static Builtin> {
     BUILTINS.iter().find(|b| b.0 == id)
+}
+
+/// The label and GPUI action name of the labelled built-in action `id` (or
+/// an alias of one).
+pub(crate) fn builtin_action(id: &str) -> Option<(&'static str, &'static str)> {
+    builtin(resolve_alias(id)).map(|b| (b.2, b.1))
 }
 
 /// The precondition of the action named `name` (a GPUI action name), if
@@ -1279,12 +1301,7 @@ impl CodeEditor {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Option<bool> {
-        let action = self
-            .added_actions
-            .iter()
-            .find(|a| a.id.as_ref() == id)
-            .cloned()
-            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id))?;
+        let action = self.host_action(id, cx)?;
         if !action.precondition.as_ref().is_none_or(|p| p(self, cx)) {
             return Some(false);
         }
@@ -1292,16 +1309,20 @@ impl CodeEditor {
         Some(true)
     }
 
-    /// Whether action `id` (built-in or the host's) exists and its
-    /// precondition holds.
-    fn action_supported(&self, id: &str, cx: &App) -> bool {
-        let added = self
-            .added_actions
+    /// The host action `id`: this editor's ([`CodeEditor::add_action`]),
+    /// else a global one ([`add_editor_action`]).
+    pub(crate) fn host_action(&self, id: &str, cx: &App) -> Option<EditorActionDescriptor> {
+        self.added_actions
             .iter()
             .find(|a| a.id.as_ref() == id)
             .cloned()
-            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id));
-        match added {
+            .or_else(|| global_actions(cx).into_iter().find(|a| a.id.as_ref() == id))
+    }
+
+    /// Whether action `id` (built-in or the host's) exists and its
+    /// precondition holds.
+    fn action_supported(&self, id: &str, cx: &App) -> bool {
+        match self.host_action(id, cx) {
             Some(action) => action.precondition.as_ref().is_none_or(|p| p(self, cx)),
             None => builtin(resolve_alias(id)).is_some_and(|b| self.when(b.3, cx)),
         }

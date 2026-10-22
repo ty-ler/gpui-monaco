@@ -781,8 +781,13 @@ actions!(
         ContextMenuFirst,
         /// The last context menu item.
         ContextMenuLast,
-        /// Runs the context menu item (or opens its submenu).
+        /// Runs the context menu item as it shows (its alternative while
+        /// Alt is held), or opens its submenu.
         ContextMenuSelect,
+        /// Runs the context menu item's alternative action, if it has one
+        /// (Monaco `IAction.alt`; Enter or Space with Alt, or with Shift on
+        /// Windows and Linux).
+        ContextMenuSelectAlternative,
         /// Opens the context menu item's submenu.
         ContextMenuSubmenuOpen,
         /// Closes the context menu's submenu.
@@ -1891,7 +1896,16 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding::new("pageup", ContextMenuFirst, CONTEXT_MENU),
         KeyBinding::new("pagedown", ContextMenuLast, CONTEXT_MENU),
         KeyBinding::new("enter", ContextMenuSelect, CONTEXT_MENU),
-        KeyBinding::new("space", ContextMenuSelect, CONTEXT_MENU),
+        // Monaco's menu takes its trigger keys with the modifiers that
+        // show alternatives (`ActionBar.isTriggerKeyEvent`); Shift is
+        // added on Windows and Linux below, and Space where it's a
+        // trigger key.
+        KeyBinding::new("alt-enter", ContextMenuSelectAlternative, CONTEXT_MENU),
+        KeyBinding::new(
+            "alt-shift-enter",
+            ContextMenuSelectAlternative,
+            CONTEXT_MENU,
+        ),
         KeyBinding::new("right", ContextMenuSubmenuOpen, CONTEXT_MENU),
         KeyBinding::new("left", ContextMenuSubmenuClose, CONTEXT_MENU),
         KeyBinding::new("escape", ContextMenuHide, CONTEXT_MENU),
@@ -1981,6 +1995,36 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         BlockComment,
         ctx,
     ));
+
+    if cfg!(any(target_os = "windows", target_os = "linux")) {
+        // There Shift shows the context menu items' alternatives too
+        // (`getActionForAltMode`).
+        bindings.push(KeyBinding::new(
+            "shift-enter",
+            ContextMenuSelectAlternative,
+            CONTEXT_MENU,
+        ));
+    }
+    if cfg!(not(target_os = "windows")) {
+        // Space is a trigger key of Monaco's menu on macOS and Linux only
+        // (`Menu`'s `triggerKeys`), with the alternatives' modifiers.
+        bindings.extend([
+            KeyBinding::new("space", ContextMenuSelect, CONTEXT_MENU),
+            KeyBinding::new("alt-space", ContextMenuSelectAlternative, CONTEXT_MENU),
+            KeyBinding::new(
+                "alt-shift-space",
+                ContextMenuSelectAlternative,
+                CONTEXT_MENU,
+            ),
+        ]);
+        if cfg!(target_os = "linux") {
+            bindings.push(KeyBinding::new(
+                "shift-space",
+                ContextMenuSelectAlternative,
+                CONTEXT_MENU,
+            ));
+        }
+    }
 
     if cfg!(target_os = "macos") {
         // The quick input's macOS keys: `quickInput.first`/`last` with Cmd
