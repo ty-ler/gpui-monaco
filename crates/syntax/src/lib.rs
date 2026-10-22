@@ -17,7 +17,7 @@ pub use config::{
     Pattern, SurroundingPair, strip_jsonc,
 };
 pub use fancy_regex;
-pub use highlighter::{HighlightState, Highlighter, TreeSitterHighlighter};
+pub use highlighter::{HighlightState, HighlightStateId, Highlighter, TreeSitterHighlighter};
 pub use language::{
     ConfigurationRegistration, Grammar, HighlightId, HighlighterFactory, Language,
     LanguageRegistry, glob_matches,

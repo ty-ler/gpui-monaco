@@ -2122,6 +2122,8 @@ pub(crate) struct HighlightSource {
     patch: Option<text::Patch>,
     /// Monaco `maxTokenizationLineLength`.
     max_line_length: u32,
+    /// How `syntax` differs from the parse before it.
+    change: Option<std::sync::Arc<crate::model::ParseChange>>,
 }
 
 impl HighlightSource {
@@ -2134,6 +2136,7 @@ impl HighlightSource {
             syntax,
             patch,
             max_line_length: model.tokenization_line_limit(),
+            change: model.parse_change(),
         })
     }
 
@@ -2223,9 +2226,27 @@ impl HighlightSource {
                 {
                     last.spans.clone()
                 }
-                _ => {
+                last => {
+                    // A new parse: what the one before gave where its
+                    // highlights didn't change, and a query elsewhere.
+                    let carried = last.as_ref().and_then(|last| {
+                        let change = self.change.as_ref()?;
+                        (syntax.state.syntax().is_some()
+                            && syntax.state.has_id(&change.to)
+                            && last.state.has_id(&change.from)
+                            && last.max_line_length == self.max_line_length)
+                            .then(|| {
+                                carry_highlights(
+                                    last,
+                                    change,
+                                    syntax.text.rope(),
+                                    old_range.clone(),
+                                    &query,
+                                )
+                            })
+                    });
                     let spans: std::sync::Arc<[syntax::HighlightSpan]> =
-                        query(old_range.clone()).into();
+                        carried.unwrap_or_else(|| query(old_range.clone())).into();
                     let replaced = cache.last.replace(HighlightQuery {
                         state: syntax.state.clone(),
                         range: old_range,
@@ -2252,6 +2273,112 @@ impl HighlightSource {
         }
         result
     }
+}
+
+/// The spans of `range` of a parse's text (`text`), given `last`, read
+/// from the parse before it, and `change`: `last`'s spans where the
+/// highlights didn't change, and `query`'s on the changed rows, around
+/// spans an edit touched, and outside the range `last` read. A carried
+/// span that may continue past the range `last` read is read again, so
+/// no span is cut where a query would leave it whole.
+fn carry_highlights(
+    last: &HighlightQuery,
+    change: &crate::model::ParseChange,
+    text: &Rope,
+    range: Range<usize>,
+    query: &dyn Fn(Range<usize>) -> Vec<syntax::HighlightSpan>,
+) -> Vec<syntax::HighlightSpan> {
+    let patch = &change.patch;
+    let edits = patch.edits();
+    let row_start = |row: u32| {
+        if row > text.max_point().row {
+            text.len()
+        } else {
+            text.point_to_offset(text::Point::new(row, 0))
+        }
+    };
+    let mut dirty: Vec<Range<usize>> = change
+        .rows
+        .iter()
+        .map(|rows| row_start(*rows.start())..row_start(rows.end() + 1))
+        .collect();
+    let changed_rows = dirty.clone();
+    let carried = patch.transform_offset(last.range.start, text::Bias::Left)
+        ..patch.transform_offset(last.range.end, text::Bias::Right);
+    let mut kept = Vec::with_capacity(last.spans.len());
+    for span in last.spans.iter() {
+        let new = patch.transform_offset(span.range.start, text::Bias::Left)
+            ..patch.transform_offset(span.range.end, text::Bias::Right);
+        let edited = edits
+            .iter()
+            .any(|edit| edit.old.start <= span.range.end && edit.old.end >= span.range.start);
+        let at_edge = span.range.start == last.range.start || span.range.end == last.range.end;
+        let changed = changed_rows
+            .iter()
+            .any(|rows| rows.start < new.end && new.start < rows.end);
+        if edited || at_edge || changed {
+            dirty.push(new);
+        } else if new.start < range.end && range.start < new.end {
+            kept.push(syntax::HighlightSpan {
+                range: new.start.max(range.start)..new.end.min(range.end),
+                highlight: span.highlight,
+            });
+        }
+    }
+    // Read again: what's in `range` but not carried, or changed.
+    let mut reads: Vec<Range<usize>> = dirty;
+    reads.push(range.start..carried.start);
+    reads.push(carried.end..range.end);
+    let mut reads: Vec<Range<usize>> = reads
+        .into_iter()
+        .map(|read| read.start.max(range.start)..read.end.min(range.end))
+        .filter(|read| read.start < read.end)
+        .collect();
+    reads.sort_by_key(|read| read.start);
+    let mut merged: Vec<Range<usize>> = Vec::with_capacity(reads.len());
+    for read in reads {
+        match merged.last_mut() {
+            Some(last) if read.start <= last.end => last.end = last.end.max(read.end),
+            _ => merged.push(read),
+        }
+    }
+    // Reads cover whole carried spans or none of them.
+    debug_assert!(kept.iter().all(|span| {
+        let ix = merged.partition_point(|read| read.end <= span.range.start);
+        merged
+            .get(ix)
+            .is_none_or(|read| span.range.end <= read.start)
+    }));
+    let mut spans = kept;
+    for read in &merged {
+        spans.extend(query(read.clone()).into_iter().filter_map(|span| {
+            let start = span.range.start.max(read.start);
+            let end = span.range.end.min(read.end);
+            (start < end).then_some(syntax::HighlightSpan {
+                range: start..end,
+                highlight: span.highlight,
+            })
+        }));
+    }
+    spans.sort_by_key(|span| span.range.start);
+    // A query of the whole range joins a node's pieces that meet where a
+    // read starts or ends.
+    let mut result: Vec<syntax::HighlightSpan> = Vec::with_capacity(spans.len());
+    for span in spans {
+        match result.last_mut() {
+            Some(last)
+                if last.range.end == span.range.start
+                    && last.highlight == span.highlight
+                    && merged.iter().any(|read| {
+                        read.start == span.range.start || read.end == span.range.start
+                    }) =>
+            {
+                last.range.end = span.range.end;
+            }
+            _ => result.push(span),
+        }
+    }
+    result
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -9940,6 +10067,95 @@ mod highlight_query_cache_tests {
         cx.update(|cx| cache.drop_retired(cx));
         assert!(cache.retired.is_empty());
         assert!(cache.last.is_some());
+    }
+
+    /// Highlights carried over from the parse before are what a query of
+    /// the new parse gives: random edits in several languages (injections
+    /// among them), each read over a moving window after its reparse.
+    #[gpui::test]
+    fn carried_highlights_match_a_query(cx: &mut TestAppContext) {
+        cx.update(|cx| crate::set_language_registry(cx, gpui_monaco_languages::registry()));
+        let rust = include_str!("../../../examples/playground/samples/sample.rs");
+        let html = "<!doctype html>\n<html>\n<head>\n<style>\nbody { color: red; }\n.a::after { content: \"x\"; }\n</style>\n<script>\nconst re = /a+b/g;\nfunction f(x) { return `t ${x}`; } // c\n</script>\n</head>\n<body class=\"b\">\n<!-- comment -->\n<p>Text &amp; more</p>\n</body>\n</html>\n".repeat(6);
+        let markdown = "# Title\n\nSome *emphasis* and `code`.\n\n```rust\nfn main() { let s = \"x\"; }\n```\n\n- item [link](http://a.b)\n> quote\n\n".repeat(8);
+        let javascript = "/** doc */\nclass A extends B {\n  m(x) { return x ? 'a' : \"b\" + `c${x}`; }\n}\nconst r = /x\\/y/i; // end\n/* block\n comment */\n".repeat(10);
+        let inserts = [
+            "\"", "'", "`", "/*", "*/", "//", "\n", "{", "}", "(", ")", "<", ">", "<!--", "-->",
+            "```", "#", "*", "x", "fn ", "let ", " ", "\\",
+        ];
+        let theme = Theme::vs_dark();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        let mut carried = 0;
+        for (language, text) in [
+            ("rust", rust),
+            ("html", html.as_str()),
+            ("markdown", markdown.as_str()),
+            ("javascript", javascript.as_str()),
+        ] {
+            let model = cx.new(|_| TextModel::new(text).with_language(language));
+            model.update(cx, |model, cx| model.ensure_syntax(cx));
+            cx.run_until_parked();
+            let mut cache = HighlightQueryCache::default();
+            let mut window = 0usize;
+            for _ in 0..150 {
+                // The window moves now and then, as when scrolling, or
+                // jumps.
+                match next(6) {
+                    0 => window = next(text.len()),
+                    1 | 2 => window = (window + next(400)).saturating_sub(200),
+                    _ => {}
+                }
+                let read = |model: &TextModel, cache: &mut HighlightQueryCache, window: usize| {
+                    let len = model.buffer().len();
+                    let start = model
+                        .buffer()
+                        .clip_offset(window.min(len), text::Bias::Left);
+                    let end = model
+                        .buffer()
+                        .clip_offset((start + 1500).min(len), text::Bias::Right);
+                    let source = HighlightSource::new(model).unwrap();
+                    let cached = source.highlights_cached(&theme, start..end, Some(cache));
+                    assert_eq!(
+                        cached,
+                        source.highlights(&theme, start..end),
+                        "{language}: {start}..{end} of {:?}",
+                        model.buffer().text()
+                    );
+                };
+                model.read_with(cx, |model, _| read(model, &mut cache, window));
+                let edits = 1 + next(3);
+                model.update(cx, |model, cx| {
+                    for _ in 0..edits {
+                        let len = model.buffer().len();
+                        let at = model.buffer().clip_offset(next(len + 1), text::Bias::Left);
+                        let edit = if next(3) == 0 {
+                            let end = model
+                                .buffer()
+                                .clip_offset((at + 1 + next(8)).min(len), text::Bias::Right);
+                            (at..end, "")
+                        } else {
+                            (at..at, inserts[next(inserts.len())])
+                        };
+                        model.edit([edit], cx).unwrap();
+                    }
+                });
+                model.read_with(cx, |model, _| read(model, &mut cache, window));
+                cx.run_until_parked();
+                // Scrolled before the new parse is drawn.
+                if next(2) == 0 {
+                    window = (window + next(600)).saturating_sub(300);
+                }
+                carried += model.read_with(cx, |model, _| model.parse_change().is_some() as usize);
+                model.read_with(cx, |model, _| read(model, &mut cache, window));
+            }
+        }
+        assert!(carried > 300);
     }
 }
 
