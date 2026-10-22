@@ -487,6 +487,18 @@ fn utf16_split(text: &str, at: usize) -> (String, String) {
     )
 }
 
+/// The edit visibility is checked with (Monaco `_toFilterTextReplacement`):
+/// `edit` with the completion's `filter_text`, when it has one.
+fn filter_edit(edit: &TextReplacement, completion: &InlineCompletion) -> TextReplacement {
+    TextReplacement {
+        range: edit.range.clone(),
+        text: completion
+            .filter_text
+            .clone()
+            .unwrap_or_else(|| edit.text.clone()),
+    }
+}
+
 /// Monaco `inlineCompletionIsVisible`: whether `edit` shows as ghost text
 /// at `cursor`, i.e. the text typed so far matches it.
 fn is_visible(
@@ -1249,7 +1261,12 @@ impl CodeEditor {
                 item.edit.is_none()
                     && self.item_shows_at(item, position, cx)
                     && self.current_edit(item, cx).is_some_and(|edit| {
-                        is_visible(&edit, item.original_start, position, line_text)
+                        is_visible(
+                            &filter_edit(&edit, &item.completion),
+                            item.original_start,
+                            position,
+                            line_text,
+                        )
                     })
             }),
         };
@@ -1349,7 +1366,12 @@ impl CodeEditor {
                 self.current_edit(item, cx).is_some_and(|edit| {
                     edit.range.start <= position
                         && position <= edit.range.end
-                        && is_visible(&edit, item.original_start, position, line_text)
+                        && is_visible(
+                            &filter_edit(&edit, &item.completion),
+                            item.original_start,
+                            position,
+                            line_text,
+                        )
                 })
             }
         }
@@ -1378,7 +1400,7 @@ impl CodeEditor {
                 range: range.clone(),
                 text: item.insert_text.clone(),
             };
-            is_visible(&edit, range.start, position, line_text)
+            is_visible(&filter_edit(&edit, item), range.start, position, line_text)
         })
     }
 
@@ -1430,9 +1452,10 @@ impl CodeEditor {
         self.inline.items.iter().any(|item| {
             item.edit.is_none()
                 && self.item_shows_at(item, cursor, cx)
-                && self
-                    .current_edit(item, cx)
-                    .is_some_and(|edit| is_visible(&edit, item.original_start, cursor, line_text))
+                && self.current_edit(item, cx).is_some_and(|edit| {
+                    let edit = filter_edit(&edit, &item.completion);
+                    is_visible(&edit, item.original_start, cursor, line_text)
+                })
         })
     }
 
@@ -2129,7 +2152,8 @@ impl CodeEditor {
             .filter(|(_, item)| item.edit.is_none() && self.item_shows_at(item, cursor, cx))
             .filter_map(|(ix, item)| {
                 let edit = self.current_edit(item, cx)?;
-                is_visible(&edit, item.original_start, cursor, line_text).then_some((ix, edit))
+                let filter = filter_edit(&edit, &item.completion);
+                is_visible(&filter, item.original_start, cursor, line_text).then_some((ix, edit))
             })
             .filter(|(_, edit)| seen.insert((edit.text.clone(), edit.range.start)))
             .collect();
@@ -3724,6 +3748,34 @@ mod tests {
 
     fn lines(text: &'static str) -> impl Fn(u32) -> String {
         move |row| text.split('\n').nth(row as usize).unwrap_or("").to_string()
+    }
+
+    #[test]
+    fn visibility_uses_the_filter_text() {
+        let edit = TextReplacement {
+            range: PointUtf16::new(0, 0)..PointUtf16::new(0, 2),
+            text: "self.len()".into(),
+        };
+        let start = PointUtf16::new(0, 0);
+        let cursor = PointUtf16::new(0, 2);
+        // "le" typed: the inserted text doesn't start with it…
+        let completion = InlineCompletion {
+            insert_text: "self.len()".into(),
+            ..Default::default()
+        };
+        let filter = filter_edit(&edit, &completion);
+        assert_eq!(filter, edit);
+        assert!(!is_visible(&filter, start, cursor, &lines("le")));
+        // …but its filter text does.
+        let completion = InlineCompletion {
+            filter_text: Some("len".into()),
+            ..completion
+        };
+        let filter = filter_edit(&edit, &completion);
+        assert_eq!(filter.text, "len");
+        assert_eq!(filter.range, edit.range);
+        assert!(is_visible(&filter, start, cursor, &lines("le")));
+        assert!(!is_visible(&filter, start, cursor, &lines("lx")));
     }
 
     #[test]

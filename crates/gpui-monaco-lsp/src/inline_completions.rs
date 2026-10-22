@@ -126,7 +126,7 @@ pub(crate) fn completion_list(result: Value) -> Result<InlineCompletionList> {
 
 /// An `InlineCompletionItem` (`vscode-languageclient`'s
 /// `asInlineCompletionItem`). `insertText` is a string or a snippet
-/// `StringValue`. The editor has no `filterText` yet (#582), so it's dropped.
+/// `StringValue`.
 fn completion_item(item: Value) -> Option<InlineCompletion> {
     let (insert_text, is_snippet) = match item.get("insertText")? {
         Value::String(text) => (
@@ -148,9 +148,14 @@ fn completion_item(item: Value) -> Option<InlineCompletion> {
         .get("command")
         .and_then(|command| serde_json::from_value::<lsp::Command>(command.clone()).ok())
         .map(convert::command);
+    let filter_text = item
+        .get("filterText")
+        .and_then(Value::as_str)
+        .map(str::to_string);
     Some(InlineCompletion {
         insert_text,
         is_snippet,
+        filter_text,
         range,
         command,
         ..Default::default()

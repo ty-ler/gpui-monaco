@@ -1772,6 +1772,10 @@ pub struct InlineCompletion {
     pub insert_text: String,
     /// `insert_text` is a snippet.
     pub is_snippet: bool,
+    /// Decides whether it still shows as the user types: the typed text is
+    /// matched against this instead of `insert_text` (Monaco `filterText`).
+    /// `None` matches against `insert_text`.
+    pub filter_text: Option<String>,
     /// The range it replaces; by default from the start of the word at the
     /// cursor to the end of the line. A completion's range is on one line;
     /// an inline edit's can span lines.
