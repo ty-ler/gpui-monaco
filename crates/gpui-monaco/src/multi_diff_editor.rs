@@ -336,6 +336,13 @@ pub enum MultiDiffEditorEvent {
     /// `onDidChangeActiveControl`): another file became active, or the
     /// active file got or lost its diff editor.
     ActiveControlChanged,
+    /// [`MultiDiffEditor::visible_items`] changed (Monaco's
+    /// `visibleDiffItems`, compared with `arrayEqualsC`): files came into or
+    /// left view as the list scrolled, was resized or its files changed
+    /// height, or [`MultiDiffEditor::set_documents`] changed the files in
+    /// view or their indices. It fires once per change, when the list is
+    /// drawn, and not for a scroll that keeps the same files in view.
+    VisibleItemsChanged,
 }
 
 /// What a [`MultiDiffFileAction`] runs: it gets the file's index and
@@ -819,6 +826,14 @@ struct EntryState {
 }
 
 /// Monaco `MultiDiffEditorWidget`: diffs of many files in one list.
+///
+/// Monaco's `viewModel` (the `MultiDiffEditorViewModel` the widget shows)
+/// is the editor's own documents here: its `items` are the files, by their
+/// index ([`MultiDiffEditor::len`], [`MultiDiffEditor::document`], set with
+/// [`MultiDiffEditor::set_documents`]), its `activeDiffItem` is
+/// [`MultiDiffEditor::active_item`] and its `isLoading`
+/// [`MultiDiffEditor::is_loading`]. Its `visibleDiffItems` are
+/// [`MultiDiffEditor::visible_items`].
 pub struct MultiDiffEditor {
     items: Vec<Item>,
     options: DiffEditorOptions,
@@ -889,9 +904,14 @@ pub struct MultiDiffEditor {
     diff_layout: MultiDiffLayoutOptions,
     /// The diff editor last reported by `ActiveControlChanged`.
     reported_active_control: Option<EntityId>,
-    /// The files in view when last drawn (Monaco's bound items, binary
-    /// files included).
-    drawn_items: Vec<usize>,
+    /// The files in view when last drawn, in order (Monaco
+    /// `visibleDiffItems`, its bound items, binary files included), moved
+    /// to the files' new indices by `set_documents`.
+    visible_items: Vec<usize>,
+    /// [`Self::visible_items`] as drawn, when `set_documents` moved those
+    /// files to other indices since: the next draw reports a change unless
+    /// it shows the same indices of the same files.
+    drawn_visible_items: Option<Vec<usize>>,
 }
 
 impl EventEmitter<MultiDiffEditorEvent> for MultiDiffEditor {}
@@ -952,7 +972,8 @@ impl MultiDiffEditor {
             pending_focus: None,
             diff_layout: MultiDiffLayoutOptions::default(),
             reported_active_control: None,
-            drawn_items: Vec::new(),
+            visible_items: Vec::new(),
+            drawn_visible_items: None,
         };
         this.set_documents(documents, window, cx);
         this
@@ -1102,6 +1123,19 @@ impl MultiDiffEditor {
         });
         self.hovered_header = None;
         self.hovered_entry = None;
+        // Monaco's `visibleDiffItems` holds the files themselves: the files
+        // in view stay in it until the next draw, in the order drawn at
+        // their new indices, and one gone or moved is a change to report
+        // then.
+        let visible: Vec<usize> = self
+            .visible_items
+            .iter()
+            .filter_map(|&index| remap(Some(index)))
+            .collect();
+        if visible != self.visible_items {
+            let drawn = std::mem::replace(&mut self.visible_items, visible);
+            self.drawn_visible_items.get_or_insert(drawn);
+        }
         // Monaco `CompressedVirtualizedScrollView._update`: other items
         // drop the scroll slack instead of anchoring.
         if old_keys != new_keys {
@@ -1666,7 +1700,7 @@ impl MultiDiffEditor {
         };
         let item = &self.items[index];
         if item.document.binary {
-            if !self.drawn_items.contains(&index) {
+            if !self.visible_items.contains(&index) {
                 return false;
             }
             if !item.collapsed {
@@ -1718,6 +1752,24 @@ impl MultiDiffEditor {
         }
     }
 
+    /// Takes the files drawn in view and emits `VisibleItemsChanged` if
+    /// they changed (Monaco's `visibleDiffItems` derived with
+    /// `arrayEqualsC`). Allocates nothing when they didn't.
+    fn update_visible_items(
+        &mut self,
+        drawn: impl Iterator<Item = usize> + Clone,
+        cx: &mut Context<Self>,
+    ) {
+        let moved_from = self.drawn_visible_items.take();
+        let changed = !self.visible_items.iter().copied().eq(drawn.clone())
+            || moved_from.is_some_and(|before| !before.into_iter().eq(drawn.clone()));
+        if changed {
+            self.visible_items.clear();
+            self.visible_items.extend(drawn);
+            cx.emit(MultiDiffEditorEvent::VisibleItemsChanged);
+        }
+    }
+
     /// The file count.
     pub fn len(&self) -> usize {
         self.items.len()
@@ -1763,6 +1815,20 @@ impl MultiDiffEditor {
     /// outlined (standard variant) or highlighted (compact variants).
     pub fn active_item(&self) -> Option<usize> {
         self.active
+    }
+
+    /// The files in view, in document order, the first at the top of the
+    /// viewport (Monaco `visibleDiffItems`): those whose part of the list,
+    /// header included, intersects the viewport (Monaco's `visibility ===
+    /// 'visible'`), collapsed and binary files too. They're the files last
+    /// drawn, as the list lays out when drawn;
+    /// [`MultiDiffEditor::set_documents`] gives them their new indices at
+    /// once (in the order drawn, until the next draw), dropping the files
+    /// gone. [`MultiDiffEditorEvent::VisibleItemsChanged`] says when it
+    /// changes, as for keeping a file list in sync with the scroll
+    /// position.
+    pub fn visible_items(&self) -> &[usize] {
+        &self.visible_items
     }
 
     /// Adds a button to the file headers' toolbar (Monaco's
@@ -3377,7 +3443,9 @@ impl Render for MultiDiffEditor {
         // The list's top in the files' coordinates.
         let scroll_top = shown - self.anchoring.leading_slack;
 
-        // The files in view (Monaco's rendered range).
+        // The files in view: those intersecting the viewport (Monaco
+        // `computeCompressedVirtualizedScrollLayout`'s `'visible'`, neither
+        // `isBefore` nor `isAfter` it). The bottom padding isn't a file.
         let mut visible = Vec::new();
         let mut top = px(0.);
         for (index, &height) in heights.iter().enumerate() {
@@ -3397,7 +3465,7 @@ impl Render for MultiDiffEditor {
             .map(|&(index, _)| index)
             .filter(|&index| !self.items[index].document.binary)
             .collect();
-        self.drawn_items = visible.iter().map(|&(index, _)| index).collect();
+        self.update_visible_items(visible.iter().map(|&(index, _)| index), cx);
         self.update_bindings(&wanted, window, cx);
         // A restored active file takes the focus (Monaco
         // `DiffEditorItemBinding.focus`), with an editor if it has none.
@@ -3688,6 +3756,7 @@ impl Render for MultiDiffEditor {
         let key_context = self.context_keys(cx);
         let bounds_cell = self.bounds.clone();
         let this = cx.entity().downgrade();
+        let resized = this.clone();
         div()
             .id("multi-diff-editor")
             .key_context(key_context)
@@ -3702,7 +3771,16 @@ impl Render for MultiDiffEditor {
             .on_scroll_wheel(cx.listener(Self::on_scroll_wheel))
             .child(
                 canvas(
-                    move |b, _, _| bounds_cell.set(b),
+                    move |b, _, cx| {
+                        // Laid out at another size than this frame was
+                        // drawn for: draw again at it (Monaco lays the list
+                        // out on `layout(dimension)`).
+                        if bounds_cell.replace(b).size != b.size {
+                            cx.defer(move |cx| {
+                                resized.update(cx, |_, cx| cx.notify()).ok();
+                            });
+                        }
+                    },
                     move |_, _, window, _| {
                         window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Bubble {
