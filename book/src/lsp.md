@@ -88,6 +88,7 @@ It emits `LspClientEvent::ShowMessage` for messages meant for the user, and `Lsp
 Some server features have no editor UI in gpui-monaco, as in Monaco. `LspClient` has typed methods for them, so a host can build its own UI. Their results use the editor's types: positions are `PointUtf16`, kinds are `SymbolKind` and uris are normalized like `TextModel::resource()`. Each one returns nothing when the server doesn't support the feature or has stopped.
 
 - **Workspace symbols (`workspaceSymbolProvider`):** `workspace_symbols(query, cx)` sends `workspace/symbol` and returns `WorkspaceSymbol`s, from either flat `SymbolInformation` or `WorkspaceSymbol` results. A symbol whose `range` is `None` only names its document; `resolve_workspace_symbol(&symbol, cx)` sends `workspaceSymbol/resolve` to fill it in, as VS Code does before opening a symbol picked from "Go to Symbol in Workspace".
+- **Call hierarchy (`callHierarchyProvider`):** `prepare_call_hierarchy(&model, position, cx)` sends `textDocument/prepareCallHierarchy` for an attached model, after syncing its edits, and returns `CallHierarchyItem`s. `incoming_calls(&item, cx)` and `outgoing_calls(&item, cx)` send the server's item back as it sent it and return `IncomingCall`s (the caller and where it makes the calls) and `OutgoingCall`s (the callee and where the item calls it, in the item's own document).
 
 ## Other transports and requests
 
