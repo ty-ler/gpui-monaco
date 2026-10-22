@@ -1451,6 +1451,11 @@ async fn collect_edits(tasks: EditTasks) -> Vec<ProvidedEdit> {
 pub(crate) fn clipboard_data(item: &gpui::ClipboardItem) -> DataTransfer {
     let mut data = DataTransfer::default();
     if let Some(text) = clipboard_string(item) {
+        // The clipboard's `text/html`: GPUI's clipboard has none, so it's
+        // read from the system clipboard (macOS and Windows).
+        if let Some(html) = crate::system_clipboard::read_html(&text) {
+            data.insert("text/html", DataTransferItem::Text(html));
+        }
         data.insert(TEXT_PLAIN, DataTransferItem::Text(text));
     }
     // Copied files, as Monaco's clipboard `files` and uri-list.
