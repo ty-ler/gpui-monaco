@@ -59,6 +59,21 @@ icu_locale_core = { version = "2.3", optional = true, default-features = false }
 icu_collator = { version = "~2.3", features = ["unstable"] }
 gpui-monaco-codicons = { workspace = true, optional = true }
 
+# HTML on the system clipboard (`copyWithSyntaxHighlighting`, paste
+# providers' `text/html`), which GPUI's clipboard doesn't hold. The versions
+# GPUI uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+] }
+
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 # The versions GPUI's Linux text system (cosmic-text) uses.
 fontdb = { version = "0.23", optional = true }
