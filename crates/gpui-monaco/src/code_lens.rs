@@ -8,6 +8,7 @@
 //! it's drawn, as Monaco's lenses follow its `--vscode-editorCodeLens-*`
 //! CSS variables and scroll with the text.
 
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -379,8 +380,16 @@ impl CodeEditor {
         }
         self.code_lens.height = height;
         self.widgets.zone_sizes_generation += 1;
-        for group in &self.code_lens.groups {
-            if let Some(zone) = self.widgets.zones.iter_mut().find(|z| z.id == group.zone) {
+        // One pass over the zones: a search per group was O(groups ×
+        // zones), ~29M comparisons with thousands of lenses.
+        let lens_zones: HashSet<WidgetId> = self
+            .code_lens
+            .groups
+            .iter()
+            .map(|group| group.zone)
+            .collect();
+        for zone in &mut self.widgets.zones {
+            if lens_zones.contains(&zone.id) {
                 zone.height = ZoneHeight::Pixels(height);
             }
         }
