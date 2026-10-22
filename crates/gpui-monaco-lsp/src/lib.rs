@@ -40,6 +40,7 @@ mod tests;
 pub use call_hierarchy::{CallHierarchyItem, IncomingCall, OutgoingCall};
 pub use client::{
     LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions, MessageResponder,
+    WILL_SAVE_WAIT_UNTIL_TIMEOUT,
 };
 pub use lsp_types;
 pub use rpc::Connection;

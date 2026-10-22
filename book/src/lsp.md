@@ -44,7 +44,7 @@ PLAYGROUND_LSP=rust-analyzer PLAYGROUND_FILE=src/main.rs cargo run -p playground
 - **Document uris:** a document is named by the model's `resource()`, as `monaco-languageclient` sends `model.uri.toString()`. That is the uri in Monaco's normalized form: `file:///my project/a.rs` is sent as `file:///my%20project/a.rs`, and `file:///C:/a.ts` as `file:///c%3A/a.ts`. A model without a uri is sent as `inmemory://model/N`. Uris from the server are normalized too before they're compared, so a server that writes them its own way still reaches the right model.
 - **Before each request:** the bridge sends any edits the server hasn't seen yet, so a completion right after typing sees the new text.
 - **Closing:** `detach(model)`, or releasing the model, sends `didClose`. Detaching also clears the server's markers.
-- **`did_save(model)`:** sends `didSave` if the server wants it.
+- **Saving:** before writing the file, call `will_save(model, reason)`, which sends `willSave` if the server wants it, and await `will_save_wait_until(model, reason)`, which asks for the server's edits (organize imports or fix all on save, for example) and applies them to the model as one undo step. A server that fails or takes longer than `WILL_SAVE_WAIT_UNTIL_TIMEOUT` (1.5s, VS Code's budget for a save participant) doesn't hold up the save; its edits are dropped, and so are edits that come after the document changed. After writing, `did_save(model)` sends `didSave` if the server wants it.
 
 Positions need no conversion: both the editor and LSP use 0-based lines and UTF-16 columns.
 

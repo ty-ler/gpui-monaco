@@ -7,6 +7,7 @@ use std::process::Stdio;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context as _, Result};
 use futures_lite::StreamExt;
@@ -25,6 +26,10 @@ use serde_json::{Value, json};
 use crate::convert;
 use crate::features::LspFeatures;
 use crate::rpc::{self, Connection, Incoming, METHOD_NOT_FOUND, ResponseError};
+
+/// How long [`LspClient::will_save_wait_until`] waits for the server's
+/// edits: VS Code's budget for a save participant.
+pub const WILL_SAVE_WAIT_UNTIL_TIMEOUT: Duration = Duration::from_millis(1500);
 
 /// JSON-RPC's invalid params error code.
 const INVALID_PARAMS: i64 = -32602;
@@ -422,6 +427,110 @@ impl LspClient {
             .ok();
     }
 
+    /// Tells the server `model` is about to be saved
+    /// (`textDocument/willSave`), if it wants to know.
+    pub fn will_save(
+        &mut self,
+        model: &Entity<TextModel>,
+        reason: lsp::TextDocumentSaveReason,
+        cx: &mut Context<Self>,
+    ) {
+        let uri = model.read(cx).resource().to_string();
+        if !self
+            .sync_options()
+            .is_some_and(|o| o.will_save == Some(true))
+        {
+            return;
+        }
+        let Some((connection, text_document)) = self.prepare_request(&uri, cx) else {
+            return;
+        };
+        connection
+            .notify::<lsp::notification::WillSaveTextDocument>(lsp::WillSaveTextDocumentParams {
+                text_document,
+                reason,
+            })
+            .ok();
+    }
+
+    /// Asks the server for the edits to make before `model` is saved
+    /// (`textDocument/willSaveWaitUntil`), such as organizing imports, if it
+    /// supports it, and applies them to the model as one undo step. The
+    /// task resolves when they're applied, or right away if the server
+    /// doesn't support it. Save when it does: a server that fails or takes
+    /// longer than [`WILL_SAVE_WAIT_UNTIL_TIMEOUT`] doesn't hold up the
+    /// save, and its edits are dropped, as VS Code's save participants are.
+    /// So are edits that come after the document changed.
+    pub fn will_save_wait_until(
+        &mut self,
+        model: &Entity<TextModel>,
+        reason: lsp::TextDocumentSaveReason,
+        cx: &mut Context<Self>,
+    ) -> Task<()> {
+        let uri = model.read(cx).resource().to_string();
+        if !self
+            .sync_options()
+            .is_some_and(|o| o.will_save_wait_until == Some(true))
+        {
+            return Task::ready(());
+        }
+        let Some((connection, text_document)) = self.prepare_request(&uri, cx) else {
+            return Task::ready(());
+        };
+        let Some(version) = self.documents.get(&uri).map(|d| d.version) else {
+            return Task::ready(());
+        };
+        let request = connection.request::<lsp::request::WillSaveWaitUntil>(
+            lsp::WillSaveTextDocumentParams {
+                text_document: text_document.clone(),
+                reason,
+            },
+        );
+        let timeout = cx.background_executor().timer(WILL_SAVE_WAIT_UNTIL_TIMEOUT);
+        cx.spawn(async move |this, cx| {
+            let response = futures_lite::future::or(async { Some(request.await) }, async {
+                timeout.await;
+                None
+            })
+            .await;
+            let edits = match response {
+                Some(Ok(edits)) => edits.unwrap_or_default(),
+                Some(Err(err)) => {
+                    log::warn!("{err:#}");
+                    return;
+                }
+                None => {
+                    log::warn!("textDocument/willSaveWaitUntil timed out");
+                    return;
+                }
+            };
+            if edits.is_empty() {
+                return;
+            }
+            // A versioned edit isn't applied if the document changed since.
+            let edit = lsp::WorkspaceEdit {
+                document_changes: Some(lsp::DocumentChanges::Edits(vec![lsp::TextDocumentEdit {
+                    text_document: lsp::OptionalVersionedTextDocumentIdentifier {
+                        uri: text_document.uri,
+                        version: Some(version),
+                    },
+                    edits: edits.into_iter().map(lsp::OneOf::Left).collect(),
+                }])),
+                ..Default::default()
+            };
+            let Ok(apply) = this.update(cx, |this, cx| this.apply_workspace_edit(edit, cx)) else {
+                return;
+            };
+            let response = apply.await;
+            if !response.applied {
+                log::warn!(
+                    "willSaveWaitUntil edits not applied: {}",
+                    response.failure_reason.unwrap_or_default()
+                );
+            }
+        })
+    }
+
     /// Asks the server to shut down (`shutdown`, then `exit`). Its
     /// features are unregistered right away.
     pub fn shutdown(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
@@ -485,6 +594,13 @@ impl LspClient {
                 }
             })
             .collect()
+    }
+
+    fn sync_options(&self) -> Option<&lsp::TextDocumentSyncOptions> {
+        match &self.capabilities.text_document_sync {
+            Some(lsp::TextDocumentSyncCapability::Options(options)) => Some(options),
+            _ => None,
+        }
     }
 
     fn sync_kind(&self) -> lsp::TextDocumentSyncKind {
@@ -940,7 +1056,12 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "workspaceEdit": { "documentChanges": true },
         },
         "textDocument": {
-            "synchronization": { "didSave": true, "dynamicRegistration": false },
+            "synchronization": {
+                "didSave": true,
+                "willSave": true,
+                "willSaveWaitUntil": true,
+                "dynamicRegistration": false,
+            },
             "completion": {
                 "completionItem": {
                     "snippetSupport": true,
