@@ -4,6 +4,9 @@
 //! - `:` goes to a line and column (`::` to a character offset), Ctrl+G,
 //! - `@` goes to a symbol (`@:` grouped by kind), Cmd/Ctrl+Shift+O,
 //! - `>` runs an editor action (the command palette), F1,
+//! - `#` goes to a symbol in the workspace, from the
+//!   [workspace symbol providers](crate::providers::WorkspaceSymbolProvider)
+//!   (VS Code's `SymbolsQuickAccessProvider`; Monaco has none),
 //! - anything else lists the prefixes (help).
 //!
 //! Ports `gotoLineQuickAccess.ts`, `gotoSymbolQuickAccess.ts`,
@@ -34,7 +37,7 @@ use crate::decorations::{
 use crate::editor::{CodeEditor, CodeEditorEvent, ViewState};
 use crate::model::TextModelEvent;
 use crate::outline::flatten_symbols;
-use crate::providers::{DocumentSymbol, SymbolKind};
+use crate::providers::{DocumentSymbol, SymbolKind, WorkspaceSymbol};
 use crate::view::reveal::RevealType;
 use crate::widgets::{OverlayPosition, OverlayWidget, WidgetId};
 
@@ -87,6 +90,15 @@ pub(crate) enum QuickAction {
     Pick(usize),
     /// Select find match `.0` (0-based), for "Go to Match...".
     GoToMatch(usize),
+    /// Open workspace symbol `.0` of the listed ones.
+    OpenWorkspaceSymbol(usize),
+}
+
+/// The workspace symbols of one query, each with the index of the provider
+/// that found it.
+struct WorkspaceSymbols {
+    query: String,
+    symbols: Vec<(usize, WorkspaceSymbol)>,
 }
 
 /// What happens when a quick pick item is chosen.
@@ -164,6 +176,17 @@ pub(crate) struct QuickAccessState {
     symbols_busy_since: Option<web_time::Instant>,
     /// Go to Symbol is the provider (the input starts with `@`).
     in_symbol_provider: bool,
+    /// The workspace symbols last found, for the latest query that has
+    /// them (VS Code's `SymbolsQuickAccessProvider`).
+    workspace_symbols: Option<WorkspaceSymbols>,
+    /// The query whose workspace symbols are being looked up, and the
+    /// lookup.
+    workspace_fetch: Option<(String, Task<()>)>,
+    /// When that lookup started (VS Code's `picker.busy`).
+    workspace_busy_since: Option<web_time::Instant>,
+    /// Go to Symbol in Workspace is the provider (the input starts with
+    /// `#`).
+    in_workspace_provider: bool,
     /// The query (after `@`) of Go to Symbol's first population, which
     /// activates the symbol around the cursor (Monaco's
     /// `positionToEnclose`); dropped once the symbols are listed or the
@@ -581,6 +604,14 @@ impl QuickInput {
                                 handler(editor, ix, window, cx);
                             }
                         });
+                    }
+                });
+            }
+            QuickAction::OpenWorkspaceSymbol(ix) => {
+                let editor = self.editor.clone();
+                window.defer(cx, move |_, cx| {
+                    if let Some(editor) = editor.upgrade() {
+                        editor.update(cx, |editor, cx| editor.open_workspace_symbol(ix, cx));
                     }
                 });
             }
@@ -1165,6 +1196,10 @@ impl CodeEditor {
             _symbols_task: None,
             symbols_busy_since: None,
             in_symbol_provider: false,
+            workspace_symbols: None,
+            workspace_fetch: None,
+            workspace_busy_since: None,
+            in_workspace_provider: false,
             symbol_enclose: None,
             waiting_for_symbol_provider: false,
             action_keys: self.action_keybindings(window, cx),
@@ -1365,6 +1400,7 @@ impl CodeEditor {
                 quick.symbol_enclose = Some(rest.trim().to_string());
             }
             quick.in_symbol_provider = symbol_rest.is_some();
+            quick.in_workspace_provider = trimmed.starts_with('#');
         }
         if let Some(rest) = trimmed.strip_prefix("::") {
             (vec![QuickRow::Item(self.goto_offset_item(rest, cx))], None)
@@ -1374,8 +1410,11 @@ impl CodeEditor {
             self.goto_symbol_rows(rest, cx)
         } else if let Some(rest) = trimmed.strip_prefix('>') {
             (self.command_rows(rest.trim(), cx), None)
+        } else if let Some(rest) = trimmed.strip_prefix('#') {
+            (self.workspace_symbol_rows(rest.trim(), cx), None)
         } else {
-            (help_rows(), None)
+            let workspace = !crate::providers::workspace_symbol_providers(cx).is_empty();
+            (help_rows(workspace), None)
         }
     }
 
@@ -1767,6 +1806,180 @@ impl CodeEditor {
         }
     }
 
+    /// VS Code's `SymbolsQuickAccessProvider`: the workspace symbols
+    /// matching `query`, scored against it. Each new query asks the
+    /// providers again; until they answer, the last answer is filtered by
+    /// the new query and the list is busy.
+    fn workspace_symbol_rows(&mut self, query: &str, cx: &mut Context<Self>) -> Vec<QuickRow> {
+        let Some(quick) = self.quick.as_ref() else {
+            return Vec::new();
+        };
+        let fetched = quick
+            .workspace_symbols
+            .as_ref()
+            .is_some_and(|found| found.query == query);
+        let fetching = quick
+            .workspace_fetch
+            .as_ref()
+            .is_some_and(|(fetching, _)| fetching == query);
+        if !fetched && !fetching {
+            self.fetch_workspace_symbols(query, cx);
+        }
+        let Some(found) = self
+            .quick
+            .as_ref()
+            .and_then(|q| q.workspace_symbols.as_ref())
+        else {
+            return Vec::new();
+        };
+        let mut items: Vec<(i32, usize, QuickItem)> = Vec::new();
+        for (ix, (_, symbol)) in found.symbols.iter().enumerate() {
+            let name = symbol.name.trim_matches(' ');
+            let (score, highlights) = if query.is_empty() {
+                (0, Vec::new())
+            } else {
+                let Some((score, matches)) = score_fuzzy2(name, query) else {
+                    continue;
+                };
+                (score, utf16_matches_to_bytes(name, &matches))
+            };
+            // VS Code shows the container, and the file it's in.
+            let file = symbol
+                .uri
+                .trim_end_matches('/')
+                .rsplit('/')
+                .next()
+                .unwrap_or(&symbol.uri)
+                .to_string();
+            let description = match &symbol.container_name {
+                Some(container) => format!("{container} · {file}"),
+                None => file,
+            };
+            items.push((
+                score,
+                ix,
+                QuickItem {
+                    label: name.to_string().into(),
+                    highlights,
+                    description: Some(description.into()),
+                    description_highlights: Vec::new(),
+                    icon: Some(symbol_icon(symbol.kind, &self.theme.colors)),
+                    strikethrough: symbol.deprecated,
+                    keybinding: None,
+                    separator: None,
+                    aria_label: Some(
+                        format!("{} ({})", symbol.name, symbol.kind.aria_name()).into(),
+                    ),
+                    action: QuickAction::OpenWorkspaceSymbol(ix),
+                },
+            ));
+        }
+        if items.is_empty() {
+            if self
+                .quick
+                .as_ref()
+                .is_some_and(|q| q.workspace_fetch.is_some())
+            {
+                return Vec::new();
+            }
+            return vec![QuickRow::Item(QuickItem::message(
+                "No matching workspace symbols",
+                QuickAction::None,
+            ))];
+        }
+        items.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+        items
+            .into_iter()
+            .map(|(_, _, item)| QuickRow::Item(item))
+            .collect()
+    }
+
+    /// Asks every workspace symbol provider for `query`'s symbols,
+    /// replacing (and so cancelling) an earlier lookup.
+    fn fetch_workspace_symbols(&mut self, query: &str, cx: &mut Context<Self>) {
+        let providers = crate::providers::workspace_symbol_providers(cx);
+        let tasks: Vec<_> = providers
+            .iter()
+            .map(|provider| provider.provide_workspace_symbols(query, cx))
+            .collect();
+        let fetched_query = query.to_string();
+        let fetch = cx.spawn(async move |this, cx| {
+            let mut symbols = Vec::new();
+            for (provider, task) in tasks.into_iter().enumerate() {
+                match task.await {
+                    Ok(found) => symbols.extend(found.into_iter().map(|s| (provider, s))),
+                    Err(err) => log::warn!("workspace symbols: {err:#}"),
+                }
+            }
+            let Ok(Some(widget)) = this.update(cx, |this, _| {
+                let quick = this.quick.as_mut()?;
+                quick.workspace_symbols = Some(WorkspaceSymbols {
+                    query: fetched_query,
+                    symbols,
+                });
+                quick.workspace_fetch = None;
+                quick.workspace_busy_since = None;
+                quick.widget.as_ref().map(|(widget, _)| widget.clone())
+            }) else {
+                return;
+            };
+            // Outside the editor's update: refreshing asks it for rows.
+            widget.update(cx, |widget, cx| widget.refresh(cx));
+        });
+        if let Some(quick) = self.quick.as_mut() {
+            quick.workspace_fetch = Some((query.to_string(), fetch));
+            if quick.workspace_busy_since.is_none() {
+                quick.workspace_busy_since = Some(web_time::Instant::now());
+            }
+        }
+    }
+
+    /// Closes quick access and opens workspace symbol `ix`, resolving it
+    /// first when its range isn't known (VS Code resolves a picked symbol
+    /// before opening it).
+    fn open_workspace_symbol(&mut self, ix: usize, cx: &mut Context<Self>) {
+        let Some((provider, symbol)) = self
+            .quick
+            .as_ref()
+            .and_then(|q| q.workspace_symbols.as_ref())
+            .and_then(|found| found.symbols.get(ix).cloned())
+        else {
+            return;
+        };
+        self.close_quick_access(true, cx);
+        let resolve = if symbol.range.is_none() {
+            crate::providers::workspace_symbol_providers(cx)
+                .get(provider)
+                .and_then(|provider| provider.resolve_workspace_symbol(&symbol, cx))
+        } else {
+            None
+        };
+        let Some(resolve) = resolve else {
+            self.open_workspace_symbol_location(&symbol, cx);
+            return;
+        };
+        cx.spawn(async move |this, cx| {
+            let symbol = match resolve.await {
+                Ok(resolved) => resolved,
+                Err(err) => {
+                    log::warn!("resolving a workspace symbol: {err:#}");
+                    symbol
+                }
+            };
+            this.update(cx, |this, cx| {
+                this.open_workspace_symbol_location(&symbol, cx)
+            })
+            .ok();
+        })
+        .detach();
+    }
+
+    fn open_workspace_symbol_location(&mut self, symbol: &WorkspaceSymbol, cx: &mut Context<Self>) {
+        let range = symbol.range.clone().unwrap_or_default();
+        let location = crate::providers::Location::new(Some(symbol.uri.clone()), range);
+        self.open_location(&location, true, cx);
+    }
+
     /// Whether Go to Symbol has symbols to ask for (Monaco
     /// `documentSymbolProvider.has(model)`): a provider, or the `tags.scm`
     /// outline that stands in for one.
@@ -1784,6 +1997,9 @@ impl CodeEditor {
     /// `picker.busy`), while it's the provider.
     fn quick_access_busy_since(&self) -> Option<web_time::Instant> {
         let quick = self.quick.as_ref()?;
+        if quick.in_workspace_provider {
+            return quick.workspace_busy_since;
+        }
         quick
             .in_symbol_provider
             .then_some(quick.symbols_busy_since)
@@ -1990,15 +2206,19 @@ fn item_aria_label(item: &QuickItem) -> SharedString {
 }
 
 /// Monaco's help provider: one item per prefix.
-fn help_rows() -> Vec<QuickRow> {
+/// The help list; `workspace` adds Go to Symbol in Workspace, when there's
+/// a workspace symbol provider.
+fn help_rows(workspace: bool) -> Vec<QuickRow> {
     [
         (":", "Go to Line/Column..."),
         ("::", "Go to Offset..."),
         ("@", "Go to Symbol..."),
         ("@:", "Go to Symbol by Category..."),
+        ("#", "Go to Symbol in Workspace..."),
         (">", "Show And Run Commands"),
     ]
     .into_iter()
+    .filter(|(prefix, _)| workspace || *prefix != "#")
     .map(|(prefix, help)| {
         QuickRow::Item(QuickItem {
             label: prefix.into(),

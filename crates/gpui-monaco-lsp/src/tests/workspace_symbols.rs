@@ -101,3 +101,52 @@ async fn workspace_symbols_and_resolve(cx: &mut TestAppContext) {
     assert_eq!(resolved.range, Some(p(2, 3)..p(2, 7)));
     assert_eq!(resolved.name.as_ref(), "main");
 }
+
+/// The bridge registers a workspace symbol provider for quick access's `#`
+/// mode, which resolves through the server too.
+#[gpui::test]
+async fn workspace_symbol_provider(cx: &mut TestAppContext) {
+    let (client, _server) = start(cx, |method, params| match method {
+        "workspace/symbol" => Some(json!([{
+            "name": "main",
+            "kind": 12,
+            "location": { "uri": "file:///C:/proj/main.rs" },
+            "data": { "id": 7 },
+        }])),
+        "workspaceSymbol/resolve" => {
+            assert_eq!(params["data"], json!({ "id": 7 }));
+            let mut symbol = params.clone();
+            symbol["location"]["range"] = range((2, 3), (2, 7));
+            Some(symbol)
+        }
+        _ => None,
+    })
+    .await;
+    let provider = cx.update(|cx| {
+        let providers = gpui_monaco::providers::workspace_symbol_providers(cx);
+        assert_eq!(providers.len(), 1);
+        providers[0].clone()
+    });
+    let symbols = cx.update(|cx| provider.provide_workspace_symbols("ma", cx));
+    cx.run_until_parked();
+    let symbols = symbols.await.unwrap();
+    assert_eq!(
+        (
+            symbols[0].name.as_ref(),
+            symbols[0].uri.as_ref(),
+            symbols[0].range.clone()
+        ),
+        ("main", "file:///c%3A/proj/main.rs", None)
+    );
+    let resolved = cx
+        .update(|cx| provider.resolve_workspace_symbol(&symbols[0], cx))
+        .unwrap();
+    cx.run_until_parked();
+    assert_eq!(resolved.await.unwrap().range, Some(p(2, 3)..p(2, 7)));
+
+    // Shutting down unregisters it.
+    let shutdown = client.update(cx, |client, cx| client.shutdown(cx));
+    cx.run_until_parked();
+    shutdown.await.unwrap();
+    assert!(cx.update(|cx| gpui_monaco::providers::workspace_symbol_providers(cx).is_empty()));
+}
