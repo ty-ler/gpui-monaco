@@ -1,6 +1,8 @@
 //! The client side of one language server: lifecycle, document sync,
 //! diagnostics and the requests a server sends the client.
 
+mod pull_diagnostics;
+
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
@@ -26,6 +28,7 @@ use serde_json::{Value, json};
 use crate::convert;
 use crate::features::LspFeatures;
 use crate::rpc::{self, Connection, Incoming, METHOD_NOT_FOUND, ResponseError};
+use pull_diagnostics::PullDiagnostics;
 
 /// How long [`LspClient::will_save_wait_until`] waits for the server's
 /// edits: VS Code's budget for a save participant.
@@ -168,6 +171,8 @@ pub struct LspClient {
     /// their markers: code action requests send the server's own back
     /// (`vscode-languageclient` keeps them in its diagnostic collection).
     diagnostics: HashMap<String, Vec<(Marker, lsp::Diagnostic)>>,
+    /// Pull diagnostics, if the server has a `diagnosticProvider`.
+    pull: Option<PullDiagnostics>,
     registrations: Vec<ProviderRegistration>,
     /// The server's commands, registered with [`gpui_monaco::register_command`].
     commands: Vec<gpui_monaco::Disposable>,
@@ -249,14 +254,12 @@ impl LspClient {
         let (connection, incoming, io) = Connection::new(reader, writer, cx.background_executor());
         tasks.extend(io);
         // Sent raw so the capabilities `lsp-types` doesn't know are kept.
-        let initialize = initialize_params(&options)
-            .and_then(|params| Ok(serde_json::to_value(params)?))
-            .map(|params| {
-                connection.request_raw(
-                    <lsp::request::Initialize as lsp::request::Request>::METHOD,
-                    params,
-                )
-            });
+        let initialize = initialize_params(&options).map(|params| {
+            connection.request_raw(
+                <lsp::request::Initialize as lsp::request::Request>::METHOD,
+                params,
+            )
+        });
         cx.spawn(async move |cx| {
             let raw = initialize?.await?;
             let raw_capabilities = raw.get("capabilities").cloned().unwrap_or(Value::Null);
@@ -276,6 +279,7 @@ impl LspClient {
                     this.update(cx, |this, cx| this.exited(cx)).ok();
                 }));
                 cx.on_release(|this, cx| this.unregister(cx)).detach();
+                let pull = PullDiagnostics::new(&result.capabilities);
                 let mut client = Self {
                     options,
                     connection,
@@ -284,6 +288,7 @@ impl LspClient {
                     server_info: result.server_info,
                     documents: HashMap::new(),
                     diagnostics: HashMap::new(),
+                    pull,
                     registrations: Vec::new(),
                     commands: Vec::new(),
                     running: true,
@@ -291,6 +296,7 @@ impl LspClient {
                     _child: child,
                 };
                 client.register(cx);
+                client.pull_workspace_diagnostics(None, cx);
                 client
             }))
         })
@@ -377,7 +383,10 @@ impl LspClient {
             cx.subscribe(model, {
                 let uri = uri.clone();
                 move |this, model, event: &TextModelEvent, cx| match event {
-                    TextModelEvent::Edited { .. } => this.sync(&uri, cx),
+                    TextModelEvent::Edited { .. } => {
+                        this.sync(&uri, cx);
+                        this.pull_diagnostics_after_edit(&uri, cx);
+                    }
                     TextModelEvent::LanguageChanged { .. } => this.reopen(&uri, &model, cx),
                     _ => {}
                 }
@@ -388,7 +397,7 @@ impl LspClient {
             }),
         ];
         self.documents.insert(
-            uri,
+            uri.clone(),
             Document {
                 model: model.downgrade(),
                 snapshot,
@@ -396,6 +405,7 @@ impl LspClient {
                 _subscriptions: subscriptions,
             },
         );
+        self.pull_diagnostics(&uri, cx);
         Ok(())
     }
 
@@ -560,6 +570,8 @@ impl LspClient {
     /// features are unregistered right away.
     pub fn shutdown(&mut self, cx: &mut Context<Self>) -> Task<Result<()>> {
         self.unregister(cx);
+        // Stops pulling diagnostics.
+        self.pull = None;
         let connection = self.connection.clone();
         let shutdown = connection.request::<lsp::request::Shutdown>(());
         cx.background_executor().spawn(async move {
@@ -657,6 +669,9 @@ impl LspClient {
     }
 
     fn close(&mut self, uri: &str) {
+        if let Some(pull) = &mut self.pull {
+            pull.forget(uri);
+        }
         if self.documents.remove(uri).is_some()
             && let Ok(uri) = lsp::Uri::from_str(uri)
         {
@@ -781,6 +796,7 @@ impl LspClient {
 
     fn exited(&mut self, cx: &mut Context<Self>) {
         self.running = false;
+        self.pull = None;
         self.unregister(cx);
         cx.emit(LspClientEvent::Exited);
     }
@@ -861,26 +877,7 @@ impl LspClient {
                 // Servers may write uris another way than the client
                 // (`vscode-uri` turns `C:` into `c%3A`).
                 let uri = convert::uri(&params.uri).to_string();
-                let published: Vec<(Marker, lsp::Diagnostic)> = params
-                    .diagnostics
-                    .into_iter()
-                    .map(|diagnostic| (convert::marker(diagnostic.clone()), diagnostic))
-                    .collect();
-                let markers = published.iter().map(|(marker, _)| marker.clone()).collect();
-                if published.is_empty() {
-                    self.diagnostics.remove(&uri);
-                } else {
-                    self.diagnostics.insert(uri.clone(), published);
-                }
-                let owner = self.markers_owner();
-                // Documents that aren't attached get them too, as
-                // `vscode-languageclient`'s diagnostic collection does.
-                match self.documents.get(&uri).and_then(|d| d.model.upgrade()) {
-                    Some(model) => {
-                        model.update(cx, |model, cx| model.set_markers(owner, markers, cx))
-                    }
-                    None => gpui_monaco::set_markers_for_uri(cx, owner, &uri, markers),
-                }
+                self.set_diagnostics(uri, params.diagnostics, cx);
             }
             ShowMessage::METHOD => {
                 if let Ok(params) = rpc::params::<lsp::ShowMessageParams>(params) {
@@ -902,6 +899,33 @@ impl LspClient {
                 }
             }
             _ => {}
+        }
+    }
+
+    /// Makes `diagnostics` the markers of `uri` (normalized), pushed or
+    /// pulled.
+    fn set_diagnostics(
+        &mut self,
+        uri: String,
+        diagnostics: Vec<lsp::Diagnostic>,
+        cx: &mut Context<Self>,
+    ) {
+        let published: Vec<(Marker, lsp::Diagnostic)> = diagnostics
+            .into_iter()
+            .map(|diagnostic| (convert::marker(diagnostic.clone()), diagnostic))
+            .collect();
+        let markers = published.iter().map(|(marker, _)| marker.clone()).collect();
+        if published.is_empty() {
+            self.diagnostics.remove(&uri);
+        } else {
+            self.diagnostics.insert(uri.clone(), published);
+        }
+        let owner = self.markers_owner();
+        // Documents that aren't attached get them too, as
+        // `vscode-languageclient`'s diagnostic collection does.
+        match self.documents.get(&uri).and_then(|d| d.model.upgrade()) {
+            Some(model) => model.update(cx, |model, cx| model.set_markers(owner, markers, cx)),
+            None => gpui_monaco::set_markers_for_uri(cx, owner, &uri, markers),
         }
     }
 
@@ -946,6 +970,10 @@ impl LspClient {
             // `onDidChangeCodeLenses`.
             lsp_types::request::CodeLensRefresh::METHOD => {
                 gpui_monaco::providers::refresh_code_lenses(cx);
+                Ok(Value::Null)
+            }
+            lsp_types::request::WorkspaceDiagnosticRefresh::METHOD => {
+                self.refresh_pulled_diagnostics(cx);
                 Ok(Value::Null)
             }
             RegisterCapability::METHOD
@@ -1061,7 +1089,8 @@ fn workspace_folders(options: &LspClientOptions) -> Option<Vec<lsp::WorkspaceFol
     Some(vec![lsp::WorkspaceFolder { uri, name }])
 }
 
-fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams> {
+/// The `initialize` request's params.
+fn initialize_params(options: &LspClientOptions) -> Result<Value> {
     let capabilities: lsp::ClientCapabilities = serde_json::from_value(json!({
         "general": { "positionEncodings": ["utf-16"] },
         "window": {
@@ -1174,6 +1203,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "formatting": {},
             "rangeFormatting": {},
             "onTypeFormatting": {},
+            "diagnostic": { "dynamicRegistration": false, "relatedDocumentSupport": true },
             "publishDiagnostics": {
                 "relatedInformation": true,
                 "versionSupport": true,
@@ -1182,7 +1212,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
         },
     }))?;
     #[allow(deprecated)]
-    Ok(lsp::InitializeParams {
+    let params = lsp::InitializeParams {
         process_id: Some(std::process::id()),
         root_uri: options
             .root_uri
@@ -1196,7 +1226,12 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             version: Some(env!("CARGO_PKG_VERSION").into()),
         }),
         ..Default::default()
-    })
+    };
+    let mut params = serde_json::to_value(params)?;
+    // `lsp-types` names this `workspace.diagnostic`; the protocol has
+    // `workspace.diagnostics`.
+    params["capabilities"]["workspace"]["diagnostics"] = json!({ "refreshSupport": true });
+    Ok(params)
 }
 
 trait LogErr {
