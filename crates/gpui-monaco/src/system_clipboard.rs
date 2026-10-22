@@ -21,7 +21,6 @@ pub(crate) fn add_html(text: &str, html: &str) -> bool {
 }
 
 /// The system clipboard's HTML, if its text is `text` (what GPUI read).
-#[allow(dead_code)] // For paste providers (#309).
 pub(crate) fn read_html(text: &str) -> Option<String> {
     imp::read_html(text)
 }
