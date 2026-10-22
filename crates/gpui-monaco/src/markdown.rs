@@ -18,9 +18,9 @@
 //! [`HTML_TAGS`]; `<kbd>` is a keycap). Code blocks without a language are
 //! in [`MarkdownStyle::code_language`].
 //!
-//! The text is laid out by GPUI's `StyledText`, which can't be selected:
-//! hovers copy through their copy button, and suggest details through
-//! `editor.action.suggestWidgetCopy` (Monaco lets the text be selected).
+//! The text is laid out by GPUI's `StyledText`, which can't be selected,
+//! so each block registers its layout for [`crate::selectable_text`],
+//! which selects it as the browser does Monaco's.
 //! Inline code is padded with spaces in its background, rounded by
 //! [`MarkdownStyle::code_corner_radius`] (the backgrounds are drawn under
 //! the text, as GPUI's text backgrounds are square), and an image inside a
@@ -977,6 +977,8 @@ struct Renderer<'a> {
     /// Takes a clicked link first; it's opened as usual unless this says
     /// it handled it.
     on_link: Option<LinkHandler>,
+    /// The text blocks, for selecting them.
+    blocks: crate::selectable_text::Blocks,
 }
 
 /// Handles a clicked markdown link's URL; returns whether it did.
@@ -1083,9 +1085,11 @@ impl Renderer<'_> {
         });
         let mut overrides: Vec<_> = code_ranges.chain(icon_ranges).collect();
         overrides.sort_by_key(|(range, _)| range.start);
-        let text = StyledText::new(inline.text)
+        let source = SharedString::from(inline.text);
+        let text = StyledText::new(source.clone())
             .with_highlights(highlights)
             .with_font_family_overrides(overrides);
+        let layout = text.layout().clone();
         let code_backgrounds = (!rounded_code.is_empty() || !keycaps.is_empty()).then(|| {
             let layout = text.layout().clone();
             let (radius, color) = (style.code_corner_radius, style.code_background);
@@ -1144,12 +1148,14 @@ impl Renderer<'_> {
                 })
                 .into_any_element()
         };
-        div()
+        let element = div()
             .text_size(font_size)
             .when_some(code_backgrounds, |div, backgrounds| {
                 div.relative().child(backgrounds)
             })
             .child(element)
+            .into_any_element();
+        crate::selectable_text::SelectableBlock::new(element, layout, source, self.blocks.clone())
             .into_any_element()
     }
 
@@ -1234,11 +1240,21 @@ impl Renderer<'_> {
                     .unwrap_or_default();
                 // Monaco's tokenized `div.code`: the editor font,
                 // `white-space: pre-wrap`, no background.
-                div()
+                let code = SharedString::from(code);
+                let text = StyledText::new(code.clone()).with_highlights(highlights);
+                let layout = text.layout().clone();
+                let element = div()
                     .font_family(style.code_font.clone())
                     .text_size(style.font_size)
-                    .child(StyledText::new(code).with_highlights(highlights))
-                    .into_any_element()
+                    .child(text)
+                    .into_any_element();
+                crate::selectable_text::SelectableBlock::new(
+                    element,
+                    layout,
+                    code,
+                    self.blocks.clone(),
+                )
+                .into_any_element()
             }
             Block::Quote(blocks) => div()
                 .flex()
@@ -1487,8 +1503,30 @@ pub(crate) fn render_markdown_with_links(
     on_link: Option<LinkHandler>,
     cx: &App,
 ) -> AnyElement {
+    let blocks = crate::selectable_text::Blocks::default();
+    let column = render_markdown_column(markdown, style, theme, on_link, &blocks, cx);
+    crate::selectable_text::SelectionRoot::new(
+        selection_id(&markdown.value),
+        column,
+        blocks,
+        theme.colors.selection_background,
+    )
+    .into_any_element()
+}
+
+/// Renders `markdown`'s column of blocks, its text selectable within the
+/// [`SelectionRoot`](crate::selectable_text::SelectionRoot) of `blocks`
+/// (which can hold several markdowns, selected across).
+pub(crate) fn render_markdown_column(
+    markdown: &MarkdownString,
+    style: &MarkdownStyle,
+    theme: &Theme,
+    on_link: Option<LinkHandler>,
+    blocks: &crate::selectable_text::Blocks,
+    cx: &App,
+) -> AnyElement {
     let icons_available = codicons::codicons_available(cx);
-    let blocks = parse(markdown, icons_available);
+    let parsed = parse(markdown, icons_available);
     let registry = crate::model::language_registry(cx);
     let mut renderer = Renderer {
         style,
@@ -1498,8 +1536,9 @@ pub(crate) fn render_markdown_with_links(
         icons_available,
         next_id: 0,
         on_link,
+        blocks: blocks.clone(),
     };
-    let children = renderer.blocks(blocks, 0);
+    let children = renderer.blocks(parsed, 0);
     // Monaco's `p, .code, ul, ol, h1…h6 { margin: 8px 0 }`, without the
     // outer margins.
     div()
@@ -1513,6 +1552,15 @@ pub(crate) fn render_markdown_with_links(
         .into_any_element()
 }
 
+/// The id a markdown's selection is kept under: its text's, so it's the
+/// same each frame and a new text starts unselected.
+pub(crate) fn selection_id(text: &str) -> gpui::ElementId {
+    use std::hash::{Hash as _, Hasher as _};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut hasher);
+    gpui::ElementId::NamedInteger("markdown-selection".into(), hasher.finish())
+}
+
 /// Renders documentation: markdown, or plain text as written (Monaco's
 /// `white-space: pre-wrap` for string documentation).
 pub fn render_documentation(
@@ -1523,12 +1571,31 @@ pub fn render_documentation(
 ) -> AnyElement {
     match documentation {
         Documentation::Markdown(markdown) => render_markdown(markdown, style, theme, cx),
-        Documentation::PlainText(text) => div()
-            .text_color(style.foreground)
-            .text_size(style.font_size)
-            .line_height(relative(style.line_height))
-            .child(text.clone())
-            .into_any_element(),
+        Documentation::PlainText(text) => {
+            let text = text.clone();
+            let styled = StyledText::new(text.clone());
+            let layout = styled.layout().clone();
+            let blocks = crate::selectable_text::Blocks::default();
+            let element = div()
+                .text_color(style.foreground)
+                .text_size(style.font_size)
+                .line_height(relative(style.line_height))
+                .child(styled)
+                .into_any_element();
+            let block = crate::selectable_text::SelectableBlock::new(
+                element,
+                layout,
+                text.clone(),
+                blocks.clone(),
+            );
+            crate::selectable_text::SelectionRoot::new(
+                selection_id(&text),
+                block.into_any_element(),
+                blocks,
+                theme.colors.selection_background,
+            )
+            .into_any_element()
+        }
     }
 }
 
@@ -1946,6 +2013,7 @@ mod tests {
             icons_available: false,
             next_id: 0,
             on_link: None,
+            blocks: Default::default(),
         };
         assert_eq!(renderer.code_block_language(None), Some("rust".into()));
         // No such language registered: plain text.

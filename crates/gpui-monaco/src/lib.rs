@@ -122,6 +122,7 @@ pub mod replace_pattern;
 mod sash;
 pub mod search;
 mod section_headers;
+mod selectable_text;
 mod system_clipboard;
 mod tab_focus;
 pub use tab_focus::{set_tab_focus_mode, tab_focus_mode};
