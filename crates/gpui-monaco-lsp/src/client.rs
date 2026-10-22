@@ -773,6 +773,16 @@ impl LspClient {
         let selector = self.default_selector();
         let features = LspFeatures::new(cx.weak_entity(), &self.capabilities);
         self.registrations = features.register(selector.clone(), &self.capabilities, cx);
+        // `lsp-types` has no `typeHierarchyProvider`: read from the raw
+        // capabilities.
+        if self.supports_type_hierarchy() {
+            self.registrations
+                .push(gpui_monaco::providers::register_type_hierarchy_provider(
+                    cx,
+                    selector.clone(),
+                    features,
+                ));
+        }
         let inline_completions =
             crate::inline_completions::register(self, cx.weak_entity(), selector, cx);
         self.registrations.extend(inline_completions);

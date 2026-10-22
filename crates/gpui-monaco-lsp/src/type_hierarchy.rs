@@ -2,8 +2,10 @@
 //! `typeHierarchy/subtypes`, as `vscode-languageclient`'s
 //! `TypeHierarchyFeature` sends them for VS Code's type hierarchy view.
 //!
-//! gpui-monaco has no type hierarchy provider or view (Monaco has neither),
-//! so this is an API on [`LspClient`] for hosts to build that UI on.
+//! The bridge registers a gpui-monaco
+//! [`TypeHierarchyProvider`](gpui_monaco::providers::TypeHierarchyProvider)
+//! on top of it, for Peek Type Hierarchy; hosts can also call these for a
+//! view of their own.
 //!
 //! `lsp-types` 0.97 has no `typeHierarchyProvider` server capability and
 //! types an item's `tags` as one tag instead of a list, so the requests are
@@ -22,6 +24,7 @@ use serde_json::{Value, json};
 
 use crate::LspClient;
 use crate::convert;
+use crate::features::LspFeatures;
 
 const PREPARE: &str = "textDocument/prepareTypeHierarchy";
 const SUPERTYPES: &str = "typeHierarchy/supertypes";
@@ -118,11 +121,21 @@ impl LspClient {
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<TypeHierarchyItem>>> {
+        let uri = model.read(cx).resource().to_string();
+        self.prepare_type_hierarchy_at(&uri, position, cx)
+    }
+
+    /// [`Self::prepare_type_hierarchy`] for the attached document `uri`.
+    pub(crate) fn prepare_type_hierarchy_at(
+        &mut self,
+        uri: &str,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<TypeHierarchyItem>>> {
         if !self.supports_type_hierarchy() {
             return Task::ready(Ok(Vec::new()));
         }
-        let uri = model.read(cx).resource().to_string();
-        let Some((connection, text_document)) = self.prepare_request(&uri, cx) else {
+        let Some((connection, text_document)) = self.prepare_request(uri, cx) else {
             return Task::ready(Ok(Vec::new()));
         };
         let request = connection.request_raw(
@@ -168,5 +181,79 @@ impl LspClient {
             .request_raw(method, json!({ "item": item.server_item }));
         cx.background_executor()
             .spawn(async move { type_items(method, request.await?) })
+    }
+}
+
+/// The editor's form of `item`, with the server's item as its `data`.
+fn provider_item(item: TypeHierarchyItem) -> gpui_monaco::providers::HierarchyItem {
+    gpui_monaco::providers::HierarchyItem {
+        data: Some(item.server_item),
+        name: item.name,
+        kind: item.kind,
+        deprecated: item.deprecated,
+        detail: item.detail,
+        uri: Some(item.uri),
+        range: item.range,
+        selection_range: item.selection_range,
+    }
+}
+
+fn provider_items(
+    task: Task<Result<Vec<TypeHierarchyItem>>>,
+    cx: &App,
+) -> Task<Result<Vec<gpui_monaco::providers::HierarchyItem>>> {
+    cx.background_executor()
+        .spawn(async move { Ok(task.await?.into_iter().map(provider_item).collect()) })
+}
+
+/// `vscode-languageclient`'s `TypeHierarchyFeature`: Peek Type Hierarchy
+/// asks the server.
+impl gpui_monaco::providers::TypeHierarchyProvider for LspFeatures {
+    fn prepare_type_hierarchy(
+        &self,
+        context: &gpui_monaco::providers::ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::HierarchyItem>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let uri = context.resource.to_string();
+        let request = client.update(cx, |client, cx| {
+            client.prepare_type_hierarchy_at(&uri, position, cx)
+        });
+        provider_items(request, cx)
+    }
+
+    fn provide_supertypes(
+        &self,
+        item: &gpui_monaco::providers::HierarchyItem,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::HierarchyItem>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let item = match type_item(item.data.clone().unwrap_or(Value::Null)) {
+            Ok(item) => item,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        let request = client.read(cx).supertypes(&item, cx);
+        provider_items(request, cx)
+    }
+
+    fn provide_subtypes(
+        &self,
+        item: &gpui_monaco::providers::HierarchyItem,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::HierarchyItem>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let item = match type_item(item.data.clone().unwrap_or(Value::Null)) {
+            Ok(item) => item,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        let request = client.read(cx).subtypes(&item, cx);
+        provider_items(request, cx)
     }
 }

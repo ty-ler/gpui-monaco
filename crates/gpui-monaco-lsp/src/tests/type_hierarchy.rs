@@ -89,3 +89,46 @@ async fn type_hierarchy(cx: &mut TestAppContext) {
     assert!(subtypes.await.unwrap().is_empty());
     assert_eq!(server.messages("typeHierarchy/subtypes").len(), 1);
 }
+
+/// The bridge registers a type hierarchy provider for the editor's Peek
+/// Type Hierarchy (from the raw capabilities, which `lsp-types` lacks),
+/// which sends the server's item back as it came.
+#[gpui::test]
+async fn type_hierarchy_provider(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |method, _| match method {
+        "textDocument/prepareTypeHierarchy" => {
+            let mut item = server_item("Dog", "file:///project/main.rs", 2);
+            item["tags"] = json!([1]);
+            Some(json!([item]))
+        }
+        "typeHierarchy/supertypes" => {
+            Some(json!([server_item("Animal", "file:///project/main.rs", 0)]))
+        }
+        _ => None,
+    })
+    .await;
+    let model = model(cx, "fn main() {}\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let provider = cx.update(|cx| {
+        let providers = gpui_monaco::providers::type_hierarchy_providers(cx, model.read(cx));
+        assert_eq!(providers.len(), 1);
+        providers[0].clone()
+    });
+    let context = model.read_with(cx, |m, _| m.provider_context());
+    let items = cx.update(|cx| provider.prepare_type_hierarchy(&context, p(2, 7), cx));
+    cx.run_until_parked();
+    let items = items.await.unwrap();
+    assert_eq!(
+        (items[0].name.as_ref(), items[0].kind),
+        ("Dog", SymbolKind::Class)
+    );
+    assert!(items[0].deprecated);
+    let supertypes = cx.update(|cx| provider.provide_supertypes(&items[0], cx));
+    cx.run_until_parked();
+    assert_eq!(supertypes.await.unwrap()[0].name.as_ref(), "Animal");
+    let sent = &server.messages("typeHierarchy/supertypes")[0]["params"]["item"];
+    assert_eq!(sent["tags"], json!([1]));
+    assert_eq!(sent["data"], json!({ "name": "Dog" }));
+}

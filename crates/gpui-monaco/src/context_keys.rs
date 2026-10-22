@@ -345,6 +345,16 @@ impl CodeEditor {
         );
         has(
             context,
+            "editorHasCallHierarchyProvider",
+            providers::call_hierarchy_providers(cx, target.clone()).len(),
+        );
+        has(
+            context,
+            "editorHasTypeHierarchyProvider",
+            providers::type_hierarchy_providers(cx, target.clone()).len(),
+        );
+        has(
+            context,
             "editorHasRenameProvider",
             providers::rename_providers(cx, target.clone()).len(),
         );

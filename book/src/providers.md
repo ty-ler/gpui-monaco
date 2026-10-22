@@ -11,6 +11,8 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `DeclarationProvider` | `DeclarationProvider` | go to and peek declaration |
 | `TypeDefinitionProvider` | `TypeDefinitionProvider` | go to and peek type definition |
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
+| `CallHierarchyProvider` | (VS Code's) | Peek Call Hierarchy, Shift+Alt+H |
+| `TypeHierarchyProvider` | (VS Code's) | Peek Type Hierarchy |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
 | `NewSymbolNamesProvider` | `NewSymbolNamesProvider` | suggested names in the rename box |
 | `SelectionRangeProvider` | `SelectionRangeProvider` | expand and shrink selection |
@@ -304,6 +306,20 @@ A `DocumentSymbolProvider` returns a document's outline as nested `DocumentSymbo
 ## Workspace symbols
 
 A `WorkspaceSymbolProvider` (VS Code's; Monaco has none) finds symbols across the workspace for a query, as `WorkspaceSymbol`s: name, `SymbolKind`, container, the model's `uri`, and a range that may be `None` until `resolve_workspace_symbol` fills it in. It isn't tied to a language: `register_workspace_symbol_provider(cx, provider)` takes no selector, and `workspace_symbol_providers(cx)` lists them. Quick access lists their symbols with [`#`](editing.md#quick-access). The LSP bridge registers one for servers with `workspaceSymbolProvider`.
+
+## Call and type hierarchy
+
+A `CallHierarchyProvider` and a `TypeHierarchyProvider` (VS Code's; Monaco has neither) answer "who calls this function" and "what does this type extend". Each first prepares `HierarchyItem`s for the symbol at a position (name, `SymbolKind`, detail, the `uri` of its document, its range and selection range, and `data` for the provider), then gives an item's incoming calls (`IncomingCall`: the caller and the ranges in it that make the calls) and outgoing calls (`OutgoingCall`: the callee and the ranges in the item that call it), or its supertypes and subtypes. Register them with `register_call_hierarchy_provider` and `register_type_hierarchy_provider`.
+
+Peek Call Hierarchy (Shift+Alt+H, `show_call_hierarchy`, VS Code's `editor.showCallHierarchy`) and Peek Type Hierarchy (unbound, `show_type_hierarchy`) open a peek view under the cursor's line, as VS Code's call and type hierarchy peeks do:
+
+- **The tree:** the item at the cursor, expanded to its callers or supertypes. Right or a click on the twistie expands an item, asking the provider for the next level; Left collapses it or goes to its parent. Up, Down, Home and End move in the tree.
+- **The preview:** the focused item's document, with the call sites highlighted (for incoming calls, in the caller; for outgoing calls, in the item itself), or else the item's name selected. Other documents come from `model_for_uri`.
+- **Direction:** the button in the title, or running the command again while the view is open, shows calls the other way (callers or callees) or subtypes instead of supertypes, from the same item.
+- **Going there:** Enter or a double click closes the view and goes to the item, in this model or through the editor openers, else `CodeEditorEvent::OpenLocation`. Escape or the close button closes it.
+- Without a symbol at the cursor the view says "No results"; an item with nothing in that direction says so, such as "No calls to 'name'".
+
+The view has no resizing sash, no list/preview split sash and no context menu items, and doesn't virtualize the tree. `hierarchy_direction` says which hierarchy is open, if any, and `close_hierarchy` closes it. The LSP bridge registers both providers for servers that have them.
 
 ## Code lens
 

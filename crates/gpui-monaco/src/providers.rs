@@ -1631,6 +1631,107 @@ pub trait WorkspaceSymbolProvider: 'static {
     }
 }
 
+// ----- call and type hierarchy -------------------------------------------------------
+
+/// A function, type or other symbol in a call or type hierarchy (VS Code
+/// `CallHierarchyItem`, `TypeHierarchyItem`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct HierarchyItem {
+    /// Its name.
+    pub name: SharedString,
+    /// Its kind.
+    pub kind: SymbolKind,
+    /// Tagged deprecated.
+    pub deprecated: bool,
+    /// More detail, such as a signature or module.
+    pub detail: Option<SharedString>,
+    /// Its model's uri, or `None` for the model that was queried.
+    pub uri: Option<SharedString>,
+    /// The whole definition.
+    pub range: Range<PointUtf16>,
+    /// The part to select and reveal, usually its name.
+    pub selection_range: Range<PointUtf16>,
+    /// Anything the provider needs to find its calls or types, such as a
+    /// language server's item.
+    pub data: Option<serde_json::Value>,
+}
+
+/// A call to an item (VS Code `CallHierarchyIncomingCall`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct IncomingCall {
+    /// The caller.
+    pub from: HierarchyItem,
+    /// Where it makes the calls, in `from`'s model.
+    pub from_ranges: Vec<Range<PointUtf16>>,
+}
+
+/// A call an item makes (VS Code `CallHierarchyOutgoingCall`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct OutgoingCall {
+    /// What it calls.
+    pub to: HierarchyItem,
+    /// Where the item makes the calls, in the item's own model.
+    pub from_ranges: Vec<Range<PointUtf16>>,
+}
+
+/// Finds who calls a function and what it calls (VS Code
+/// `CallHierarchyProvider`; Monaco has none), for Peek Call Hierarchy.
+///
+/// Register with [`register_call_hierarchy_provider`].
+pub trait CallHierarchyProvider: 'static {
+    /// The items a hierarchy starts from at `position`, usually the
+    /// function there.
+    fn prepare_call_hierarchy(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<HierarchyItem>>>;
+
+    /// The calls to `item`.
+    fn provide_incoming_calls(
+        &self,
+        item: &HierarchyItem,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<IncomingCall>>>;
+
+    /// The calls `item` makes.
+    fn provide_outgoing_calls(
+        &self,
+        item: &HierarchyItem,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<OutgoingCall>>>;
+}
+
+/// Finds a type's supertypes and subtypes (VS Code
+/// `TypeHierarchyProvider`; Monaco has none), for Peek Type Hierarchy.
+///
+/// Register with [`register_type_hierarchy_provider`].
+pub trait TypeHierarchyProvider: 'static {
+    /// The items a hierarchy starts from at `position`, usually the type
+    /// there.
+    fn prepare_type_hierarchy(
+        &self,
+        context: &ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<HierarchyItem>>>;
+
+    /// The types `item` extends or implements.
+    fn provide_supertypes(
+        &self,
+        item: &HierarchyItem,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<HierarchyItem>>>;
+
+    /// The types that extend or implement `item`.
+    fn provide_subtypes(
+        &self,
+        item: &HierarchyItem,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<HierarchyItem>>>;
+}
+
 // ----- code lens -----------------------------------------------------------------
 
 /// A command shown above a line (Monaco `CodeLens`).
@@ -3113,6 +3214,8 @@ struct LanguageFeatures {
     code_lens: Vec<Entry<dyn CodeLensProvider>>,
     document_symbols: Vec<Entry<dyn DocumentSymbolProvider>>,
     workspace_symbols: Vec<Entry<dyn WorkspaceSymbolProvider>>,
+    call_hierarchy: Vec<Entry<dyn CallHierarchyProvider>>,
+    type_hierarchy: Vec<Entry<dyn TypeHierarchyProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -3243,6 +3346,45 @@ register_fn!(
     document_symbols,
     DocumentSymbolProvider
 );
+register_fn!(
+    /// Registers a call hierarchy provider for the models `selector`
+    /// matches (VS Code `registerCallHierarchyProvider`). Peek Call
+    /// Hierarchy uses the best matching one with items.
+    register_call_hierarchy_provider,
+    call_hierarchy,
+    CallHierarchyProvider
+);
+register_fn!(
+    /// Registers a type hierarchy provider for the models `selector`
+    /// matches (VS Code `registerTypeHierarchyProvider`). Peek Type
+    /// Hierarchy uses the best matching one with items.
+    register_type_hierarchy_provider,
+    type_hierarchy,
+    TypeHierarchyProvider
+);
+
+/// The registered call hierarchy providers whose selector matches
+/// `target`, best first (see [`LanguageSelector`]).
+pub fn call_hierarchy_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn CallHierarchyProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.call_hierarchy, &target.into()))
+        .unwrap_or_default()
+}
+
+/// The registered type hierarchy providers whose selector matches
+/// `target`, best first (see [`LanguageSelector`]).
+pub fn type_hierarchy_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn TypeHierarchyProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.type_hierarchy, &target.into()))
+        .unwrap_or_default()
+}
+
 /// Registers a workspace symbol provider (VS Code
 /// `registerWorkspaceSymbolProvider`): quick access lists the symbols of
 /// every registered one with `#`.
@@ -3492,6 +3634,8 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     let code_lens_changed = features.code_lens.len() != code_lens_changed;
     features.document_symbols.retain(|e| e.id != registration);
     features.workspace_symbols.retain(|e| e.id != registration);
+    features.call_hierarchy.retain(|e| e.id != registration);
+    features.type_hierarchy.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);
