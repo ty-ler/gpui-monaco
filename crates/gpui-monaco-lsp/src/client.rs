@@ -228,6 +228,29 @@ impl LspClient {
         &self.connection
     }
 
+    /// The settings served through `workspace/configuration`.
+    pub fn settings(&self) -> &Value {
+        &self.options.settings
+    }
+
+    /// Replaces the settings served through `workspace/configuration` and
+    /// tells the server (`workspace/didChangeConfiguration`). As in
+    /// `vscode-languageclient`, the notification's `settings` is `null`:
+    /// servers that pull their settings ask for them again.
+    pub fn set_settings(&mut self, settings: Value) {
+        self.options.settings = settings;
+        if !self.running {
+            return;
+        }
+        self.connection
+            .notify::<lsp::notification::DidChangeConfiguration>(
+                lsp::DidChangeConfigurationParams {
+                    settings: Value::Null,
+                },
+            )
+            .ok();
+    }
+
     /// Whether the server is still running.
     pub fn is_running(&self) -> bool {
         self.running
@@ -827,6 +850,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams
             "semanticTokens": { "refreshSupport": true },
             "codeLens": { "refreshSupport": true },
             "configuration": true,
+            "didChangeConfiguration": {},
             "workspaceFolders": true,
             "workspaceEdit": { "documentChanges": true },
         },
