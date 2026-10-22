@@ -479,3 +479,282 @@ fn without_the_menu_only_the_primary_selection_keeps_the_cursors(cx: &mut TestAp
     right_click(cx, p);
     assert_eq!(editor.read_with(cx, |e, _| e.selections()), two);
 }
+
+/// Runs logged by the alternative action tests' host actions.
+type Runs = std::rc::Rc<std::cell::RefCell<Vec<&'static str>>>;
+
+/// Adds "Primary" to the menu, with "Alternative" (as `alternative`
+/// makes it) as its alternative, each with a key and logging its runs.
+fn add_alternative(
+    editor: &Entity<CodeEditor>,
+    alternative: impl FnOnce(EditorActionDescriptor) -> EditorActionDescriptor,
+    cx: &mut VisualTestContext,
+) -> Runs {
+    let runs = Runs::default();
+    let log = |id: &'static str| {
+        let runs = runs.clone();
+        move |_: &mut CodeEditor, _: &mut gpui::Window, _: &mut gpui::Context<CodeEditor>| {
+            runs.borrow_mut().push(id)
+        }
+    };
+    editor.update(cx, |e, cx| {
+        let _ = e.add_action(
+            EditorActionDescriptor::new("my.primary", "Primary", log("primary"))
+                .keybinding("ctrl-alt-p")
+                .context_menu("navigation", 1.)
+                .context_menu_alt("my.alternative"),
+            cx,
+        );
+        let _ = e.add_action(
+            alternative(
+                EditorActionDescriptor::new("my.alternative", "Alternative", log("alternative"))
+                    .keybinding("ctrl-alt-a"),
+            ),
+            cx,
+        );
+    });
+    runs
+}
+
+/// The menu items a fresh frame shows: label and keybinding.
+fn shown_items(cx: &mut VisualTestContext) -> Vec<(String, Option<String>)> {
+    cx.run_until_parked();
+    gpui_monaco::record_aria_for_tests();
+    cx.update(|window, cx| {
+        window.refresh();
+        window.draw(cx).clear(cx);
+    });
+    gpui_monaco::recorded_aria_for_tests()
+        .into_iter()
+        .filter(|n| matches!(n.role, gpui::Role::MenuItem | gpui::Role::MenuItemCheckBox))
+        .map(|n| {
+            let label = n.label.unwrap_or_default().to_string();
+            (label, n.keyshortcuts.map(|k| k.to_string()))
+        })
+        .collect()
+}
+
+/// `keystroke`'s label, as the menu shows a keybinding.
+fn key_label(keystroke: &str) -> Option<String> {
+    use gpui_monaco::keybinding_label::{OperatingSystem, ui_label};
+    ui_label(
+        &[gpui::Keystroke::parse(keystroke).unwrap()],
+        OperatingSystem::current(),
+    )
+}
+
+/// Whether Shift shows alternatives too (Monaco `isWindows || isLinux`).
+const SHIFT_IS_ALT: bool = cfg!(any(target_os = "windows", target_os = "linux"));
+
+/// Monaco `menu.test.ts` "Alt updates menu labels, mnemonics and state
+/// without hover": while Alt (or Shift on Windows and Linux) is held, the
+/// item shows its alternative, with the alternative's keybinding, and
+/// shows itself again on release. Mnemonics aren't ported: the editor's
+/// menu has none.
+#[gpui::test]
+fn alternatives_show_while_alt_is_held(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    let (editor, cx) = setup("abc", cx);
+    let _runs = add_alternative(&editor, |a| a, cx);
+    let primary = ("Primary".to_string(), key_label("ctrl-alt-p"));
+    let alternative = ("Alternative".to_string(), key_label("ctrl-alt-a"));
+    for (modifiers, uses_alternative) in
+        [(Modifiers::alt(), true), (Modifiers::shift(), SHIFT_IS_ALT)]
+    {
+        cx.simulate_modifiers_change(Modifiers::none());
+        cx.simulate_keystrokes("shift-f10");
+        assert_eq!(shown_items(cx)[0], primary);
+        cx.simulate_modifiers_change(modifiers);
+        let selected = if uses_alternative {
+            &alternative
+        } else {
+            &primary
+        };
+        assert_eq!(&shown_items(cx)[0], selected, "{modifiers:?}");
+        assert_eq!(rows(&editor, cx)[0], selected.0);
+        // Released: the item again.
+        cx.simulate_modifiers_change(Modifiers::none());
+        assert_eq!(shown_items(cx)[0], primary);
+        cx.simulate_modifiers_change(modifiers);
+        assert_eq!(&shown_items(cx)[0], selected);
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+    }
+    // Held when the menu opens (Monaco keeps the key status until the
+    // menu hides): a right-click with Alt shows the alternative at once.
+    cx.simulate_modifiers_change(Modifiers::none());
+    draw(cx);
+    let (bounds, _) = editor.read_with(cx, |e, _| e.widget_bounds_for_tests());
+    let at = bounds.origin + gpui::point(gpui::px(100.), gpui::px(5.));
+    cx.simulate_mouse_down(at, gpui::MouseButton::Right, Modifiers::alt());
+    cx.simulate_mouse_up(at, gpui::MouseButton::Right, Modifiers::alt());
+    assert_eq!(shown_items(cx)[0], alternative);
+    cx.simulate_modifiers_change(Modifiers::none());
+    assert_eq!(shown_items(cx)[0], primary);
+}
+
+/// Monaco `menu.test.ts` "selects alternatives at keyboard activation
+/// time": Enter runs the item; with Alt (Shift too on Windows and Linux)
+/// it runs the alternative. On macOS, Shift+Enter isn't a trigger key, so
+/// nothing runs.
+#[gpui::test]
+fn enter_with_alt_runs_the_alternative(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    let (editor, cx) = setup("abc", cx);
+    let runs = add_alternative(&editor, |a| a, cx);
+    let alt_shift = Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    for (modifiers, enter) in [
+        (Modifiers::none(), "enter"),
+        (Modifiers::alt(), "alt-enter"),
+        (Modifiers::shift(), "shift-enter"),
+        (alt_shift, "alt-shift-enter"),
+        (Modifiers::none(), "enter"),
+    ] {
+        cx.simulate_modifiers_change(Modifiers::none());
+        if !editor.read_with(cx, |e, _| e.is_context_menu_visible()) {
+            cx.simulate_keystrokes("shift-f10 down");
+        }
+        assert_eq!(rows(&editor, cx)[0], "> Primary");
+        cx.simulate_modifiers_change(modifiers);
+        cx.simulate_keystrokes(enter);
+        cx.run_until_parked();
+    }
+    let shift: &[&str] = if SHIFT_IS_ALT { &["alternative"] } else { &[] };
+    let expected: Vec<&str> = ["primary", "alternative"]
+        .into_iter()
+        .chain(shift.iter().copied())
+        .chain(["alternative", "primary"])
+        .collect();
+    assert_eq!(*runs.borrow(), expected);
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.model().read(cx).text()),
+        "abc"
+    );
+}
+
+/// Monaco `menu.test.ts` "selects alternatives at mouse activation time":
+/// a click runs the item, and with Alt (Shift too on Windows and Linux)
+/// the alternative.
+#[gpui::test]
+fn clicking_with_alt_runs_the_alternative(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (editor, cx) = setup("abc", cx);
+    let runs = add_alternative(&editor, |a| a, cx);
+    let alt_shift = Modifiers {
+        alt: true,
+        shift: true,
+        ..Default::default()
+    };
+    for modifiers in [
+        Modifiers::none(),
+        Modifiers::alt(),
+        Modifiers::shift(),
+        alt_shift,
+        Modifiers::none(),
+    ] {
+        cx.simulate_modifiers_change(Modifiers::none());
+        cx.simulate_keystrokes("shift-f10");
+        draw(cx);
+        let item = cx.debug_bounds("context-menu-0").expect("Primary").center();
+        cx.simulate_mouse_down(item, MouseButton::Left, modifiers);
+        cx.simulate_mouse_up(item, MouseButton::Left, modifiers);
+        draw(cx);
+        assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    }
+    let shift = if SHIFT_IS_ALT {
+        "alternative"
+    } else {
+        "primary"
+    };
+    assert_eq!(
+        *runs.borrow(),
+        ["primary", "alternative", shift, "alternative", "primary"]
+    );
+}
+
+/// Monaco `menu.test.ts` "disabled alternatives fall back to the primary
+/// action": an alternative that can't run isn't shown, Alt+click runs the
+/// item, and Alt+Enter isn't a trigger key. An unknown id is no
+/// alternative either.
+#[gpui::test]
+fn a_disabled_alternative_is_not_used(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton};
+    let (editor, cx) = setup("abc", cx);
+    let runs = add_alternative(&editor, |a| a.precondition(|_, _| false), cx);
+    cx.simulate_keystrokes("shift-f10 down");
+    cx.simulate_modifiers_change(Modifiers::alt());
+    assert_eq!(rows(&editor, cx)[0], "> Primary");
+    cx.simulate_keystrokes("alt-enter");
+    cx.run_until_parked();
+    assert!(editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert!(runs.borrow().is_empty());
+    draw(cx);
+    let item = cx.debug_bounds("context-menu-0").expect("Primary").center();
+    cx.simulate_mouse_down(item, MouseButton::Left, Modifiers::alt());
+    cx.simulate_mouse_up(item, MouseButton::Left, Modifiers::alt());
+    draw(cx);
+    assert_eq!(*runs.borrow(), ["primary"]);
+
+    editor.update(cx, |e, cx| {
+        let _ = e.add_action(
+            EditorActionDescriptor::new("my.primary", "Primary", |_, _, _| {})
+                .context_menu("navigation", 1.)
+                .context_menu_alt("no.such.action"),
+            cx,
+        );
+    });
+    cx.simulate_keystrokes("shift-f10");
+    assert_eq!(rows(&editor, cx)[0], "Primary");
+}
+
+/// An alternative can be a built-in action, shown with its label and key.
+/// The menu is measured with the alternatives, so holding Alt doesn't
+/// resize it.
+#[gpui::test]
+fn built_in_alternatives(cx: &mut TestAppContext) {
+    use gpui::Modifiers;
+    let (editor, cx) = setup("foo bar foo", cx);
+    let short = || {
+        EditorActionDescriptor::new("my.short", "Short", |_, _, _| {})
+            .context_menu("navigation", 1.)
+    };
+    editor.update(cx, |e, cx| {
+        let _ = e.add_action(short(), cx);
+    });
+    cx.simulate_keystrokes("shift-f10");
+    let narrow = editor
+        .read_with(cx, |e, cx| e.context_menu_width_for_tests(cx))
+        .unwrap();
+    cx.simulate_keystrokes("escape");
+    cx.run_until_parked();
+    editor.update(cx, |e, cx| {
+        let _ = e.add_action(
+            short().context_menu_alt("editor.action.selectHighlights"),
+            cx,
+        );
+    });
+    cx.simulate_keystrokes("shift-f10");
+    let wide = editor
+        .read_with(cx, |e, cx| e.context_menu_width_for_tests(cx))
+        .unwrap();
+    assert!(wide > narrow, "{wide:?} {narrow:?}");
+    cx.simulate_modifiers_change(Modifiers::alt());
+    let (label, keys) = shown_items(cx).remove(0);
+    assert_eq!(label, "Select All Occurrences of Find Match");
+    assert!(keys.is_some());
+    assert_eq!(
+        editor.read_with(cx, |e, cx| e.context_menu_width_for_tests(cx)),
+        Some(wide)
+    );
+    cx.simulate_modifiers_change(Modifiers::none());
+    cx.simulate_keystrokes("down");
+    cx.simulate_modifiers_change(Modifiers::alt());
+    cx.simulate_keystrokes("alt-enter");
+    cx.run_until_parked();
+    assert!(!editor.read_with(cx, |e, _| e.is_context_menu_visible()));
+    assert_eq!(editor.read_with(cx, |e, _| e.selections().len()), 2);
+}

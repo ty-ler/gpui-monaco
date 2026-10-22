@@ -25,6 +25,7 @@ Every editor command is a GPUI action in `gpui_monaco::actions`:
 - **Ctrl+Space (or Alt+Esc, Cmd+I):** trigger completion
 - **F1 / Ctrl+G / Cmd+Shift+O:** command palette, go to line, go to symbol
 - **Shift+F10 (or the Menu key on Windows and Linux):** context menu
+- **Alt+Enter** (and **Alt+Space** on macOS and Linux) in the context menu: run the active item's alternative action (`context_menu_alt`), the one it shows while Alt is held. On Windows and Linux, Shift+Enter does too, and on Linux Shift+Space. As in Monaco's menu, Space is a trigger key only on macOS and Linux
 - **Up / Down, PageUp / PageDown, Ctrl+Home / Ctrl+End (also with Alt, or Cmd), Ctrl+Up / Ctrl+Down, Ctrl+N / Ctrl+P (macOS only)** in the command palette and the other quick inputs: move in the list (VS Code's `quickInput.*` keys; Cmd+Home / Cmd+End stay in the input)
 - **Tab / Cmd+Right / Alt+] / Alt+[** with ghost text: accept, accept a word, next, previous (asking explicitly, `editor.action.inlineSuggest.trigger`, has no key, as in Monaco). With a screen reader, Cmd+Right moves the cursor instead
 - **Tab / Escape** with an inline edit: jump to it while the cursor is away from it (or open its file, for a cross-file edit), then accept it; reject it

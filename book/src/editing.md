@@ -155,7 +155,7 @@ Ctrl+G opens go to line, and Cmd/Ctrl+Shift+O opens go to symbol. Both use a qui
 
 Up and Down move through the list. Page Down focuses the last fully visible row, then scrolls a page; Page Up does the same upwards (Monaco's `focusNextPage` / `focusPreviousPage`). Enter goes to the item, while Escape (or clicking elsewhere) closes the list and restores the view. `CodeEditor::open_quick_access(prefix, …)` opens it from code.
 
-Right-click or Shift+F10 opens the context menu, as does Ctrl+click on macOS (without selecting, whatever `multi_cursor_modifier` is). The menu is only for the text: a right-click there takes the focus and moves the cursor to the click unless it's inside a selection, while a right-click on the gutter, scrollbars or minimap leaves the focus and cursor alone. With `context_menu` off, a right-click anywhere with a position, line numbers included, takes the focus and moves the cursor unless it's inside the primary selection (a right-click in another selection leaves one cursor), as in Monaco. It holds the navigation, editing, clipboard and command palette items that can run. An item runs on mouse up, so a press can be dragged off it to cancel, and the wheel over the text closes the menu. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`.
+Right-click or Shift+F10 opens the context menu, as does Ctrl+click on macOS (without selecting, whatever `multi_cursor_modifier` is). The menu is only for the text: a right-click there takes the focus and moves the cursor to the click unless it's inside a selection, while a right-click on the gutter, scrollbars or minimap leaves the focus and cursor alone. With `context_menu` off, a right-click anywhere with a position, line numbers included, takes the focus and moves the cursor unless it's inside the primary selection (a right-click in another selection leaves one cursor), as in Monaco. It holds the navigation, editing, clipboard and command palette items that can run. An item runs on mouse up, so a press can be dragged off it to cancel, and the wheel over the text closes the menu. Host actions join it with `.context_menu(group, order)`; Monaco's groups are `navigation`, `1_modification`, `9_cutcopypaste` and `z_commands`. `.context_menu_alt(id)` gives a host item an alternative action (Monaco's menu item `alt`): another host action or a built-in one, by id. While Alt is held, or Shift on Windows and Linux, the item shows the alternative's label and keybinding, and a click or Alt+Enter (Shift+Enter on Windows and Linux) runs it, as does Alt+Space on macOS and Linux (Shift+Space on Linux), where Space is a menu trigger key as in Monaco. Releasing the modifier shows the item again. A modifier already held when the menu opens counts too. The alternative is left out while its precondition doesn't hold, so the item then shows and runs itself.
 
 Hosts add their own actions to the palette with Monaco's `addAction`:
 
@@ -167,7 +167,9 @@ editor.add_action(
     .alias("Prettify")
     .keybinding("cmd-k cmd-p")
     .precondition(|editor, _| !editor.options().read_only)
-    .context_menu("1_modification", 1.5),
+    .context_menu("1_modification", 1.5)
+    // In the menu, shown and run instead while Alt is held.
+    .context_menu_alt("editor.action.formatDocument"),
     cx,
 );
 editor.run_action("my.format", window, cx); // or dispatch RunAction { id }
