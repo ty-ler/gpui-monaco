@@ -870,6 +870,16 @@ actions!(
         PeekImplementation,
         /// Peeks references (Monaco `editor.action.referenceSearch.trigger`).
         PeekReferences,
+        /// Peeks the calls to the function at the cursor, or with the call
+        /// hierarchy open shows the other direction (VS Code
+        /// `editor.showCallHierarchy`, `editor.showIncomingCalls`,
+        /// `editor.showOutgoingCalls`).
+        ShowCallHierarchy,
+        /// Peeks the supertypes of the type at the cursor, or with the type
+        /// hierarchy open shows the other direction (VS Code
+        /// `editor.showTypeHierarchy`, `editor.showSupertypes`,
+        /// `editor.showSubtypes`).
+        ShowTypeHierarchy,
         /// The next result: in the peek view, or after going to one of
         /// several results (Monaco `goToNextReference`,
         /// `editor.gotoNextSymbolFromResult`).
@@ -1860,6 +1870,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         // Monaco binds Ctrl+G on every platform.
         KeyBinding::new("ctrl-g", GotoLine, ctx),
         KeyBinding::new("secondary-shift-o", QuickOutline, ctx),
+        // VS Code's Shift+Alt+H (and in the open view, to switch direction).
+        KeyBinding::new("shift-alt-h", ShowCallHierarchy, ctx),
         KeyBinding::new("f1", QuickCommand, ctx),
         KeyBinding::new("shift-f10", ShowContextMenu, ctx),
         // Monaco's `KeyCode.ContextMenu` (`contextmenu.ts`): GPUI calls the

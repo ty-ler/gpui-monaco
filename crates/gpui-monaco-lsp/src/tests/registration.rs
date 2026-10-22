@@ -77,6 +77,10 @@ async fn dynamic_registration(cx: &mut TestAppContext) {
         1
     );
     assert!(client.read_with(cx, |client, _| client.supports_inline_completions()));
+    assert_eq!(
+        cx.update(|cx| type_hierarchy_providers(cx, rust())).len(),
+        1
+    );
     assert!(
         cx.update(|cx| completion_providers(cx, target("python", "file:///a.py")))
             .is_empty()
@@ -149,6 +153,10 @@ async fn dynamic_registration(cx: &mut TestAppContext) {
         .await
         .unwrap();
     assert!(cx.update(|cx| completion_providers(cx, rust())).is_empty());
+    assert!(
+        cx.update(|cx| type_hierarchy_providers(cx, rust()))
+            .is_empty()
+    );
 }
 
 #[gpui::test]

@@ -118,3 +118,45 @@ async fn call_hierarchy(cx: &mut TestAppContext) {
         1
     );
 }
+
+/// The bridge registers a call hierarchy provider for the editor's Peek
+/// Call Hierarchy, which sends the server's item back as it came.
+#[gpui::test]
+async fn call_hierarchy_provider(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |method, _| match method {
+        "textDocument/prepareCallHierarchy" => {
+            Some(json!([server_item("main", "file:///project/main.rs", 0)]))
+        }
+        "callHierarchy/incomingCalls" => Some(json!([{
+            "from": server_item("caller", "file:///project/main.rs", 4),
+            "fromRanges": [range((5, 4), (5, 8))],
+        }])),
+        _ => None,
+    })
+    .await;
+    let model = model(cx, "fn main() {}\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    let provider = cx.update(|cx| {
+        let providers = gpui_monaco::providers::call_hierarchy_providers(cx, model.read(cx));
+        assert_eq!(providers.len(), 1);
+        providers[0].clone()
+    });
+    let context = model.read_with(cx, |m, _| m.provider_context());
+    let items = cx.update(|cx| provider.prepare_call_hierarchy(&context, p(0, 4), cx));
+    cx.run_until_parked();
+    let items = items.await.unwrap();
+    assert_eq!(
+        (items[0].name.as_ref(), items[0].uri.as_deref()),
+        ("main", Some("file:///project/main.rs"))
+    );
+    let incoming = cx.update(|cx| provider.provide_incoming_calls(&items[0], cx));
+    cx.run_until_parked();
+    let incoming = incoming.await.unwrap();
+    assert_eq!(incoming[0].from.name.as_ref(), "caller");
+    assert_eq!(incoming[0].from_ranges, vec![p(5, 4)..p(5, 8)]);
+    let sent = &server.messages("callHierarchy/incomingCalls")[0]["params"]["item"];
+    assert_eq!(sent["data"], json!({ "name": "main" }));
+    assert_eq!(sent["detail"], "fn main()");
+}

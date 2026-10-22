@@ -392,6 +392,19 @@ impl LspFeatures {
                 self.clone(),
             ));
         }
+        if matches!(
+            capabilities.call_hierarchy_provider,
+            Some(
+                lsp::CallHierarchyServerCapability::Simple(true)
+                    | lsp::CallHierarchyServerCapability::Options(_)
+            )
+        ) {
+            registrations.push(gpui_monaco::providers::register_call_hierarchy_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
         if capabilities.signature_help_provider.is_some() {
             registrations.push(register_signature_help_provider(cx, selector, self.clone()));
         }

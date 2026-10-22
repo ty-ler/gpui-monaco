@@ -402,6 +402,8 @@ static BUILTINS: &[Builtin] = &[
     Builtin("editor.action.peekImplementation", "code_editor::PeekImplementation", "Peek Implementations", "editorHasImplementationProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
     Builtin("editor.action.goToReferences", "code_editor::GoToReferences", "Go to References", "editorHasReferenceProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
     Builtin("editor.action.referenceSearch.trigger", "code_editor::PeekReferences", "Peek References", "editorHasReferenceProvider && !inReferenceSearchEditor && !isInEmbeddedEditor"),
+    Builtin("editor.showCallHierarchy", "code_editor::ShowCallHierarchy", "Peek Call Hierarchy", "editorHasCallHierarchyProvider && !isInEmbeddedEditor"),
+    Builtin("editor.showTypeHierarchy", "code_editor::ShowTypeHierarchy", "Peek Type Hierarchy", "editorHasTypeHierarchyProvider && !isInEmbeddedEditor"),
     // Indentation.
     Builtin("editor.action.indentationToSpaces", "code_editor::IndentationToSpaces", "Convert Indentation to Spaces", WRITABLE),
     Builtin("editor.action.indentationToTabs", "code_editor::IndentationToTabs", "Convert Indentation to Tabs", WRITABLE),

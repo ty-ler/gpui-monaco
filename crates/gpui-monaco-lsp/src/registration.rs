@@ -224,6 +224,15 @@ impl LspClient {
                         cx,
                     ));
                 }
+                if registration.method == "textDocument/prepareTypeHierarchy" {
+                    // `lsp-types` has no `typeHierarchyProvider`, so
+                    // `register` can't see it.
+                    providers.push(gpui_monaco::providers::register_type_hierarchy_provider(
+                        cx,
+                        selector.clone(),
+                        features.clone(),
+                    ));
+                }
                 providers.extend(features.register(selector, &capabilities, cx));
                 if let Some(execute) = &capabilities.execute_command_provider {
                     commands = self.register_commands(execute.commands.clone(), cx);

@@ -85,6 +85,7 @@ pub use font_zoom::{editor_zoom_level, remeasure_fonts, set_editor_zoom_level};
 mod format;
 mod geometry;
 mod goto;
+mod hierarchy;
 mod high_contrast;
 pub use high_contrast::{
     auto_detect_high_contrast, os_high_contrast, set_auto_detect_high_contrast,
@@ -188,6 +189,7 @@ pub use events::{
 pub use find::{FindOptions, MATCHES_LIMIT};
 pub use find_widget::FindWidget;
 pub use goto::has_symbol_navigation;
+pub use hierarchy::HierarchyDirection;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use inline_completions::inline_edits::InlineEditViewKind;
 pub use languages::{

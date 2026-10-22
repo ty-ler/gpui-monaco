@@ -2,9 +2,10 @@
 //! `callHierarchy/outgoingCalls`, as `vscode-languageclient`'s
 //! `CallHierarchyFeature` sends them for VS Code's call hierarchy view.
 //!
-//! gpui-monaco has no call hierarchy provider or peek view (Monaco has
-//! neither), so this is an API on [`LspClient`] for hosts to build that UI
-//! on.
+//! The bridge registers a gpui-monaco
+//! [`CallHierarchyProvider`](gpui_monaco::providers::CallHierarchyProvider)
+//! on top of it, for Peek Call Hierarchy; hosts can also call these for a
+//! view of their own.
 
 use std::ops::Range;
 
@@ -17,6 +18,7 @@ use lsp_types as lsp;
 
 use crate::LspClient;
 use crate::convert;
+use crate::features::LspFeatures;
 
 /// A function, method or other callable in a call hierarchy (VS Code
 /// `CallHierarchyItem`).
@@ -107,11 +109,21 @@ impl LspClient {
         position: PointUtf16,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<CallHierarchyItem>>> {
+        let uri = model.read(cx).resource().to_string();
+        self.prepare_call_hierarchy_at(&uri, position, cx)
+    }
+
+    /// [`Self::prepare_call_hierarchy`] for the attached document `uri`.
+    pub(crate) fn prepare_call_hierarchy_at(
+        &mut self,
+        uri: &str,
+        position: PointUtf16,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<CallHierarchyItem>>> {
         if !self.supports_call_hierarchy() {
             return Task::ready(Ok(Vec::new()));
         }
-        let uri = model.read(cx).resource().to_string();
-        let Some((connection, text_document)) = self.prepare_request(&uri, cx) else {
+        let Some((connection, text_document)) = self.prepare_request(uri, cx) else {
             return Task::ready(Ok(Vec::new()));
         };
         let request = connection.request::<lsp::request::CallHierarchyPrepare>(
@@ -190,6 +202,100 @@ impl LspClient {
                 .map(|call| OutgoingCall {
                     to: call_item(call.to),
                     from_ranges: ranges(call.from_ranges),
+                })
+                .collect())
+        })
+    }
+}
+
+/// The editor's form of `item`, with the server's item as its `data`.
+fn provider_item(item: CallHierarchyItem) -> gpui_monaco::providers::HierarchyItem {
+    gpui_monaco::providers::HierarchyItem {
+        data: serde_json::to_value(&item.server_item).ok(),
+        name: item.name,
+        kind: item.kind,
+        deprecated: item.deprecated,
+        detail: item.detail,
+        uri: Some(item.uri),
+        range: item.range,
+        selection_range: item.selection_range,
+    }
+}
+
+/// The server's item back from the editor's.
+fn server_item(item: &gpui_monaco::providers::HierarchyItem) -> Result<CallHierarchyItem> {
+    let data = item
+        .data
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("a call hierarchy item without the server's item"))?;
+    Ok(call_item(serde_json::from_value(data)?))
+}
+
+/// `vscode-languageclient`'s `CallHierarchyFeature`: Peek Call Hierarchy
+/// asks the server.
+impl gpui_monaco::providers::CallHierarchyProvider for LspFeatures {
+    fn prepare_call_hierarchy(
+        &self,
+        context: &gpui_monaco::providers::ProviderContext,
+        position: PointUtf16,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::HierarchyItem>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let uri = context.resource.to_string();
+        let request = client.update(cx, |client, cx| {
+            client.prepare_call_hierarchy_at(&uri, position, cx)
+        });
+        cx.background_executor()
+            .spawn(async move { Ok(request.await?.into_iter().map(provider_item).collect()) })
+    }
+
+    fn provide_incoming_calls(
+        &self,
+        item: &gpui_monaco::providers::HierarchyItem,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::IncomingCall>>> {
+        let (Some(client), item) = (self.client().upgrade(), server_item(item)) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let item = match item {
+            Ok(item) => item,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        let request = client.read(cx).incoming_calls(&item, cx);
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .into_iter()
+                .map(|call| gpui_monaco::providers::IncomingCall {
+                    from: provider_item(call.from),
+                    from_ranges: call.from_ranges,
+                })
+                .collect())
+        })
+    }
+
+    fn provide_outgoing_calls(
+        &self,
+        item: &gpui_monaco::providers::HierarchyItem,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::OutgoingCall>>> {
+        let (Some(client), item) = (self.client().upgrade(), server_item(item)) else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let item = match item {
+            Ok(item) => item,
+            Err(err) => return Task::ready(Err(err)),
+        };
+        let request = client.read(cx).outgoing_calls(&item, cx);
+        cx.background_executor().spawn(async move {
+            Ok(request
+                .await?
+                .into_iter()
+                .map(|call| gpui_monaco::providers::OutgoingCall {
+                    to: provider_item(call.to),
+                    from_ranges: call.from_ranges,
                 })
                 .collect())
         })

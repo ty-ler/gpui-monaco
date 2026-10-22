@@ -873,6 +873,7 @@ pub struct CodeEditor {
     pub(crate) goto: crate::goto::GotoState,
     /// The peek view, if open.
     pub(crate) peek: crate::peek::PeekState,
+    pub(crate) hierarchy: crate::hierarchy::HierarchyState,
     /// The inspect tokens widget, if launched.
     pub(crate) inspect_tokens: crate::developer::InspectTokensState,
     /// Requests Escape can cancel (Monaco `editor.cancelOperation`).
@@ -1180,6 +1181,7 @@ impl CodeEditor {
             message: Default::default(),
             goto: Default::default(),
             peek: Default::default(),
+            hierarchy: Default::default(),
             inspect_tokens: Default::default(),
             cancellable: Default::default(),
             banner: None,
@@ -8188,6 +8190,18 @@ impl Render for CodeEditor {
                     return cx.propagate();
                 }
                 this.open_quick_access(":", window, cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowCallHierarchy, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.show_call_hierarchy(cx)
+            }))
+            .on_action(cx.listener(|this, _: &ShowTypeHierarchy, _, cx| {
+                if this.options.single_line {
+                    return cx.propagate();
+                }
+                this.show_type_hierarchy(cx)
             }))
             .on_action(cx.listener(|this, _: &QuickOutline, window, cx| {
                 if this.options.single_line {
