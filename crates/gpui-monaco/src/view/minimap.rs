@@ -24,7 +24,7 @@ pub(crate) const GUTTER_DECORATION_WIDTH: f64 = 2.;
 pub(crate) const POINTER_DRAG_RESET_DISTANCE: f32 = 140.;
 
 /// Monaco `minimapCharSheet.ts` `Constants`.
-mod sheet {
+pub(crate) mod sheet {
     pub const START_CH_CODE: i32 = 32;
     pub const END_CH_CODE: i32 = 126;
     pub const CHAR_COUNT: i32 = END_CH_CODE - START_CH_CODE + 2;
@@ -35,6 +35,19 @@ mod sheet {
     pub const RGBA_CHANNELS_CNT: usize = 4;
     pub const RGBA_SAMPLED_ROW_WIDTH: usize =
         RGBA_CHANNELS_CNT * CHAR_COUNT as usize * SAMPLED_CHAR_WIDTH;
+    /// Monaco `UNKNOWN_CODE`: the last glyph, for characters outside ASCII.
+    pub const UNKNOWN_CODE: char = '\u{FFFD}';
+
+    /// Monaco `allCharCodes`: the characters of the sheet, in order.
+    #[cfg_attr(
+        not(all(feature = "minimap-font", not(target_arch = "wasm32"))),
+        allow(dead_code)
+    )]
+    pub fn all_chars() -> impl Iterator<Item = char> {
+        (START_CH_CODE as u8..=END_CH_CODE as u8)
+            .map(char::from)
+            .chain(std::iter::once(UNKNOWN_CODE))
+    }
 }
 
 /// Monaco `getCharIndex`: the glyph for UTF-16 code unit `ch_code`.
@@ -155,9 +168,10 @@ impl CharRenderer {
     }
 
     /// Monaco `MinimapCharRendererFactory.create`: the prebaked glyphs at
-    /// scales 1 and 2. Monaco samples the editor font at larger scales;
-    /// GPUI has no way to rasterize a font into a buffer, so those scale up
-    /// the scale-2 glyphs through Monaco's own downsampler instead.
+    /// scales 1 and 2. Larger scales sample the editor font
+    /// ([`Self::for_font`]); until its samples are in (or when the font
+    /// isn't found), they scale up the scale-2 glyphs through Monaco's own
+    /// downsampler instead.
     pub fn create(scale: u32) -> Arc<Self> {
         static CACHE: OnceLock<Mutex<Vec<Arc<CharRenderer>>>> = OnceLock::new();
         let cache = CACHE.get_or_init(Default::default);
@@ -172,6 +186,22 @@ impl CharRenderer {
             _ => Self::from_sample_data(&upscaled_sample_data(), scale),
         });
         cache.push(renderer.clone());
+        renderer
+    }
+
+    /// Monaco `MinimapCharRendererFactory.create` for scales above 2 once
+    /// the editor font's samples ([`super::minimap_font::sample_data`])
+    /// are in: glyphs downsampled from `family`'s sheet `sample`.
+    pub fn for_font(scale: u32, family: &str, sample: &[u8]) -> Arc<Self> {
+        type Cache = Mutex<Vec<(u32, String, Arc<CharRenderer>)>>;
+        static CACHE: OnceLock<Cache> = OnceLock::new();
+        let cache = CACHE.get_or_init(Default::default);
+        let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((_, _, renderer)) = cache.iter().find(|(s, f, _)| *s == scale && f == family) {
+            return renderer.clone();
+        }
+        let renderer = Arc::new(Self::from_sample_data(sample, scale));
+        cache.push((scale, family.to_string(), renderer.clone()));
         renderer
     }
 

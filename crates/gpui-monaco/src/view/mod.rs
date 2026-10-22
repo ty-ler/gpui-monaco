@@ -14,6 +14,8 @@ pub mod guides;
 pub mod injected_text;
 pub mod line_breaks;
 pub(crate) mod minimap;
+mod minimap_font;
+pub(crate) use minimap_font::sample_data as minimap_font_sample;
 pub(crate) mod overview_ruler;
 pub mod prefix_sum;
 pub mod reveal;
