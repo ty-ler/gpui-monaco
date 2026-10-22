@@ -44,7 +44,7 @@ async fn inline_completions_reach_the_server(cx: &mut TestAppContext) {
     let capabilities = &server.messages("initialize")[0]["params"]["capabilities"];
     assert_eq!(
         capabilities["textDocument"]["inlineCompletion"],
-        json!({ "dynamicRegistration": false })
+        json!({ "dynamicRegistration": true })
     );
 
     let model = model(cx, "x.l\n");

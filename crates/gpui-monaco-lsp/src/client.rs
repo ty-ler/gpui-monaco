@@ -27,6 +27,7 @@ use serde_json::{Value, json};
 
 use crate::convert;
 use crate::features::LspFeatures;
+use crate::registration::{self, DynamicRegistration};
 use crate::rpc::{self, Connection, Incoming, METHOD_NOT_FOUND, ResponseError};
 use pull_diagnostics::PullDiagnostics;
 
@@ -158,12 +159,18 @@ struct Document {
 /// each feature the server supports, such as completion, hover, definition,
 /// code actions and rename) and markers (diagnostics). Attach models with [`LspClient::attach`].
 pub struct LspClient {
-    options: LspClientOptions,
+    pub(crate) options: LspClientOptions,
     connection: Connection,
-    capabilities: lsp::ServerCapabilities,
+    /// The `initialize` result's capabilities with the dynamic
+    /// registrations' on top.
+    pub(crate) capabilities: lsp::ServerCapabilities,
+    /// The `initialize` result's capabilities, as the server sent them.
+    pub(crate) static_capabilities: Value,
+    /// The server's `client/registerCapability` registrations, in order.
+    pub(crate) dynamic: Vec<DynamicRegistration>,
     /// The capabilities as the server sent them, with any `lsp-types`
     /// doesn't know (such as `typeHierarchyProvider`).
-    raw_capabilities: Value,
+    pub(crate) raw_capabilities: Value,
     server_info: Option<lsp::ServerInfo>,
     /// The attached documents, by [`TextModel::resource`].
     documents: HashMap<String, Document>,
@@ -283,8 +290,10 @@ impl LspClient {
                 let mut client = Self {
                     options,
                     connection,
+                    static_capabilities: raw_capabilities.clone(),
                     capabilities: result.capabilities,
                     raw_capabilities,
+                    dynamic: Vec::new(),
                     server_info: result.server_info,
                     documents: HashMap::new(),
                     diagnostics: HashMap::new(),
@@ -302,14 +311,15 @@ impl LspClient {
         })
     }
 
-    /// What the server said it can do.
+    /// What the server said it can do: its `initialize` result, with the
+    /// capabilities it registered since (`client/registerCapability`).
     pub fn capabilities(&self) -> &lsp::ServerCapabilities {
         &self.capabilities
     }
 
-    /// The capabilities as the server sent them, including any that
-    /// [`LspClient::capabilities`] leaves out because `lsp-types` doesn't
-    /// have them.
+    /// The capabilities as the server sent them, and registered since,
+    /// including any that [`LspClient::capabilities`] leaves out because
+    /// `lsp-types` doesn't have them.
     pub fn raw_capabilities(&self) -> &Value {
         &self.raw_capabilities
     }
@@ -747,24 +757,39 @@ impl LspClient {
             .ok();
     }
 
-    fn register(&mut self, cx: &mut Context<Self>) {
-        let selector = if self.options.languages.is_empty() {
+    /// The selector the server's features are registered for.
+    pub(crate) fn default_selector(&self) -> LanguageSelector {
+        if self.options.languages.is_empty() {
             LanguageSelector::All
         } else {
             LanguageSelector::Languages(self.options.languages.clone())
-        };
+        }
+    }
+
+    fn register(&mut self, cx: &mut Context<Self>) {
+        let selector = self.default_selector();
         let features = LspFeatures::new(cx.weak_entity(), &self.capabilities);
         self.registrations = features.register(selector.clone(), &self.capabilities, cx);
         let inline_completions =
             crate::inline_completions::register(self, cx.weak_entity(), selector, cx);
         self.registrations.extend(inline_completions);
-        // The server's commands run on the server (`workspace/executeCommand`).
         let ids = self
             .capabilities
             .execute_command_provider
             .as_ref()
             .map(|options| options.commands.clone())
             .unwrap_or_default();
+        self.commands = self.register_commands(ids, cx);
+    }
+
+    /// Registers the server's commands with [`gpui_monaco::register_command`];
+    /// they run on the server (`workspace/executeCommand`).
+    pub(crate) fn register_commands(
+        &self,
+        ids: Vec<String>,
+        cx: &mut App,
+    ) -> Vec<gpui_monaco::Disposable> {
+        let mut commands = Vec::new();
         for id in ids {
             let connection = self.connection.clone();
             let command = id.clone();
@@ -783,8 +808,9 @@ impl LspClient {
                     })
                     .detach();
             });
-            self.commands.push(registration);
+            commands.push(registration);
         }
+        commands
     }
 
     fn unregister(&mut self, cx: &mut App) {
@@ -793,6 +819,9 @@ impl LspClient {
         }
         // Only this server's handlers go; another's for the same id stay.
         for registration in self.commands.drain(..) {
+            registration.dispose(cx);
+        }
+        for registration in self.dynamic.drain(..) {
             registration.dispose(cx);
         }
     }
@@ -979,9 +1008,17 @@ impl LspClient {
                 self.refresh_pulled_diagnostics(cx);
                 Ok(Value::Null)
             }
-            RegisterCapability::METHOD
-            | UnregisterCapability::METHOD
-            | WorkDoneProgressCreate::METHOD => Ok(Value::Null),
+            RegisterCapability::METHOD => {
+                let params: lsp::RegistrationParams = rpc::params(params).map_err(invalid)?;
+                self.register_capabilities(params, cx);
+                Ok(Value::Null)
+            }
+            UnregisterCapability::METHOD => {
+                let params: lsp::UnregistrationParams = rpc::params(params).map_err(invalid)?;
+                self.unregister_capabilities(params, cx);
+                Ok(Value::Null)
+            }
+            WorkDoneProgressCreate::METHOD => Ok(Value::Null),
             WorkspaceFoldersRequest::METHOD => Ok(json!(workspace_folders(&self.options))),
             _ => Err(ResponseError {
                 code: METHOD_NOT_FOUND,
@@ -1094,7 +1131,7 @@ fn workspace_folders(options: &LspClientOptions) -> Option<Vec<lsp::WorkspaceFol
 
 /// The `initialize` request's params.
 fn initialize_params(options: &LspClientOptions) -> Result<Value> {
-    let capabilities: lsp::ClientCapabilities = serde_json::from_value(json!({
+    let mut capabilities = json!({
         "general": { "positionEncodings": ["utf-16"] },
         "window": {
             "workDoneProgress": true,
@@ -1213,7 +1250,11 @@ fn initialize_params(options: &LspClientOptions) -> Result<Value> {
                 "tagSupport": { "valueSet": [1, 2] },
             },
         },
-    }))?;
+    });
+    // Every feature the bridge can register dynamically says so; document
+    // sync is static.
+    registration::advertise_dynamic_registration(&mut capabilities);
+    let capabilities: lsp::ClientCapabilities = serde_json::from_value(capabilities)?;
     #[allow(deprecated)]
     let params = lsp::InitializeParams {
         process_id: Some(std::process::id()),
@@ -1237,7 +1278,7 @@ fn initialize_params(options: &LspClientOptions) -> Result<Value> {
     // `lsp-types` has `textDocument.inlineCompletion` only behind its
     // `proposed` feature.
     params["capabilities"]["textDocument"]["inlineCompletion"] =
-        json!({ "dynamicRegistration": false });
+        json!({ "dynamicRegistration": true });
     Ok(params)
 }
 

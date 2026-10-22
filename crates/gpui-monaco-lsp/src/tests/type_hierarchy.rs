@@ -36,7 +36,7 @@ async fn type_hierarchy(cx: &mut TestAppContext) {
     assert!(client.read_with(cx, |client, _| client.supports_type_hierarchy()));
     assert_eq!(
         server.messages("initialize")[0]["params"]["capabilities"]["textDocument"]["typeHierarchy"],
-        json!({})
+        json!({ "dynamicRegistration": true })
     );
 
     let model = model(cx, "fn main() {}\n");

@@ -33,6 +33,7 @@ pub mod convert;
 mod features;
 mod inline_completions;
 mod inline_values;
+mod registration;
 pub mod rpc;
 mod type_hierarchy;
 mod workspace_symbols;
