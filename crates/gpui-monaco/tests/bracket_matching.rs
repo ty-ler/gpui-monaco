@@ -304,6 +304,52 @@ fn highlights(editor: &Entity<CodeEditor>, cx: &mut VisualTestContext) -> Vec<(u
     })
 }
 
+/// Lets Monaco's 50ms bracket highlight update (`_updateBracketsSoon`) run.
+fn settle(cx: &mut VisualTestContext) {
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
+}
+
+/// Monaco updates the bracket highlights 50ms after the last cursor move or
+/// edit (`_updateBracketsSoon`, a `RunOnceScheduler`): typing faster than
+/// that moves the highlights with the text, and they're found again once
+/// the typing pauses.
+#[gpui::test]
+fn bracket_highlights_update_50ms_after_the_last_change(cx: &mut TestAppContext) {
+    let (editor, cx) = editor_with_brackets("(a)", cx);
+    let wait = |ms: u64, cx: &mut VisualTestContext| {
+        cx.executor()
+            .advance_clock(std::time::Duration::from_millis(ms));
+        cx.run_until_parked();
+    };
+    set_position(&editor, cx, 1, 4);
+    wait(49, cx);
+    assert!(highlights(&editor, cx).is_empty());
+    wait(1, cx);
+    assert_eq!(highlights(&editor, cx), vec![(0, 1), (2, 3)]);
+    // Typing every 30ms: the highlights move with the text, not looked for
+    // again, until 50ms after the last keystroke.
+    set_position(&editor, cx, 1, 1);
+    for _ in 0..3 {
+        editor.update(cx, |e, cx| e.type_text("x", cx));
+        wait(30, cx);
+        assert!(editor.read_with(cx, |e, _| e.bracket_highlights_pending()));
+    }
+    assert_eq!(highlights(&editor, cx), vec![(3, 4), (5, 6)]);
+    wait(20, cx);
+    // `xxx(a)` with the cursor before `(`: the pair next to it.
+    assert!(!editor.read_with(cx, |e, _| e.bracket_highlights_pending()));
+    assert_eq!(highlights(&editor, cx), vec![(3, 4), (5, 6)]);
+    // Moving away from the pair, its highlights go 50ms later.
+    set_position(&editor, cx, 1, 2);
+    wait(0, cx);
+    assert_eq!(highlights(&editor, cx), vec![(3, 4), (5, 6)]);
+    settle(cx);
+    assert!(highlights(&editor, cx).is_empty());
+}
+
 /// Monaco matches brackets for up to 100 cursors (`_recomputeBrackets`).
 #[gpui::test]
 fn bracket_highlights_for_up_to_a_hundred_cursors(cx: &mut TestAppContext) {
@@ -315,13 +361,13 @@ fn bracket_highlights_for_up_to_a_hundred_cursors(cx: &mut TestAppContext) {
             .collect::<Vec<_>>()
     };
     set_selections(&editor, cx, &cursors(50));
-    cx.run_until_parked();
+    settle(cx);
     assert_eq!(highlights(&editor, cx).len(), 100);
     set_selections(&editor, cx, &cursors(100));
-    cx.run_until_parked();
+    settle(cx);
     assert_eq!(highlights(&editor, cx).len(), 200);
     set_selections(&editor, cx, &cursors(101));
-    cx.run_until_parked();
+    settle(cx);
     assert!(highlights(&editor, cx).is_empty());
 }
 
@@ -331,7 +377,7 @@ fn bracket_highlights_for_up_to_a_hundred_cursors(cx: &mut TestAppContext) {
 fn bracket_match_foreground(cx: &mut TestAppContext) {
     let (editor, cx) = editor_with_brackets("(a)", cx);
     set_position(&editor, cx, 1, 1);
-    cx.run_until_parked();
+    settle(cx);
     let id = editor.entity_id();
     let model = editor.read_with(cx, |e, _| e.model().clone());
     let styles = |cx: &mut VisualTestContext| {
@@ -359,18 +405,20 @@ fn bracket_match_foreground(cx: &mut TestAppContext) {
         .into(),
     );
     editor.update(cx, |e, cx| e.set_theme(std::sync::Arc::new(theme), cx));
+    // A theme change recolors the highlights at once, where they are.
+    assert_eq!(styles(cx), vec![Some(red), Some(red)]);
     set_position(&editor, cx, 1, 4);
-    cx.run_until_parked();
+    settle(cx);
     assert_eq!(styles(cx), vec![Some(red), Some(red)]);
 }
 
 fn draw(cx: &mut VisualTestContext) {
-    cx.run_until_parked();
+    settle(cx);
     cx.update(|window, cx| {
         window.refresh();
         window.draw(cx).clear(cx);
     });
-    cx.run_until_parked();
+    settle(cx);
 }
 
 /// Monaco `_recomputeBrackets` clears the highlights only without widget

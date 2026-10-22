@@ -60,11 +60,15 @@ fn select(editor: &Entity<CodeEditor>, selection: Selection, cx: &mut VisualTest
     cx.run_until_parked();
 }
 
-/// The ranges of the editor's bracket match decorations.
+/// The ranges of the editor's bracket match decorations, once Monaco's
+/// 50ms update after the last change has run.
 fn bracket_highlights(
     editor: &Entity<CodeEditor>,
     cx: &mut VisualTestContext,
 ) -> Vec<std::ops::Range<usize>> {
+    cx.executor()
+        .advance_clock(std::time::Duration::from_millis(50));
+    cx.run_until_parked();
     let id = editor.entity_id();
     let model = editor.read_with(cx, |e, _| e.model().clone());
     model.update(cx, |m, _| {

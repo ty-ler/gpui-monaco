@@ -4,8 +4,9 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::ops::Range;
+use std::time::Duration;
 
-use gpui::Context;
+use gpui::{Context, Task};
 use text::{Point, PointUtf16};
 
 use crate::cursor::{self, Selection};
@@ -18,6 +19,37 @@ use crate::view::reveal::RevealType;
 /// Bracket highlighting is skipped with more cursors than this (Monaco
 /// `_recomputeBrackets`).
 const MAX_CURSORS: usize = 100;
+
+/// How long after the last cursor move, edit or focus change the bracket
+/// highlights are updated (Monaco `BracketMatchingController`'s
+/// `_updateBracketsSoon`, a 50ms `RunOnceScheduler`).
+const UPDATE_DELAY: Duration = Duration::from_millis(50);
+
+/// A pair of brackets: the open and close ranges, and whether the pair is
+/// next to the cursor rather than enclosing it.
+type BracketPair = (Range<PointUtf16>, Range<PointUtf16>, bool);
+
+/// The bracket highlights of an editor (Monaco `BracketMatchingController`).
+#[derive(Default)]
+pub(crate) struct BracketHighlights {
+    pub decorations: Vec<crate::decorations::DecorationId>,
+    /// The pair found at each cursor position, sorted by position, as of
+    /// `version` (Monaco `_lastBracketsData` and `_lastVersionId`): reused
+    /// for positions that didn't move while the text didn't change.
+    data: Vec<(PointUtf16, Option<BracketPair>)>,
+    version: Option<text::Version>,
+    /// The pending update (Monaco `_updateBracketsSoon`).
+    scheduled: Option<Task<()>>,
+}
+
+impl BracketHighlights {
+    /// Forgets the pairs found (Monaco `_lastBracketsData = []`), when the
+    /// model, its language configuration or `matchBrackets` changes.
+    pub(crate) fn forget(&mut self) {
+        self.data.clear();
+        self.version = None;
+    }
+}
 
 fn contains(range: &Range<PointUtf16>, p: PointUtf16) -> bool {
     range.start <= p && p <= range.end
@@ -183,8 +215,30 @@ impl CodeEditor {
         }
     }
 
-    /// Re-highlights the bracket pairs at the cursors (Monaco
-    /// `BracketMatchingController._recomputeBrackets`): the pair next to a
+    /// Updates the bracket highlights 50ms after the last call (Monaco
+    /// `_updateBracketsSoon.schedule()`), on cursor moves, edits, focus
+    /// changes and new parses: typing faster than that moves the highlights
+    /// with the text without looking for the pairs again.
+    pub(crate) fn schedule_bracket_highlights(&mut self, cx: &mut Context<Self>) {
+        self.brackets.scheduled = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(UPDATE_DELAY).await;
+            this.update(cx, |this, cx| {
+                this.brackets.scheduled = None;
+                this.update_bracket_highlights(cx);
+            })
+            .ok();
+        }));
+    }
+
+    /// Whether a bracket highlight update is pending.
+    #[doc(hidden)]
+    pub fn bracket_highlights_pending(&self) -> bool {
+        self.brackets.scheduled.is_some()
+    }
+
+    /// Re-highlights the bracket pairs at the cursors now (Monaco
+    /// `BracketMatchingController._updateBrackets`, which
+    /// [`CodeEditor::schedule_bracket_highlights`] runs): the pair next to a
     /// cursor, with an overview ruler mark, or with `matchBrackets:
     /// "always"` the pair enclosing it. Only while the editor or one of its
     /// widgets (the find input, a focused hover) has focus.
@@ -192,66 +246,123 @@ impl CodeEditor {
     /// sets it, over their pair colorization (Monaco's
     /// `bracket-match-inline`).
     pub(crate) fn update_bracket_highlights(&mut self, cx: &mut Context<Self>) {
-        // (open, close, whether it's next to the cursor).
-        let mut pairs: Vec<(Range<PointUtf16>, Range<PointUtf16>, bool)> = Vec::new();
-        let selections = self.cursors.selections();
-        let always = self.options.match_brackets == MatchBrackets::Always;
-        if self.options.match_brackets != MatchBrackets::Never
-            && self.widget_focused
-            && !self.options.single_line
-            && selections.len() <= MAX_CURSORS
-        {
-            for selection in selections.iter().filter(|s| s.is_empty()) {
-                let position = selection.head;
-                let found = self.with_bracket_context(cx, |rope, config, skippable| {
-                    cursor::match_or_enclosing(rope, config, position, skippable, always)
-                });
-                if let Some(Some(pair)) = found {
-                    pairs.push(pair);
-                }
-            }
-        }
+        self.brackets.scheduled = None;
+        let pairs = self.recompute_brackets(cx);
         let mut ranges: Vec<(Range<PointUtf16>, bool)> = pairs
             .into_iter()
             .flat_map(|(open, close, near)| [(open, near), (close, near)])
             .collect();
         ranges.sort_by_key(|(r, near)| (r.start, r.end, !near));
         ranges.dedup_by(|a, b| a.0 == b.0);
-        let old = std::mem::take(&mut self.bracket_decorations);
+        let old = std::mem::take(&mut self.brackets.decorations);
         if old.is_empty() && ranges.is_empty() {
             return;
         }
-        let colors = self.theme.colors.clone();
-        let foreground = colors.bracket_match_foreground.map(|color| TokenStyle {
-            foreground: Some(color),
-            ..Default::default()
-        });
         let rope = self.snapshot.rope();
         let new = ranges
             .into_iter()
             .map(|(range, near)| {
                 (
                     rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end),
-                    DecorationOptions {
-                        background: Some(colors.bracket_match_background),
-                        border: Some(colors.bracket_match_border),
-                        text: foreground,
-                        stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
-                        // Monaco marks only a pair next to the cursor.
-                        overview_ruler: near.then(|| {
-                            OverviewRulerDecoration::new(
-                                colors.overview_ruler_bracket_match,
-                                OverviewRulerLane::Center,
-                            )
-                        }),
-                        ..Default::default()
-                    },
+                    self.bracket_highlight_options(near),
                 )
             })
             .collect();
         let owner = Some(cx.entity_id());
-        self.bracket_decorations = self.model().update(cx, |model, cx| {
+        self.brackets.decorations = self.model().update(cx, |model, cx| {
             model.delta_decorations(owner, &old, new, cx)
+        });
+    }
+
+    /// The pairs to highlight (Monaco `_recomputeBrackets`): at each empty
+    /// selection, the pair next to it or, with `matchBrackets: "always"`,
+    /// the pair enclosing it, reusing the pairs found at positions that
+    /// didn't move while the text didn't change.
+    fn recompute_brackets(&mut self, cx: &mut Context<Self>) -> Vec<BracketPair> {
+        let selections = self.cursors.selections();
+        if self.options.match_brackets == MatchBrackets::Never
+            || !self.widget_focused
+            || self.options.single_line
+            || selections.len() > MAX_CURSORS
+        {
+            self.brackets.forget();
+            return Vec::new();
+        }
+        let always = self.options.match_brackets == MatchBrackets::Always;
+        let version = self.snapshot.version();
+        let previous = if self.brackets.version.as_ref() == Some(&version) {
+            std::mem::take(&mut self.brackets.data)
+        } else {
+            Vec::new()
+        };
+        // Sorted, for hits in `previous`.
+        let mut positions: Vec<PointUtf16> = selections
+            .iter()
+            .filter(|s| s.is_empty())
+            .map(|s| s.head)
+            .collect();
+        positions.sort();
+        let mut data = Vec::with_capacity(positions.len());
+        let mut previous = previous.into_iter().peekable();
+        for position in positions {
+            while previous.next_if(|(p, _)| *p < position).is_some() {}
+            let pair = match previous.next_if(|(p, _)| *p == position) {
+                Some((_, pair)) => pair,
+                None => self
+                    .with_bracket_context(cx, |rope, config, skippable| {
+                        cursor::match_or_enclosing(rope, config, position, skippable, always)
+                    })
+                    .flatten(),
+            };
+            data.push((position, pair));
+        }
+        let pairs = data.iter().filter_map(|(_, pair)| pair.clone()).collect();
+        self.brackets.data = data;
+        self.brackets.version = Some(version);
+        pairs
+    }
+
+    /// The highlight of a bracket in the theme's colors, with an overview
+    /// ruler mark for a pair `near` the cursor.
+    fn bracket_highlight_options(&self, near: bool) -> DecorationOptions {
+        let colors = &self.theme.colors;
+        DecorationOptions {
+            background: Some(colors.bracket_match_background),
+            border: Some(colors.bracket_match_border),
+            text: colors.bracket_match_foreground.map(|color| TokenStyle {
+                foreground: Some(color),
+                ..Default::default()
+            }),
+            stickiness: text::Stickiness::NeverGrowsWhenTypingAtEdges,
+            // Monaco marks only a pair next to the cursor.
+            overview_ruler: near.then(|| {
+                OverviewRulerDecoration::new(
+                    colors.overview_ruler_bracket_match,
+                    OverviewRulerLane::Center,
+                )
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// Recolors the bracket highlights in the current theme, where they
+    /// are (Monaco's decorations name theme colors, which a theme change
+    /// repaints without looking for the pairs again).
+    pub(crate) fn recolor_bracket_highlights(&mut self, cx: &mut Context<Self>) {
+        let ids = self.brackets.decorations.clone();
+        let options: Vec<_> = {
+            let model = self.model().read(cx);
+            ids.iter()
+                .filter_map(|id| {
+                    let near = model.decoration(*id)?.options.overview_ruler.is_some();
+                    Some((*id, self.bracket_highlight_options(near)))
+                })
+                .collect()
+        };
+        self.model().update(cx, |model, cx| {
+            for (id, options) in options {
+                model.change_decoration_options(id, options, cx);
+            }
         });
     }
 

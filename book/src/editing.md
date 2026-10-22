@@ -199,7 +199,7 @@ Lines are indented like the cursor's line unless `adjust_whitespace` is off. `ov
 
 ## Brackets
 
-- **Highlighting:** while the editor has focus, the bracket pair next to the cursor is highlighted and marked in the overview ruler. With `match_brackets: Always` (the default, as in Monaco) the pair enclosing the cursor is highlighted when no bracket is next to it. Brackets inside strings and comments are skipped.
+- **Highlighting:** while the editor has focus, the bracket pair next to the cursor is highlighted and marked in the overview ruler. With `match_brackets: Always` (the default, as in Monaco) the pair enclosing the cursor is highlighted when no bracket is next to it. Brackets inside strings and comments are skipped. As in Monaco, the highlights are updated 50ms after the last cursor move, edit or focus change, so while you type faster than that they move with the text.
 - **Navigation:** Cmd+Shift+\ jumps to the matching bracket.
 
 ## View

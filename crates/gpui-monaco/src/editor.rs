@@ -731,7 +731,7 @@ pub struct CodeEditor {
     pub(crate) widgets: Widgets,
     pub(crate) find: crate::find::FindState,
     pub(crate) multi_cursor: Option<crate::multi_cursor::MultiCursorSession>,
-    pub(crate) bracket_decorations: Vec<crate::decorations::DecorationId>,
+    pub(crate) brackets: crate::bracket_matching::BracketHighlights,
     pub(crate) navigation: crate::navigation_history::NavigationHistory,
     pub(crate) occurrences: crate::occurrences::OccurrenceHighlights,
     pub(crate) bracket_colors: crate::bracket_colors::BracketColors,
@@ -1010,7 +1010,7 @@ impl CodeEditor {
             cx.on_focus(&focus_handle, window, |this, _, cx| {
                 this.has_focus = true;
                 this.widget_focused = true;
-                this.update_bracket_highlights(cx);
+                this.schedule_bracket_highlights(cx);
                 this.restart_blink(cx);
                 // Monaco's Cmd/Ctrl+D session ends on `onDidFocusEditorText`
                 // unless `selectedTextMatchMode` is `findOptions`.
@@ -1024,7 +1024,7 @@ impl CodeEditor {
             // one of the editor's widgets (the hover, the find input).
             cx.on_blur(&focus_handle, window, |this, _, cx| {
                 this.has_focus = false;
-                this.update_bracket_highlights(cx);
+                this.schedule_bracket_highlights(cx);
                 // Monaco disposes the sticky scroll's focus when its DOM
                 // node blurs.
                 this.sticky.focused = None;
@@ -1044,7 +1044,7 @@ impl CodeEditor {
             // Monaco's widget focus: the text or a widget inside the editor.
             cx.on_focus_in(&focus_handle, window, |this, _, cx| {
                 this.widget_focused = true;
-                this.update_bracket_highlights(cx);
+                this.schedule_bracket_highlights(cx);
                 this.find_widget_focus_in(cx);
                 cx.emit(CodeEditorEvent::WidgetFocused);
             }),
@@ -1057,7 +1057,7 @@ impl CodeEditor {
                 // Monaco `BracketMatchingController` clears the brackets
                 // only now, not when a widget takes the focus.
                 this.widget_focused = false;
-                this.update_bracket_highlights(cx);
+                this.schedule_bracket_highlights(cx);
                 this.hide_hover(cx);
                 this.hide_suggest(cx);
                 this.hide_signature_help(cx);
@@ -1214,7 +1214,7 @@ impl CodeEditor {
             widgets: Widgets::default(),
             find: crate::find::FindState::new(cx),
             multi_cursor: None,
-            bracket_decorations: Vec::new(),
+            brackets: Default::default(),
             overtype: false,
             occurrences: Default::default(),
             bracket_colors: Default::default(),
@@ -1361,7 +1361,10 @@ impl CodeEditor {
         self.close_marker_zone(cx);
         self.reset_click_link(cx);
         self.detach_find_from_model(cx);
-        let brackets = std::mem::take(&mut self.bracket_decorations);
+        // Monaco `BracketMatchingController` on `onDidChangeModel`.
+        self.brackets.forget();
+        self.schedule_bracket_highlights(cx);
+        let brackets = std::mem::take(&mut self.brackets.decorations);
         if !brackets.is_empty() {
             self.model.update(cx, |model, cx| {
                 model.delta_decorations(None, &brackets, Vec::new(), cx)
@@ -1596,7 +1599,18 @@ impl CodeEditor {
             .set_merge_overlapping(self.options.multi_cursor_merge_overlapping);
         self.bracket_colors = Default::default();
         self.refresh_bracket_colors(cx);
-        self.update_bracket_highlights(cx);
+        // Monaco clears the bracket highlights at once when `matchBrackets`
+        // changes, and finds them again 50ms later.
+        if old.match_brackets != self.options.match_brackets {
+            let brackets = std::mem::take(&mut self.brackets.decorations);
+            self.model.update(cx, |model, cx| {
+                model.delta_decorations(Some(cx.entity_id()), &brackets, Vec::new(), cx)
+            });
+            self.brackets.forget();
+            self.schedule_bracket_highlights(cx);
+        } else if old.single_line != self.options.single_line {
+            self.schedule_bracket_highlights(cx);
+        }
         self.reset_inlay_hints(cx);
         // Monaco `CodeActionModel` on a `lightbulb` change.
         if old.lightbulb != self.options.lightbulb {
@@ -1665,7 +1679,7 @@ impl CodeEditor {
             theme
         };
         // The bracket highlights carry the theme's colors.
-        self.update_bracket_highlights(cx);
+        self.recolor_bracket_highlights(cx);
         cx.notify();
     }
 
@@ -3038,6 +3052,9 @@ impl CodeEditor {
                 self.semantic_tokens_after_edit(changes, cx);
                 self.inline_completions_after_edit(*kind, cx);
                 self.linked_editing_after_edit(changes, own, cx);
+                // Monaco `BracketMatchingController` on
+                // `onDidChangeModelContent`.
+                self.schedule_bracket_highlights(cx);
                 // Monaco's folding decorations follow the edit; replacing
                 // the whole text drops them.
                 if *kind == EditKind::SetValue {
@@ -3147,7 +3164,8 @@ impl CodeEditor {
             TextModelEvent::SyntaxUpdated { ranges } => {
                 self.minimap_cache
                     .note_tokens_changed(ranges, model.read(cx));
-                self.update_bracket_highlights(cx);
+                // Strings and comments may have changed under the brackets.
+                self.schedule_bracket_highlights(cx);
                 self.refresh_bracket_colors(cx);
                 // Syntax folding follows the new trees.
                 if self.options.folding
@@ -3227,6 +3245,8 @@ impl CodeEditor {
             TextModelEvent::LanguageConfigurationChanged => {
                 // Brackets may have changed: find the pairs again.
                 self.bracket_colors = Default::default();
+                self.brackets.forget();
+                self.schedule_bracket_highlights(cx);
                 // As may the folding markers and `offSide`.
                 self.refresh_folding(cx);
                 cx.emit(CodeEditorEvent::ModelLanguageConfigurationChanged);
@@ -3437,7 +3457,9 @@ impl CodeEditor {
         self.click_link_selection_changed(primary.start()..primary.end(), cx);
         self.smart_select_cursor_changed();
         self.schedule_auto_code_actions(cx);
-        self.update_bracket_highlights(cx);
+        if self.options.match_brackets != crate::options::MatchBrackets::Never {
+            self.schedule_bracket_highlights(cx);
+        }
         self.multi_cursor_selections_changed(cx);
         self.update_occurrence_highlights(cx);
         self.restart_blink(cx);
@@ -7471,7 +7493,7 @@ impl Render for CodeEditor {
         if focused != self.has_focus || widget_focused != self.widget_focused {
             self.has_focus = focused;
             self.widget_focused = widget_focused;
-            self.update_bracket_highlights(cx);
+            self.schedule_bracket_highlights(cx);
         }
         let mut key_context = gpui::KeyContext::new_with_defaults();
         key_context.add(KEY_CONTEXT);
