@@ -2,6 +2,10 @@
 //! syntax tree and mock providers, and a port of Monaco's
 //! `linkedEditing.test.ts`.
 
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use gpui::{App, AppContext as _, Entity, Focusable, Task, TestAppContext, VisualTestContext};
@@ -9,7 +13,7 @@ use gpui_monaco::cursor::Selection;
 use gpui_monaco::providers::*;
 use gpui_monaco::syntax::{Language, LanguageConfiguration, Pattern};
 use gpui_monaco::text::PointUtf16;
-use gpui_monaco::{CodeEditor, TextModel};
+use gpui_monaco::{CodeEditor, CodeEditorEvent, TextModel};
 use serde_json::json;
 
 fn setup<'a>(
@@ -196,7 +200,10 @@ fn the_default_word_pattern_ends_it(cx: &mut TestAppContext) {
         register_linked_editing_range_provider(
             cx,
             LanguageSelector::All,
-            WordMatches { word_pattern: None },
+            WordMatches {
+                word_pattern: None,
+                calls: Arc::default(),
+            },
         );
     });
     let (editor, cx) = setup("<foo></foo>", "nowords", cx);
@@ -257,6 +264,8 @@ const USUAL_WORD_SEPARATORS: &str = "`~!@#$%^&*()-=+[{]}\\|;:'\",.<>/?";
 /// wholeWord, USUAL_WORD_SEPARATORS)`.
 struct WordMatches {
     word_pattern: Option<Pattern>,
+    /// How many times it was asked.
+    calls: Arc<AtomicUsize>,
 }
 
 impl LinkedEditingRangeProvider for WordMatches {
@@ -266,6 +275,7 @@ impl LinkedEditingRangeProvider for WordMatches {
         position: PointUtf16,
         _: &mut App,
     ) -> Task<anyhow::Result<Option<LinkedEditingRanges>>> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
         let text = context.snapshot.rope().to_string();
         let lines: Vec<Vec<char>> = text.split('\n').map(|l| l.chars().collect()).collect();
         let is_word = |c: char| c.is_ascii_alphabetic();
@@ -312,7 +322,22 @@ fn mock_editor<'a>(
     word_pattern: Option<&str>,
     cx: &'a mut TestAppContext,
 ) -> (Entity<CodeEditor>, &'a mut VisualTestContext) {
+    let (editor, cx, _) = mock_editor_counting(text, word_pattern, cx);
+    (editor, cx)
+}
+
+/// [`mock_editor`], with the number of times the provider was asked.
+fn mock_editor_counting<'a>(
+    text: &str,
+    word_pattern: Option<&str>,
+    cx: &'a mut TestAppContext,
+) -> (
+    Entity<CodeEditor>,
+    &'a mut VisualTestContext,
+    Arc<AtomicUsize>,
+) {
     let word_pattern = word_pattern.map(|source| Pattern::new(source, ""));
+    let calls = Arc::<AtomicUsize>::default();
     cx.update(|cx| {
         gpui_monaco::init(cx);
         gpui_monaco::register_language(
@@ -325,7 +350,10 @@ fn mock_editor<'a>(
         register_linked_editing_range_provider(
             cx,
             LanguageSelector::All,
-            WordMatches { word_pattern },
+            WordMatches {
+                word_pattern,
+                calls: calls.clone(),
+            },
         );
     });
     let text = text.to_string();
@@ -345,7 +373,7 @@ fn mock_editor<'a>(
     });
     cx.update(|window, cx| window.focus(&editor.focus_handle(cx), cx));
     settle(cx);
-    (editor, cx)
+    (editor, cx, calls)
 }
 
 /// Monaco 1-based (line, column).
@@ -476,6 +504,89 @@ fn insert_move_insert_outside_region(cx: &mut TestAppContext) {
     set_position(&editor, cx, 1, 7);
     type_text(&editor, cx, "i");
     assert_eq!(text(&editor, cx), "<iooo>i</iooo>");
+}
+
+/// Monaco's quick edits with a range update before synchronization: two
+/// edits in one update, then a range update (`updateRanges()`) before
+/// their deferred syncs run, from a listener of the first edit's content
+/// change, then a third edit. The range update finds the cursor in the
+/// reference range at the edits' version and keeps the ranges without
+/// asking the provider again (microsoft/vscode#343009).
+fn quick_edits_with_range_update(
+    at: (u32, u32),
+    handler: &str,
+    payloads: [serde_json::Value; 3],
+    cx: &mut TestAppContext,
+) -> String {
+    let (editor, cx, calls) = mock_editor_counting(STATE, None, cx);
+    set_position(&editor, cx, at.0, at.1);
+    let pending = Rc::new(Cell::new(false));
+    let _subscription = cx.update(|_, cx| {
+        let pending = pending.clone();
+        cx.subscribe(&editor, move |editor, event: &CodeEditorEvent, cx| {
+            if matches!(event, CodeEditorEvent::ModelContentChanged(_)) && pending.take() {
+                editor.update(cx, |e, cx| e.update_linked_editing(false, cx));
+            }
+        })
+    });
+    let [first, second, third] = payloads;
+    let asked = calls.load(Ordering::SeqCst);
+    pending.set(true);
+    editor.update_in(cx, |e, window, cx| {
+        for payload in [first, second] {
+            e.trigger_with_payload(handler, payload, window, cx)
+                .unwrap_or_else(|err| panic!("{handler}: {err}"));
+        }
+    });
+    assert!(!pending.get(), "no content change");
+    assert_eq!(calls.load(Ordering::SeqCst), asked, "asked again");
+    settle(cx);
+    trigger(&editor, cx, handler, third);
+    text(&editor, cx)
+}
+
+#[gpui::test]
+fn quick_inserts_with_a_range_update_before_synchronization(cx: &mut TestAppContext) {
+    let text = quick_edits_with_range_update(
+        (1, 2),
+        "type",
+        [
+            json!({ "text": "i" }),
+            json!({ "text": "j" }),
+            json!({ "text": "k" }),
+        ],
+        cx,
+    );
+    assert_eq!(text, "<ijkooo></ijkooo>");
+}
+
+#[gpui::test]
+fn quick_inserts_in_closing_tag_with_a_range_update_before_synchronization(
+    cx: &mut TestAppContext,
+) {
+    let text = quick_edits_with_range_update(
+        (1, 8),
+        "type",
+        [
+            json!({ "text": "i" }),
+            json!({ "text": "j" }),
+            json!({ "text": "k" }),
+        ],
+        cx,
+    );
+    assert_eq!(text, "<ijkooo></ijkooo>");
+}
+
+#[gpui::test]
+fn edits_outside_the_reference_range_refresh_linked_editing(cx: &mut TestAppContext) {
+    let (editor, cx) = mock_editor(STATE, None, cx);
+    set_position(&editor, cx, 1, 2);
+    editor.update(cx, |e, cx| {
+        e.execute_edits(vec![(mp(1, 8)..mp(1, 11), "other".into())], None, cx);
+    });
+    settle(cx);
+    type_text(&editor, cx, "i");
+    assert_eq!(text(&editor, cx), "<iooo></other>");
 }
 
 /// Sets the position, then the selection, then runs `op`: the text after.
@@ -611,6 +722,13 @@ fn delete_left_char_then_undo(cx: &mut TestAppContext) {
     delete("deleteLeft")(&editor, cx);
     undo(&editor, cx);
     assert_eq!(text(&editor, cx), "<ooo></ooo>");
+}
+
+#[gpui::test]
+fn quick_deletes_with_a_range_update_before_synchronization(cx: &mut TestAppContext) {
+    let text =
+        quick_edits_with_range_update((1, 5), "deleteLeft", [json!({}), json!({}), json!({})], cx);
+    assert_eq!(text, "<></>");
 }
 
 #[gpui::test]
