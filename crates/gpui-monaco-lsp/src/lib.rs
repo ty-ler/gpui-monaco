@@ -31,6 +31,7 @@ mod call_hierarchy;
 mod client;
 pub mod convert;
 mod features;
+mod inline_values;
 pub mod rpc;
 mod type_hierarchy;
 mod workspace_symbols;
@@ -43,6 +44,7 @@ pub use client::{
     LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions, MessageResponder,
     WILL_SAVE_WAIT_UNTIL_TIMEOUT,
 };
+pub use inline_values::{InlineValue, InlineValueContext};
 pub use lsp_types;
 pub use rpc::Connection;
 pub use type_hierarchy::TypeHierarchyItem;

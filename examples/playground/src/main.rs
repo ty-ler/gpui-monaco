@@ -147,7 +147,8 @@ fn start_language_server(
                         let titles: Vec<&str> = actions.iter().map(|a| a.title.as_str()).collect();
                         eprintln!("language server: {message} {titles:?}");
                     }
-                    LspClientEvent::Exited => {}
+                    // No debugger, so no inline values to refresh.
+                    LspClientEvent::InlineValuesRefresh | LspClientEvent::Exited => {}
                 }
             })
             .detach();
