@@ -733,10 +733,12 @@ fn full_width_characters_in_two_cells(cx: &mut TestAppContext) {
 }
 
 /// Monaco `effectiveFullwidthCharacterWidth` is `twoCells` only with
-/// `isMonospace`, which needs the ligatures off (`fontMeasurements.ts`),
-/// and `EditorFontLigatures.validate` reads `"false"` as off.
+/// `isMonospace`, which with ligatures on measures `fi`, `<=`, `=>` and
+/// `===` too (`fontMeasurements.ts`, microsoft/vscode#341778): the test
+/// font's ligatures keep their width, so it's monospace either way.
+/// `EditorFontLigatures.validate` reads `"false"` as off.
 #[gpui::test]
-fn two_cells_need_a_monospace_font_without_ligatures(cx: &mut TestAppContext) {
+fn two_cells_with_a_monospace_font_with_or_without_ligatures(cx: &mut TestAppContext) {
     let (editor, cx) = setup(
         "a中b",
         |o| {
@@ -750,20 +752,27 @@ fn two_cells_need_a_monospace_font_without_ligatures(cx: &mut TestAppContext) {
         editor.read_with(cx, |e, _| e.offset_for_column(0, column).unwrap())
     };
     let em = x(&editor, 1, cx) - x(&editor, 0, cx);
-    // The font's width (one em in the test font), not two cells.
-    assert_eq!(x(&editor, 2, cx) - x(&editor, 1, cx), em);
+    // Two cells, as the font is monospace with its ligatures.
+    assert_eq!(x(&editor, 3, cx), em * 4.);
     let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
-    assert!(!font.is_monospace);
+    assert!(font.is_monospace);
     assert_eq!(font.font_feature_settings, FontLigatures::ON);
     set_options(
         &editor,
         |o| o.font_ligatures = FontLigatures::Settings("false".into()),
         cx,
     );
-    assert_eq!(x(&editor, 2, cx), em * 3.);
+    assert_eq!(x(&editor, 3, cx), em * 4.);
     let font = editor.read_with(cx, |e, _| e.font_info()).unwrap();
     assert!(font.is_monospace);
     assert_eq!(font.font_feature_settings, FontLigatures::OFF);
+    // Without two cells, the font's own width.
+    set_options(
+        &editor,
+        |o| o.fullwidth_character_width = FullwidthCharacterWidth::Font,
+        cx,
+    );
+    assert_eq!(x(&editor, 3, cx), em * 3.);
 }
 
 /// Monaco `FontInfo`'s measurements: in the test font every character is

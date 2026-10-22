@@ -292,7 +292,7 @@ impl TextMetrics {
             ..font(options.font_family.clone())
         };
         let font_size = options.font_size;
-        // Monaco `isMonospace` starts from the ligatures being off.
+        // Monaco measures ligatures for `isMonospace` when they're on.
         let ligatures_off =
             options.font_ligatures.font_feature_settings() == crate::options::FontLigatures::OFF;
         let measurements = match cached {
@@ -350,9 +350,10 @@ pub(crate) struct FontMeasurements {
     pub wsmiddot_width: Pixels,
     /// The widest digit's width (Monaco `maxDigitWidth`).
     pub max_digit_width: Pixels,
-    /// Monaco `isMonospace`: the ligatures are off and `n`, a space, the
-    /// digits, `→`, `·` and `|/-_ilm%` (also italic and bold) are equally
-    /// wide.
+    /// Monaco `isMonospace`: a space, the digits, `→`, `·` and `|/-_ilm%`
+    /// (also italic and bold) are as wide as `n`, and with ligatures on,
+    /// `fi`, `<=`, `=>` and `===` are as wide as that many `n`s (see
+    /// [`widths_are_monospace`]).
     pub is_monospace: bool,
     /// Monaco `canUseHalfwidthRightwardsArrow`: `￫` keeps a monospace font
     /// monospace and is no wider than `→`.
@@ -374,33 +375,44 @@ impl FontMeasurements {
             ..font.clone()
         };
         let text_system = window.text_system().clone();
-        let width = |ch: char, font: &Font| {
+        let width_of = |text: &str, font: &Font| {
             text_system
                 .shape_line(
-                    ch.to_string().into(),
+                    text.to_string().into(),
                     font_size,
-                    &[run(ch.len_utf8(), font, gpui::black())],
+                    &[run(text.len(), font, gpui::black())],
                     None,
                 )
                 .width
         };
+        let width = |ch: char, font: &Font| width_of(ch.encode_utf8(&mut [0; 4]), font);
         let typical_halfwidth_character_width = width('n', font);
         let space_width = width(' ', font);
         let digits: Vec<Pixels> = ('0'..='9').map(|digit| width(digit, font)).collect();
         let rightwards_arrow = width('\u{2192}', font);
         let halfwidth_rightwards_arrow = width('\u{ffeb}', font);
         let middot_width = width('\u{b7}', font);
-        // Monaco's monospace test, against the width of `n`.
+        // Monaco's monospace test, against the width of `n`: measured lazily,
+        // as the test stops at the first probe that fails.
         let reference = typical_halfwidth_character_width;
-        let same = |w: Pixels| (f32::from(reference) - f32::from(w)).abs() <= 0.001;
-        let is_monospace = ligatures_off
-            && same(space_width)
-            && digits.iter().all(|w| same(*w))
-            && same(rightwards_arrow)
-            && same(middot_width)
-            && "|/-_ilm%".chars().all(|ch| {
-                same(width(ch, font)) && same(width(ch, &italic)) && same(width(ch, &bold))
-            });
+        let one = |width: Pixels| (1, width);
+        let probes = [space_width]
+            .into_iter()
+            .chain(digits.iter().copied())
+            .chain([rightwards_arrow, middot_width])
+            .map(one)
+            .chain(
+                "|/-_ilm%"
+                    .chars()
+                    .flat_map(|ch| [font, &italic, &bold].map(|font| one(width(ch, font)))),
+            )
+            .chain(
+                MONOSPACE_LIGATURE_TEST_STRINGS
+                    .iter()
+                    .filter(|_| !ligatures_off)
+                    .map(|text| (text.len(), width_of(text, font))),
+            );
+        let is_monospace = widths_are_monospace(reference, probes);
         let can_use_halfwidth_rightwards_arrow = !(is_monospace
             && halfwidth_rightwards_arrow != reference)
             && halfwidth_rightwards_arrow <= rightwards_arrow;
@@ -417,6 +429,75 @@ impl FontMeasurements {
             is_monospace,
             can_use_halfwidth_rightwards_arrow,
         }
+    }
+}
+
+/// The strings Monaco's monospace test measures with ligatures on
+/// (`monospaceLigatureTestStrings`, microsoft/vscode#341778): a font whose
+/// ligatures keep them as wide as their characters is still monospace.
+const MONOSPACE_LIGATURE_TEST_STRINGS: [&str; 4] = ["fi", "<=", "=>", "==="];
+
+/// Monaco's `isMonospace` (`FontMeasurementsImpl._actualReadFontInfo`):
+/// every probe, `(length, width)`, is `length` times `reference` wide,
+/// within 0.005px.
+fn widths_are_monospace(
+    reference: Pixels,
+    probes: impl IntoIterator<Item = (usize, Pixels)>,
+) -> bool {
+    let reference = f32::from(reference);
+    probes.into_iter().all(|(length, width)| {
+        let diff = reference * length as f32 - f32::from(width);
+        (-0.005..=0.005).contains(&diff)
+    })
+}
+
+#[cfg(test)]
+mod monospace_tests {
+    use super::*;
+
+    /// Monaco `fontMeasurements.test.ts`, `classifies ... ligatures`: every
+    /// probe is 8px per character but `probe`, which is `difference` wider,
+    /// and every ligature string is measured.
+    fn classify(probe: &str, difference: f32) -> bool {
+        let reference = px(8.);
+        let singles = std::iter::repeat_n((1, reference), 36);
+        let ligatures = MONOSPACE_LIGATURE_TEST_STRINGS.iter().map(|text| {
+            let width = 8. * text.len() as f32 + if *text == probe { difference } else { 0. };
+            (text.len(), px(width))
+        });
+        widths_are_monospace(reference, singles.chain(ligatures))
+    }
+
+    #[test]
+    fn classifies_ligatures_by_their_width() {
+        assert_eq!(MONOSPACE_LIGATURE_TEST_STRINGS, ["fi", "<=", "=>", "==="]);
+        for probe in MONOSPACE_LIGATURE_TEST_STRINGS {
+            // Width-preserving, then narrower and wider just inside and just
+            // outside the tolerance.
+            for (difference, is_monospace) in [
+                (0., true),
+                (-0.004, true),
+                (0.004, true),
+                (-0.006, false),
+                (0.006, false),
+            ] {
+                assert_eq!(
+                    classify(probe, difference),
+                    is_monospace,
+                    "{probe} {difference}"
+                );
+            }
+        }
+    }
+
+    /// A single character just off the reference width is monospace within
+    /// the tolerance, as Monaco's 0.005 now applies to every probe.
+    #[test]
+    fn single_characters_share_the_tolerance() {
+        let reference = px(8.);
+        assert!(widths_are_monospace(reference, [(1, px(8.004))]));
+        assert!(!widths_are_monospace(reference, [(1, px(8.006))]));
+        assert!(widths_are_monospace(reference, []));
     }
 }
 
