@@ -27,6 +27,7 @@
 //! .detach();
 //! ```
 
+mod call_hierarchy;
 mod client;
 pub mod convert;
 mod features;
@@ -36,6 +37,7 @@ mod workspace_symbols;
 #[cfg(test)]
 mod tests;
 
+pub use call_hierarchy::{CallHierarchyItem, IncomingCall, OutgoingCall};
 pub use client::{
     LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions, MessageResponder,
 };

@@ -13,6 +13,7 @@ use crate::features::LspFeatures;
 use crate::rpc::read_message;
 use crate::{LspClient, LspClientEvent, LspClientOptions};
 
+mod call_hierarchy;
 mod workspace_symbols;
 
 /// Answers a request, or `None` to never answer it.
@@ -105,6 +106,7 @@ fn capabilities() -> Value {
         "colorProvider": true,
         "linkedEditingRangeProvider": true,
         "workspaceSymbolProvider": { "resolveProvider": true },
+        "callHierarchyProvider": true,
     })
 }
 
