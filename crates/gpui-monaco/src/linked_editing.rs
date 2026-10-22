@@ -173,6 +173,15 @@ impl CodeEditor {
                     && change.range.start <= reference.end
             });
             if inside {
+                // The edit's version becomes the request's (Monaco
+                // `_currentRequestModelVersion`, microsoft/vscode#343009), so
+                // a range update before the sync, with the cursor still in
+                // the reference range, keeps the ranges instead of asking
+                // again.
+                let version = self.model().read(cx).buffer().version();
+                if let Some((_, requested)) = &mut self.linked.requested {
+                    *requested = version;
+                }
                 // Monaco mirrors on the next tick (a 0ms delayer).
                 let this = cx.entity().downgrade();
                 cx.defer(move |cx| {

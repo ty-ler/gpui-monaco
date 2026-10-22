@@ -55,7 +55,7 @@ Issues are linked by number.
 | In-place replace, with the `vs` theme's outline flash | `inPlaceReplace` | ✅ | #80, #328 |
 | Toggle line and block comments | `comment` | ✅ | #79 |
 | Smart select (expand and shrink) | `smartSelect` | ✅ with no provider registered, tree-sitter syntax nodes where Monaco uses brackets (brackets without a grammar), a documented difference; the fallback is left out once any provider is registered, as in Monaco | #82, #493 |
-| Linked editing (HTML tags) | `linkedEditing` | ✅ the default word pattern ends it for a language without one; option, provider, model and language changes reinitialize it; the mirror edit joins the triggering edit's undo step, a paste's or cut's too (`popUndoStop`) | #101, #402, #473 |
+| Linked editing (HTML tags) | `linkedEditing` | ✅ the default word pattern ends it for a language without one; option, provider, model and language changes reinitialize it; the mirror edit joins the triggering edit's undo step, a paste's or cut's too (`popUndoStop`) | #101, #402, #473, #538 |
 | Snippet syntax: parser, variables (path variables of non-`file:` URIs from their path), transforms | `snippet` | ✅ | #55, #351 |
 | Snippet sessions: tab stops, choices (offered again while active, as the exclusive `snippetChoiceCompletions` provider), nesting, completion integration, `overwriteBefore`/`overwriteAfter` from the head of a selection, `$SELECTION` from text typed over a selection (`OvertypingCapturer`) | `snippet`, `suggestOvertypingCapturer` | ✅ | #55, #302, #351 |
 | Drag and drop text (the arrow or copy pointer from the first drag step, the copy modifier forgotten on blur, the theme type's fixed `dnd-target` color), double-click block selection | `dnd`, `doubleClickSelectsBlock` | ✅ | #92, #491 |
