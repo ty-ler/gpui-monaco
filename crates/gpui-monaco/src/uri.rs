@@ -114,12 +114,14 @@ impl std::fmt::Display for Uri {
             if let Some(ix) = authority.find('@') {
                 let userinfo = &authority[..ix];
                 authority = &authority[ix + 1..];
-                match userinfo.rfind(':') {
+                // `<user>:<pass>`, split at the first colon; a colon in the
+                // password is encoded.
+                match userinfo.find(':') {
                     None => encode(&mut res, userinfo, false, false),
                     Some(ix) => {
                         encode(&mut res, &userinfo[..ix], false, false);
                         res.push(':');
-                        encode(&mut res, &userinfo[ix + 1..], false, true);
+                        encode(&mut res, &userinfo[ix + 1..], false, false);
                     }
                 }
                 res.push('@');
@@ -341,6 +343,44 @@ mod tests {
         assert_eq!(
             normalize_uri("HTTP://Example.COM/A"),
             "HTTP://example.com/A"
+        );
+    }
+
+    /// Monaco `uri.test.ts`: `URI#toString, user information in authority`
+    /// and `colon in password splits userinfo at the first colon`.
+    #[test]
+    fn user_information_in_authority() {
+        let cases = [
+            (
+                "http://foo:bar@localhost/far",
+                "http://foo:bar@localhost/far",
+            ),
+            ("http://foo@localhost/far", "http://foo@localhost/far"),
+            (
+                "http://foo:bAr@localhost:8080/far",
+                "http://foo:bAr@localhost:8080/far",
+            ),
+            (
+                "http://foo@localhost:8080/far",
+                "http://foo@localhost:8080/far",
+            ),
+            (
+                "http://föö:bör@löcalhost:8080/far",
+                "http://f%C3%B6%C3%B6:b%C3%B6r@l%C3%B6calhost:8080/far",
+            ),
+            (
+                "http://foo:pa:ss@localhost/far",
+                "http://foo:pa%3Ass@localhost/far",
+            ),
+        ];
+        for (value, expected) in cases {
+            assert_eq!(normalize_uri(value), expected, "{value}");
+            // The encoded colon decodes back into the password.
+            assert_eq!(normalize_uri(expected), expected, "{expected}");
+        }
+        assert_eq!(
+            super::parse("http://foo:pa%3Ass@localhost/far").map(|uri| uri.authority),
+            Some("foo:pa:ss@localhost".to_string())
         );
     }
 
