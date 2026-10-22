@@ -796,7 +796,10 @@ pub(crate) fn auto_closing_pair(
     })
 }
 
-/// Monaco `_findAutoClosingPairOpen`.
+/// Monaco `_findAutoClosingPairOpen`: the longest pair whose opening text
+/// typing `ch` completes at every position, and whose `beforeText` (if any)
+/// matches the line up to there; a pair failing `beforeText` leaves a
+/// shorter one to close.
 fn find_auto_closing_pair_open<'p>(
     lang: &'p LanguageSupport,
     model: &dyn CursorModel,
@@ -812,7 +815,14 @@ fn find_auto_closing_pair_open<'p>(
             let line = model.line_content(p.row);
             let start = p.column.saturating_sub(candidate.open_len() - 1);
             let relevant = strings::utf16_slice(&line, start, p.column);
-            format!("{relevant}{ch}") == candidate.open
+            if format!("{relevant}{ch}") != candidate.open {
+                return false;
+            }
+            if candidate.before_text.is_some() {
+                let prefix = strings::utf16_slice(&line, 0, p.column);
+                return candidate.should_auto_close_before(&format!("{prefix}{ch}"));
+            }
+            true
         });
         if is_match {
             result = Some(candidate);

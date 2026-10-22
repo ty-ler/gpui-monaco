@@ -180,6 +180,11 @@ impl LanguageConfiguration {
     /// report ones that didn't compile, see [`Pattern::error`]).
     pub fn patterns(&self) -> Vec<(&'static str, &Pattern)> {
         let mut patterns = Vec::new();
+        for pair in self.auto_closing_pairs() {
+            if let Some(p) = &pair.before_text {
+                patterns.push(("autoClosingPairs.beforeText", p));
+            }
+        }
         if let Some(word) = &self.word_pattern {
             patterns.push(("wordPattern", word));
         }
@@ -281,8 +286,10 @@ pub enum NotIn {
 }
 
 /// An `autoClosingPairs` entry, given as `["open", "close"]` or
-/// `{ "open", "close", "notIn" }`.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// `{ "open", "close", "notIn", "beforeText" }` (Monaco
+/// `IAutoClosingPairConditional`). In Rust, leave out the conditions with
+/// `..Default::default()`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AutoClosingPair {
     /// Text whose typing triggers auto-closing.
     pub open: String,
@@ -290,6 +297,12 @@ pub struct AutoClosingPair {
     pub close: String,
     /// Contexts where the pair is not auto-closed (`notIn`).
     pub not_in: Vec<NotIn>,
+    /// `beforeText`: the pair auto-closes only if the line's text before the
+    /// cursor, including the just-typed opening text, matches this (anywhere,
+    /// as JavaScript's `RegExp.test`; end it with `$` to match at the
+    /// cursor). Otherwise a shorter pair the typed character completes may
+    /// close instead. Given as a string or `{ "pattern", "flags" }`.
+    pub before_text: Option<Pattern>,
 }
 
 impl<'de> Deserialize<'de> for AutoClosingPair {
@@ -303,22 +316,26 @@ impl<'de> Deserialize<'de> for AutoClosingPair {
                 close: String,
                 #[serde(default, rename = "notIn")]
                 not_in: Vec<NotIn>,
+                #[serde(default, rename = "beforeText")]
+                before_text: Option<Pattern>,
             },
         }
         Ok(match Raw::deserialize(deserializer)? {
             Raw::Pair(open, close) => AutoClosingPair {
                 open,
                 close,
-                not_in: Vec::new(),
+                ..Default::default()
             },
             Raw::Object {
                 open,
                 close,
                 not_in,
+                before_text,
             } => AutoClosingPair {
                 open,
                 close,
                 not_in,
+                before_text,
             },
         })
     }
@@ -437,6 +454,15 @@ impl Pattern {
             .is_some_and(|regex| regex.is_match(text).unwrap_or(false))
     }
 }
+
+/// Patterns are equal when their source and flags are.
+impl PartialEq for Pattern {
+    fn eq(&self, other: &Self) -> bool {
+        self.source == other.source && self.flags == other.flags
+    }
+}
+
+impl Eq for Pattern {}
 
 impl<'de> Deserialize<'de> for Pattern {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -727,6 +753,31 @@ mod tests {
                 .before_text
                 .is_match("  /** docs */")
         );
+    }
+
+    /// VS Code `autoindent.test.ts` `Auto-closing pairs support beforeText
+    /// regex syntax with flags`, and the string form.
+    #[test]
+    fn parses_auto_closing_pairs_before_text() {
+        let config = LanguageConfiguration::from_json(
+            r#"{
+                "autoClosingPairs": [
+                    { "open": "begin", "close": "end", "beforeText": { "pattern": "(?:^|\\s)begin$", "flags": "i" } },
+                    { "open": "do", "close": "end", "beforeText": "^\\s*do$", "notIn": ["string"] },
+                    ["(", ")"],
+                ]
+            }"#,
+        )
+        .unwrap();
+        let pairs = config.auto_closing_pairs();
+        let begin = pairs[0].before_text.as_ref().unwrap();
+        assert_eq!(*begin, Pattern::new(r"(?:^|\s)begin$", "i"));
+        assert!(begin.is_match("x BEGIN") && !begin.is_match("xbegin"));
+        assert_eq!(pairs[1].before_text, Some(Pattern::new(r"^\s*do$", "")));
+        assert_eq!(pairs[1].not_in, [NotIn::String]);
+        assert_eq!(pairs[2].before_text, None);
+        let keys: Vec<&str> = config.patterns().iter().map(|(key, _)| *key).collect();
+        assert_eq!(keys, ["autoClosingPairs.beforeText"; 2]);
     }
 
     #[test]

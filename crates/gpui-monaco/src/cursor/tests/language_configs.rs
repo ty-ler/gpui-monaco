@@ -35,15 +35,21 @@ pub fn pair(open: &str, close: &str) -> AutoClosingPair {
     AutoClosingPair {
         open: open.into(),
         close: close.into(),
-        not_in: Vec::new(),
+        ..Default::default()
     }
 }
 
 pub fn pair_not_in(open: &str, close: &str, not_in: &[NotIn]) -> AutoClosingPair {
     AutoClosingPair {
-        open: open.into(),
-        close: close.into(),
         not_in: not_in.to_vec(),
+        ..pair(open, close)
+    }
+}
+
+pub fn pair_before_text(open: &str, close: &str, before_text: Pattern) -> AutoClosingPair {
+    AutoClosingPair {
+        before_text: Some(before_text),
+        ..pair(open, close)
     }
 }
 
@@ -195,6 +201,19 @@ pub fn auto_closing_language_with_auto_close_before(chars: &str) -> LanguageConf
         auto_close_before: Some(chars.into()),
         auto_closing_pairs: Some(pairs),
         ..auto_closing_language()
+    }
+}
+
+/// `autoClosingBeforeTextFallback` and
+/// `autoClosingBeforeTextCompositionFallback`: `begin` closes only at the
+/// line start or after whitespace, and `n` closes with `]`.
+pub fn auto_closing_before_text_fallback_language() -> LanguageConfiguration {
+    LanguageConfiguration {
+        auto_closing_pairs: Some(vec![
+            pair_before_text("begin", "end", re(r"(?:^|\s)begin$")),
+            pair("n", "]"),
+        ]),
+        ..Default::default()
     }
 }
 

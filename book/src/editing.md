@@ -28,7 +28,7 @@ Every feature here works out of the box. Each follows Monaco's behavior, which t
 
 ## Typing helpers
 
-- **Auto-closing:** typing an opening bracket or quote inserts the closing one. It follows the language's `autoClosingPairs`, `autoCloseBefore` and "not in strings or comments" rules.
+- **Auto-closing:** typing an opening bracket or quote inserts the closing one. It follows the language's `autoClosingPairs`, `autoCloseBefore`, `beforeText` and "not in strings or comments" rules.
 - **Overtyping and deleting pairs:** typing a closing character you just auto-inserted moves past it. Backspace deletes both halves of the pair. Closing characters a snippet inserts count too, and so do pairs after undo or edits from another editor.
 - **Auto-surround:** typing a bracket or quote with a selection wraps the selection.
 - **Auto-indent:**

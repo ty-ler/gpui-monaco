@@ -1454,6 +1454,72 @@ fn issue_338693_undo_after_multi_character_autoclose_with_auto_indentation_first
 }
 
 #[test]
+fn auto_closing_pairs_before_text() {
+    let language = LanguageConfiguration {
+        auto_closing_pairs: Some(vec![pair_before_text(
+            "begin",
+            "end",
+            syntax::Pattern::new(r"(?:^|\s)begin$", "g"),
+        )]),
+        ..Default::default()
+    };
+    let mut ed = using_cursor(&["begi", "begi"], language);
+    let mut results = Vec::new();
+
+    ed.set_selections(&[sel(1, 5, 1, 5), sel(2, 5, 2, 5)]);
+    ed.type_keyboard("n");
+    results.push(ed.value());
+
+    ed.set_value("prefixbegi");
+    ed.set_selections(&[sel(1, 11, 1, 11)]);
+    ed.type_keyboard("n");
+    results.push(ed.value());
+
+    ed.set_value("prefix begi");
+    ed.set_selections(&[sel(1, 12, 1, 12)]);
+    ed.type_keyboard("n");
+    results.push(ed.value());
+
+    assert_eq!(
+        results,
+        ["beginend\nbeginend", "prefixbegin", "prefix beginend"]
+    );
+}
+
+#[test]
+fn auto_closing_pairs_before_text_falls_back_to_a_shorter_pair() {
+    let mut ed = using_cursor(
+        &["prefixbegi"],
+        auto_closing_before_text_fallback_language(),
+    );
+    ed.set_selections(&[sel(1, 11, 1, 11)]);
+    ed.type_keyboard("n");
+    assert_eq!(ed.value(), "prefixbegin]");
+}
+
+/// VS Code leaves out a pair whose `beforeText` doesn't compile
+/// (`_extractValidAutoClosingPairs`): it neither closes, nor is overtyped,
+/// nor surrounds a selection as a default surrounding pair.
+#[test]
+fn auto_closing_pairs_with_an_invalid_before_text_are_left_out() {
+    let language = LanguageConfiguration {
+        auto_closing_pairs: Some(vec![
+            pair_before_text("(", ")", syntax::Pattern::new("(", "")),
+            pair("[", "]"),
+        ]),
+        ..Default::default()
+    };
+    let mut ed = using_cursor(&["a", "b"], language);
+    ed.set_selections(&[sel(1, 2, 1, 2)]);
+    ed.type_keyboard("(");
+    ed.type_keyboard("[");
+    assert_eq!(ed.value(), "a([]\nb");
+    ed.set_selections(&[sel(2, 1, 2, 2)]);
+    ed.type_keyboard("(");
+    assert_eq!(ed.value(), "a([]\n(");
+}
+
+#[test]
 fn auto_closing_pairs_doc_comments_can_be_turned_off() {
     let mut ed = using_cursor_with(&[""], auto_closing_language(), |c| {
         c.auto_closing_comments = AutoClosingStrategy::Never;
