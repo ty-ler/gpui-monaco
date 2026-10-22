@@ -20,7 +20,10 @@ async fn inline_values(cx: &mut TestAppContext) {
     })
     .await;
     let init = &server.messages("initialize")[0]["params"]["capabilities"];
-    assert_eq!(init["textDocument"]["inlineValue"], json!({}));
+    assert_eq!(
+        init["textDocument"]["inlineValue"],
+        json!({ "dynamicRegistration": true })
+    );
     assert_eq!(
         init["workspace"]["inlineValue"],
         json!({ "refreshSupport": true })

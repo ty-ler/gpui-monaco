@@ -18,6 +18,7 @@ use crate::{LspClient, LspClientEvent, LspClientOptions};
 mod call_hierarchy;
 mod inline_completions;
 mod inline_values;
+mod registration;
 mod type_hierarchy;
 mod workspace_symbols;
 
@@ -1303,10 +1304,19 @@ async fn code_lenses_links_colors_and_linked_editing(cx: &mut TestAppContext) {
 
     // The client says it supports them.
     let init = &server.messages("initialize")[0]["params"]["capabilities"];
-    assert_eq!(init["textDocument"]["codeLens"], json!({}));
+    assert_eq!(
+        init["textDocument"]["codeLens"],
+        json!({ "dynamicRegistration": true })
+    );
     assert_eq!(init["textDocument"]["documentLink"]["tooltipSupport"], true);
-    assert_eq!(init["textDocument"]["colorProvider"], json!({}));
-    assert_eq!(init["textDocument"]["linkedEditingRange"], json!({}));
+    assert_eq!(
+        init["textDocument"]["colorProvider"],
+        json!({ "dynamicRegistration": true })
+    );
+    assert_eq!(
+        init["textDocument"]["linkedEditingRange"],
+        json!({ "dynamicRegistration": true })
+    );
     assert_eq!(init["workspace"]["codeLens"]["refreshSupport"], true);
 
     // The providers are registered for the client's languages.

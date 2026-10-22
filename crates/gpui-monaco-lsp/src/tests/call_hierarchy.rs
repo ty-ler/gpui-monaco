@@ -40,7 +40,7 @@ async fn call_hierarchy(cx: &mut TestAppContext) {
     .await;
     assert_eq!(
         server.messages("initialize")[0]["params"]["capabilities"]["textDocument"]["callHierarchy"],
-        json!({})
+        json!({ "dynamicRegistration": true })
     );
 
     // Edits reach the server before the request.

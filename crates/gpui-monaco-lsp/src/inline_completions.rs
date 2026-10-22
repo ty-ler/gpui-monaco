@@ -47,9 +47,18 @@ pub(crate) fn register(
     selector: LanguageSelector,
     cx: &mut App,
 ) -> Option<ProviderRegistration> {
-    client.supports_inline_completions().then(|| {
-        register_inline_completions_provider(cx, selector, LspInlineCompletions { client: weak })
-    })
+    client
+        .supports_inline_completions()
+        .then(|| register_provider(weak, selector, cx))
+}
+
+/// Registers the provider for `selector`, for a dynamic registration.
+pub(crate) fn register_provider(
+    client: WeakEntity<LspClient>,
+    selector: LanguageSelector,
+    cx: &mut App,
+) -> ProviderRegistration {
+    register_inline_completions_provider(cx, selector, LspInlineCompletions { client })
 }
 
 impl InlineCompletionsProvider for LspInlineCompletions {
