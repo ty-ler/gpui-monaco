@@ -114,13 +114,22 @@ async fn start(
     cx: &mut TestAppContext,
     handler: impl Fn(&str, &Value) -> Option<Value> + Send + 'static,
 ) -> (Entity<LspClient>, Server) {
+    start_with(cx, capabilities(), handler).await
+}
+
+/// [`start`] with other server capabilities.
+async fn start_with(
+    cx: &mut TestAppContext,
+    capabilities: Value,
+    handler: impl Fn(&str, &Value) -> Option<Value> + Send + 'static,
+) -> (Entity<LspClient>, Server) {
     let (client_reader, mut server_writer) = piper::pipe(1 << 20);
     let (server_reader, client_writer) = piper::pipe(1 << 20);
     let log = Arc::new(Mutex::new(Vec::new()));
     let (push, pushed) = async_channel::unbounded::<Value>();
     let handler: Handler = Box::new(move |method, params| match method {
         "initialize" => Some(json!({
-            "capabilities": capabilities(),
+            "capabilities": capabilities,
             "serverInfo": { "name": "fake" },
         })),
         "shutdown" => Some(Value::Null),
@@ -1505,4 +1514,92 @@ async fn message_requests_answer_with_the_chosen_action(cx: &mut TestAppContext)
     cx.run_until_parked();
     assert_eq!(server.response(2)["result"], Value::Null);
     assert!(server.response(2).get("result").is_some());
+}
+
+#[gpui::test]
+async fn will_save_and_will_save_wait_until(cx: &mut TestAppContext) {
+    let mut capabilities = capabilities();
+    capabilities["textDocumentSync"] =
+        json!({ "openClose": true, "change": 2, "willSave": true, "willSaveWaitUntil": true });
+    let (client, server) = start_with(cx, capabilities, |method, params| {
+        match (method, params["reason"].as_u64()) {
+            // A slow server for saves after a delay.
+            ("textDocument/willSaveWaitUntil", Some(2)) => None,
+            ("textDocument/willSaveWaitUntil", _) => Some(json!([{
+                "range": range((0, 0), (0, 0)),
+                "newText": "use a;\n",
+            }])),
+            _ => None,
+        }
+    })
+    .await;
+    let initialize = &server.messages("initialize")[0];
+    let synchronization = &initialize["params"]["capabilities"]["textDocument"]["synchronization"];
+    assert_eq!(synchronization["willSave"], true);
+    assert_eq!(synchronization["willSaveWaitUntil"], true);
+    let model = model(cx, "fn main() {}\n");
+    client
+        .update(cx, |client, cx| client.attach(&model, cx))
+        .unwrap();
+    model.update(cx, |model, cx| model.edit([(0..0, "// x\n")], cx).unwrap());
+
+    // The server sees the edit before it hears about the save.
+    client.update(cx, |client, cx| {
+        client.will_save(&model, lsp_types::TextDocumentSaveReason::MANUAL, cx)
+    });
+    cx.run_until_parked();
+    let methods = server.methods();
+    let will_save = methods
+        .iter()
+        .position(|m| m == "textDocument/willSave")
+        .unwrap();
+    assert_eq!(methods[will_save - 1], "textDocument/didChange");
+    assert_eq!(
+        server.messages("textDocument/willSave")[0]["params"]["reason"],
+        1
+    );
+
+    // The server's edits are applied before the task resolves.
+    client
+        .update(cx, |client, cx| {
+            client.will_save_wait_until(&model, lsp_types::TextDocumentSaveReason::MANUAL, cx)
+        })
+        .await;
+    assert_eq!(
+        model.read_with(cx, |m, _| m.text()),
+        "use a;\n// x\nfn main() {}\n"
+    );
+
+    // A server that doesn't answer in time doesn't hold up the save.
+    let task = client.update(cx, |client, cx| {
+        client.will_save_wait_until(&model, lsp_types::TextDocumentSaveReason::AFTER_DELAY, cx)
+    });
+    cx.run_until_parked();
+    cx.executor()
+        .advance_clock(crate::WILL_SAVE_WAIT_UNTIL_TIMEOUT);
+    task.await;
+    cx.run_until_parked();
+    assert_eq!(server.messages("$/cancelRequest").len(), 1);
+    assert_eq!(
+        model.read_with(cx, |m, _| m.text()),
+        "use a;\n// x\nfn main() {}\n"
+    );
+
+    // Servers that don't ask for them get neither.
+    let (client, server) = start(cx, |_, _| None).await;
+    let other = cx.new(|_| TextModel::new("x").with_uri("file:///project/other.rs"));
+    client
+        .update(cx, |client, cx| client.attach(&other, cx))
+        .unwrap();
+    client.update(cx, |client, cx| {
+        client.will_save(&other, lsp_types::TextDocumentSaveReason::MANUAL, cx)
+    });
+    client
+        .update(cx, |client, cx| {
+            client.will_save_wait_until(&other, lsp_types::TextDocumentSaveReason::MANUAL, cx)
+        })
+        .await;
+    cx.run_until_parked();
+    assert!(server.messages("textDocument/willSave").is_empty());
+    assert!(server.messages("textDocument/willSaveWaitUntil").is_empty());
 }
