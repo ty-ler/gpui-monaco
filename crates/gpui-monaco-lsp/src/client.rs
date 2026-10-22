@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context as _, Result};
 use futures_lite::StreamExt;
@@ -62,16 +64,74 @@ pub struct LspClientOptions {
 /// Events from an [`LspClient`].
 #[derive(Clone, Debug)]
 pub enum LspClientEvent {
-    /// `window/showMessage` or `window/showMessageRequest`: something the
-    /// host may show the user.
+    /// `window/showMessage`: something the host may show the user.
     ShowMessage {
         /// Error, warning, info or log.
         kind: lsp::MessageType,
         /// The message.
         message: String,
     },
+    /// `window/showMessageRequest`: a message with actions the user can
+    /// pick from. The server waits for [`MessageResponder::respond`]; if
+    /// every clone of `respond` is dropped first, it's told the prompt was
+    /// dismissed (`null`).
+    ShowMessageRequest {
+        /// Error, warning, info or log.
+        kind: lsp::MessageType,
+        /// The message.
+        message: String,
+        /// The actions to offer, with any extra properties the server
+        /// gave them.
+        actions: Vec<lsp::MessageActionItem>,
+        /// Answers the server.
+        respond: MessageResponder,
+    },
     /// The server stopped; its features are unregistered.
     Exited,
+}
+
+/// Answers a `window/showMessageRequest` with the action the user picked.
+/// Cheap to clone; the first answer wins, and dropping every clone
+/// unanswered answers `null`, as dismissing the prompt does.
+#[derive(Clone)]
+pub struct MessageResponder(Arc<Responder>);
+
+struct Responder {
+    connection: Connection,
+    id: Value,
+    answered: AtomicBool,
+}
+
+impl MessageResponder {
+    /// Answers with `action`, one of the request's actions, or `None` if
+    /// the user dismissed the prompt. Later answers are ignored.
+    pub fn respond(&self, action: Option<lsp::MessageActionItem>) {
+        self.0.respond(action);
+    }
+}
+
+impl Responder {
+    fn respond(&self, action: Option<lsp::MessageActionItem>) {
+        if self.answered.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let result = serde_json::to_value(action).unwrap_or(Value::Null);
+        self.connection.respond(self.id.clone(), Ok(result)).ok();
+    }
+}
+
+impl Drop for Responder {
+    fn drop(&mut self) {
+        self.respond(None);
+    }
+}
+
+impl std::fmt::Debug for MessageResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MessageResponder")
+            .field("id", &self.0.id)
+            .finish_non_exhaustive()
+    }
 }
 
 struct Document {
@@ -616,6 +676,33 @@ impl LspClient {
                     })
                     .detach();
             }
+            Incoming::Request { id, method, params }
+                if method
+                    == <lsp::request::ShowMessageRequest as lsp::request::Request>::METHOD =>
+            {
+                let params = match rpc::params::<lsp::ShowMessageRequestParams>(params) {
+                    Ok(params) => params,
+                    Err(err) => {
+                        let error = ResponseError {
+                            code: INVALID_PARAMS,
+                            message: err.to_string(),
+                        };
+                        self.connection.respond(id, Err(error)).ok();
+                        return;
+                    }
+                };
+                let respond = MessageResponder(Arc::new(Responder {
+                    connection: self.connection.clone(),
+                    id,
+                    answered: AtomicBool::new(false),
+                }));
+                cx.emit(LspClientEvent::ShowMessageRequest {
+                    kind: params.typ,
+                    message: params.message,
+                    actions: params.actions.unwrap_or_default(),
+                    respond,
+                });
+            }
             Incoming::Request { id, method, params } => {
                 let result = self.handle_request(&method, params, cx);
                 self.connection.respond(id, result).ok();
@@ -684,9 +771,8 @@ impl LspClient {
         cx: &mut Context<Self>,
     ) -> Result<Value, ResponseError> {
         use lsp::request::{
-            InlayHintRefreshRequest, RegisterCapability, Request as _, ShowMessageRequest,
-            UnregisterCapability, WorkDoneProgressCreate, WorkspaceConfiguration,
-            WorkspaceFoldersRequest,
+            InlayHintRefreshRequest, RegisterCapability, Request as _, UnregisterCapability,
+            WorkDoneProgressCreate, WorkspaceConfiguration, WorkspaceFoldersRequest,
         };
         let invalid = |err: anyhow::Error| ResponseError {
             code: INVALID_PARAMS,
@@ -720,15 +806,6 @@ impl LspClient {
             RegisterCapability::METHOD
             | UnregisterCapability::METHOD
             | WorkDoneProgressCreate::METHOD => Ok(Value::Null),
-            ShowMessageRequest::METHOD => {
-                if let Ok(params) = rpc::params::<lsp::ShowMessageRequestParams>(params) {
-                    cx.emit(LspClientEvent::ShowMessage {
-                        kind: params.typ,
-                        message: params.message,
-                    });
-                }
-                Ok(Value::Null)
-            }
             WorkspaceFoldersRequest::METHOD => Ok(json!(workspace_folders(&self.options))),
             _ => Err(ResponseError {
                 code: METHOD_NOT_FOUND,
@@ -842,7 +919,10 @@ fn workspace_folders(options: &LspClientOptions) -> Option<Vec<lsp::WorkspaceFol
 fn initialize_params(options: &LspClientOptions) -> Result<lsp::InitializeParams> {
     let capabilities: lsp::ClientCapabilities = serde_json::from_value(json!({
         "general": { "positionEncodings": ["utf-16"] },
-        "window": { "workDoneProgress": true, "showMessage": {} },
+        "window": {
+            "workDoneProgress": true,
+            "showMessage": { "messageActionItem": { "additionalPropertiesSupport": true } },
+        },
         "workspace": {
             "applyEdit": true,
             "executeCommand": {},

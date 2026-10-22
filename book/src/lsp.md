@@ -81,7 +81,7 @@ The client also answers the requests a server sends:
 - **`workspace/workspaceFolders`:** the root.
 - **Progress and capability registration:** acknowledged.
 
-It emits `LspClientEvent::ShowMessage` for messages meant for the user, and `LspClientEvent::Exited` when the server stops.
+It emits `LspClientEvent::ShowMessage` for messages meant for the user, and `LspClientEvent::Exited` when the server stops. A `window/showMessageRequest` is `LspClientEvent::ShowMessageRequest`, with the server's `actions` (extra properties included) and a `respond` handle: call `respond.respond(Some(action))` with the action the user picked, or `respond(None)` if they dismissed the prompt. The server waits for the answer; if every clone of `respond` is dropped unanswered, it gets `null`.
 
 ## Other transports and requests
 

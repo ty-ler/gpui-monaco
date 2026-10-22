@@ -1426,3 +1426,78 @@ async fn settings_changes_reach_the_server(cx: &mut TestAppContext) {
         json!({ "demo": { "option": 7 } })
     );
 }
+
+#[gpui::test]
+async fn message_requests_answer_with_the_chosen_action(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |_, _| None).await;
+    let initialize = &server.messages("initialize")[0];
+    assert_eq!(
+        initialize["params"]["capabilities"]["window"]["showMessage"],
+        json!({ "messageActionItem": { "additionalPropertiesSupport": true } })
+    );
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let sink = requests.clone();
+    let keep = Arc::new(Mutex::new(true));
+    let keeping = keep.clone();
+    cx.update(|cx| {
+        cx.subscribe(&client, move |_, event: &LspClientEvent, _| {
+            if let LspClientEvent::ShowMessageRequest {
+                kind,
+                message,
+                actions,
+                respond,
+            } = event
+                && *keeping.lock().unwrap()
+            {
+                sink.lock().unwrap().push((
+                    *kind,
+                    message.clone(),
+                    actions.clone(),
+                    respond.clone(),
+                ));
+            }
+        })
+        .detach();
+    });
+    server.request(
+        1,
+        "window/showMessageRequest",
+        json!({
+            "type": 3,
+            "message": "Reload workspace?",
+            "actions": [{ "title": "Reload", "id": 7 }, { "title": "Later" }],
+        }),
+    );
+    cx.run_until_parked();
+    // The server waits for the user.
+    assert_eq!(server.response(1), Value::Null);
+    let (kind, message, actions, respond) = requests.lock().unwrap().pop().unwrap();
+    assert_eq!(kind, lsp_types::MessageType::INFO);
+    assert_eq!(message, "Reload workspace?");
+    assert_eq!(actions.len(), 2);
+    assert_eq!(
+        actions[0].properties["id"],
+        lsp_types::MessageActionItemProperty::Integer(7)
+    );
+    // The chosen action goes back with its properties; later answers don't.
+    respond.respond(Some(actions[0].clone()));
+    respond.respond(None);
+    drop(respond);
+    cx.run_until_parked();
+    assert_eq!(
+        server.response(1)["result"],
+        json!({ "title": "Reload", "id": 7 })
+    );
+    assert_eq!(server.responses().len(), 1);
+
+    // A request nobody keeps is dismissed.
+    *keep.lock().unwrap() = false;
+    server.request(
+        2,
+        "window/showMessageRequest",
+        json!({ "type": 1, "message": "Oops" }),
+    );
+    cx.run_until_parked();
+    assert_eq!(server.response(2)["result"], Value::Null);
+    assert!(server.response(2).get("result").is_some());
+}

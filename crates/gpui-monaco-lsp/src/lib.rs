@@ -35,6 +35,8 @@ pub mod rpc;
 #[cfg(test)]
 mod tests;
 
-pub use client::{LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions};
+pub use client::{
+    LanguageServerBinary, LspClient, LspClientEvent, LspClientOptions, MessageResponder,
+};
 pub use lsp_types;
 pub use rpc::Connection;
