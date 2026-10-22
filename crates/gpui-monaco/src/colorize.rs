@@ -564,6 +564,165 @@ pub fn colorize_element(
         .into_any_element()
 }
 
+/// Monaco `ViewModel._getHTMLToCopy`: the model's text in `range` (byte
+/// offsets) as one `<div>` of colored `<span>`s per line (`<br>` for an
+/// empty one), as `tokenizeLineToHTML` writes them. Tabs become spaces to
+/// the next tab stop. With `use_nbsp` (Monaco on Windows), every other
+/// space of a run is `&#160;`. Token colors come from the model's
+/// highlighter, as of its last parse brought up to date; lines past
+/// `max_tokenization_line_length` are in the default color.
+pub(crate) fn model_range_html(
+    model: &crate::TextModel,
+    range: Range<usize>,
+    tab_size: u32,
+    theme: &Theme,
+    use_nbsp: bool,
+) -> String {
+    let rope = model.buffer().rope();
+    let start = rope.offset_to_point(range.start);
+    let end = rope.offset_to_point(range.end);
+    let state = model_state(model);
+    let limit = model.tokenization_line_limit();
+    let default_color = css_hex(theme.colors.foreground);
+    let tab_size = tab_size.max(1) as usize;
+    let mut result = String::new();
+    for row in start.row..=end.row {
+        let line_start = rope.point_to_offset(text::Point::new(row, 0));
+        let line = model.line_content(row);
+        if line.is_empty() {
+            result.push_str("<br>");
+            continue;
+        }
+        let from = if row == start.row {
+            start.column as usize
+        } else {
+            0
+        };
+        let to = if row == end.row {
+            end.column as usize
+        } else {
+            line.len()
+        };
+        let spans = match &state {
+            Some((highlighter, state)) if model.line_len_utf16(row) < limit => {
+                highlighter.highlights(state, rope, line_start..line_start + line.len())
+            }
+            _ => Vec::new(),
+        };
+        // (byte range in the line, inline style), covering `from..to`.
+        let mut parts: Vec<(Range<usize>, String)> = Vec::new();
+        let mut at = from;
+        let default_style = format!("color: {default_color};");
+        for span in spans {
+            let s = span.range.start.saturating_sub(line_start).clamp(at, to);
+            let e = span.range.end.saturating_sub(line_start).clamp(at, to);
+            if s >= e {
+                continue;
+            }
+            if at < s {
+                parts.push((at..s, default_style.clone()));
+            }
+            let language = model.language_at(span.range.start);
+            let token = theme.style_for_language(
+                span.highlight,
+                language.as_ref().map(|language| &*language.id),
+            );
+            parts.push((s..e, inline_style(&token, &default_color)));
+            at = e;
+        }
+        if at < to {
+            parts.push((at..to, default_style));
+        }
+        result.push_str("<div>");
+        // Monaco counts tab stops from the line's start.
+        let mut column = line[..from].chars().fold(0, |column, ch| {
+            if ch == '\t' {
+                column + tab_size - column % tab_size
+            } else {
+                column + 1
+            }
+        });
+        let mut prev_is_space = false;
+        for (range, style) in parts {
+            let mut content = String::new();
+            let space = |content: &mut String, prev_is_space: &mut bool| {
+                if use_nbsp && *prev_is_space {
+                    content.push_str("&#160;");
+                    *prev_is_space = false;
+                } else {
+                    content.push(' ');
+                    *prev_is_space = true;
+                }
+            };
+            for ch in line[range].chars() {
+                match ch {
+                    '\t' => {
+                        let spaces = tab_size - column % tab_size;
+                        for _ in 0..spaces {
+                            space(&mut content, &mut prev_is_space);
+                        }
+                        column += spaces;
+                        continue;
+                    }
+                    ' ' => space(&mut content, &mut prev_is_space),
+                    _ => {
+                        match ch {
+                            '<' => content.push_str("&lt;"),
+                            '>' => content.push_str("&gt;"),
+                            '&' => content.push_str("&amp;"),
+                            '\0' => content.push_str("&#00;"),
+                            '\u{FEFF}' | '\u{2028}' | '\u{2029}' | '\u{0085}' => {
+                                content.push('\u{FFFD}')
+                            }
+                            '\r' => content.push_str("&#8203"),
+                            ch => content.push(ch),
+                        }
+                        prev_is_space = false;
+                    }
+                }
+                column += 1;
+            }
+            result.push_str(&format!("<span style=\"{style}\">{content}</span>"));
+        }
+        result.push_str("</div>");
+    }
+    result
+}
+
+/// `#rrggbb`, ignoring alpha (Monaco `Color.Format.CSS.formatHex`, which
+/// its color map is in).
+pub(crate) fn css_hex(color: gpui::Hsla) -> String {
+    let rgba = gpui::Rgba::from(color);
+    let channel = |v: f32| (v.clamp(0., 1.) * 255.).round() as u8;
+    format!(
+        "#{:02x}{:02x}{:02x}",
+        channel(rgba.r),
+        channel(rgba.g),
+        channel(rgba.b)
+    )
+}
+
+/// Monaco `TokenMetadata.getInlineStyleFromMetadata`.
+fn inline_style(token: &crate::theme::TokenStyle, default_color: &str) -> String {
+    let color = token
+        .foreground
+        .map_or_else(|| default_color.to_string(), css_hex);
+    let mut style = format!("color: {color};");
+    if token.italic {
+        style.push_str("font-style: italic;");
+    }
+    if token.bold {
+        style.push_str("font-weight: bold;");
+    }
+    match (token.underline, token.strikethrough) {
+        (true, true) => style.push_str("text-decoration: underline line-through;"),
+        (true, false) => style.push_str("text-decoration: underline;"),
+        (false, true) => style.push_str("text-decoration: line-through;"),
+        (false, false) => {}
+    }
+    style
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

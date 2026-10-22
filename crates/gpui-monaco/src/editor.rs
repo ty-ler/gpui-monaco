@@ -4705,6 +4705,14 @@ impl CodeEditor {
         // Monaco `CopyPasteController.handleCopy`: paste providers prepare
         // data for pasting this text.
         let (id, provider_copy_mime_types) = self.prepare_document_paste(cx);
+        // Monaco `copyWithSyntaxHighlighting`: HTML beside the text, for
+        // copies under 64K UTF-16 units, where the platform takes it.
+        let html = (crate::system_clipboard::SUPPORTS_HTML
+            && self.options.copy_with_syntax_highlighting
+            && text.encode_utf16().nth(65535).is_none())
+        .then(|| self.rich_text_to_copy(cx))
+        .flatten()
+        .map(|html| (text.clone(), html));
         cx.write_to_clipboard(ClipboardItem::new_string_with_json_metadata(
             text,
             ClipboardMetadata {
@@ -4716,7 +4724,78 @@ impl CodeEditor {
                 provider_copy_mime_types,
             },
         ));
+        if let Some((text, html)) = html {
+            crate::system_clipboard::add_html(&text, &html);
+        }
         true
+    }
+
+    /// Monaco `ViewModel.getRichTextToCopy`: the selection as HTML with the
+    /// tokens' colors, in a `<div>` styled with the editor's colors and
+    /// font. With an empty selection, its line (if
+    /// `empty_selection_clipboard`). None for several selections or a
+    /// plain text model.
+    pub(crate) fn rich_text_to_copy(&self, cx: &App) -> Option<String> {
+        let model = self.model.read(cx);
+        let language = model.language_id()?;
+        if language.as_ref() == "plaintext" {
+            return None;
+        }
+        let selections = self.cursors.selections();
+        let [selection] = selections.as_slice() else {
+            return None;
+        };
+        let rope = self.snapshot.rope();
+        let mut range = selection.range();
+        if range.start == range.end {
+            if !self.options.empty_selection_clipboard {
+                return None;
+            }
+            range.start.column = 0;
+            range.end.column = rope.line_len_utf16(range.end.row);
+        }
+        let range = rope.point_utf16_to_offset(range.start)..rope.point_utf16_to_offset(range.end);
+        let (family, weight, size, line_height) = match self.font_info() {
+            Some(font) => (
+                font.font_family,
+                font.font_weight,
+                font.font_size,
+                font.line_height,
+            ),
+            None => (
+                self.options.font_family.clone(),
+                self.options.font_weight,
+                self.options.font_size,
+                self.line_height(),
+            ),
+        };
+        let theme = &self.theme;
+        let body = crate::colorize::model_range_html(
+            model,
+            range,
+            self.cursor_config(cx).tab_size,
+            theme,
+            cfg!(windows),
+        );
+        Some(format!(
+            "<div style=\"color: {};background-color: {};font-family: {};font-weight: {};\
+             font-size: {}px;line-height: {}px;white-space: pre;\">{body}</div>",
+            crate::colorize::css_hex(theme.colors.foreground),
+            crate::colorize::css_hex(theme.colors.background),
+            copy_font_family(&family),
+            match weight.0 {
+                400. => "normal".to_string(),
+                700. => "bold".to_string(),
+                weight => js_number(weight),
+            },
+            js_number(f32::from(size)),
+            js_number(f32::from(line_height)),
+        ))
+    }
+
+    #[doc(hidden)]
+    pub fn rich_text_to_copy_for_tests(&self, cx: &App) -> Option<String> {
+        self.rich_text_to_copy(cx)
     }
 
     fn paste(&mut self, _: &Paste, _: &mut Window, cx: &mut Context<Self>) {
@@ -8782,4 +8861,39 @@ pub struct OverviewRulerForTests {
     pub cursors: Vec<(Bounds<Pixels>, Hsla)>,
     /// The left and top edges and their color.
     pub border: Option<([Bounds<Pixels>; 2], Hsla)>,
+}
+
+/// Monaco `EDITOR_FONT_DEFAULTS.fontFamily`.
+const DEFAULT_FONT_FAMILIES: &str = if cfg!(target_os = "macos") {
+    "Menlo, Monaco, 'Courier New', monospace"
+} else if cfg!(target_os = "windows") {
+    "Consolas, 'Courier New', monospace"
+} else {
+    "'Droid Sans Mono', 'monospace', monospace"
+};
+
+/// The CSS `font-family` of copied HTML (Monaco `getRichTextToCopy`): the
+/// default families for the default font or a name with characters that
+/// could break out of the style, else the font (quoted if it has spaces or
+/// `+`) and then the defaults. Monaco's defaults put double quotes inside
+/// the `style` attribute; here they're single.
+fn copy_font_family(family: &str) -> String {
+    let default_family = EditorOptions::default().font_family;
+    if family.contains([':', ';', '\\', '/', '<', '>']) || family == default_family.as_ref() {
+        return DEFAULT_FONT_FAMILIES.to_string();
+    }
+    let mut family = family.replace('"', "'");
+    if !family.contains([',', '\'']) && family.contains(['+', ' ']) {
+        family = format!("'{family}'");
+    }
+    format!("{family}, {DEFAULT_FONT_FAMILIES}")
+}
+
+/// A number as JavaScript prints it: no `.0` on whole numbers.
+fn js_number(value: f32) -> String {
+    if value.fract() == 0. {
+        format!("{}", value as i64)
+    } else {
+        format!("{value}")
+    }
 }

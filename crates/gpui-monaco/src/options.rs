@@ -1994,6 +1994,11 @@ pub struct EditorOptions {
     /// Monaco `emptySelectionClipboard`: copy and cut with an empty selection act on
     /// the whole line (default `true`).
     pub empty_selection_clipboard: bool,
+    /// Monaco `copyWithSyntaxHighlighting`: copying puts HTML with the
+    /// tokens' colors on the clipboard beside the text (default `true`).
+    /// GPUI's clipboard has no HTML, so it's written to the system
+    /// clipboard directly, on macOS and Windows only.
+    pub copy_with_syntax_highlighting: bool,
     /// Monaco `stickyTabStops`: move the cursor over indentation spaces as if they were
     /// tabs (default `false`).
     pub sticky_tab_stops: bool,
@@ -2350,6 +2355,7 @@ impl Default for EditorOptions {
             mouse_wheel_scroll_sensitivity: 1.0,
             mouse_wheel_zoom: false,
             empty_selection_clipboard: true,
+            copy_with_syntax_highlighting: true,
             sticky_tab_stops: false,
             use_tab_stops: true,
             trim_whitespace_on_delete: false,
