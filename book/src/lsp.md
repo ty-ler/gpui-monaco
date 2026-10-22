@@ -76,7 +76,7 @@ Providers are registered for `options.languages`. An empty list registers them f
 
 The client also answers the requests a server sends:
 
-- **`workspace/configuration`:** from `options.settings`, looked up by dotted section.
+- **`workspace/configuration`:** from `options.settings`, looked up by dotted section. `client.set_settings(settings)` replaces them while the server runs and sends `workspace/didChangeConfiguration` with `settings: null`, as `vscode-languageclient` does, so the server asks for them again.
 - **`workspace/applyEdit`:** applied with `gpui_monaco::apply_workspace_edit`, the bulk edit service without an editor. Text edits go to any model `model_for_uri` finds, attached or not, each as one undo step. File operations go to the host's `set_workspace_file_edit_handler`, and fail without one. Edits whose change annotation needs confirmation go through the preview handler, if one is set. As in `vscode-languageclient`, an edit for a version of an attached document the server no longer has isn't applied. The response says whether the edit was applied; if it failed, the error is the `failureReason`.
 - **`workspace/workspaceFolders`:** the root.
 - **Progress and capability registration:** acknowledged.

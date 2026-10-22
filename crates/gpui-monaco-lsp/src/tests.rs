@@ -1397,3 +1397,32 @@ async fn code_lenses_links_colors_and_linked_editing(cx: &mut TestAppContext) {
         assert!(linked_editing_range_providers(cx, Some("rust")).is_empty());
     });
 }
+
+#[gpui::test]
+async fn settings_changes_reach_the_server(cx: &mut TestAppContext) {
+    let (client, server) = start(cx, |_, _| None).await;
+    let initialize = &server.messages("initialize")[0];
+    assert_eq!(
+        initialize["params"]["capabilities"]["workspace"]["didChangeConfiguration"],
+        json!({})
+    );
+    client.update(cx, |client, _| {
+        client.set_settings(json!({ "demo": { "option": 7 } }))
+    });
+    cx.run_until_parked();
+    // Pull-model servers are told to ask again, as `vscode-languageclient` does.
+    let changed = server.messages("workspace/didChangeConfiguration");
+    assert_eq!(changed.len(), 1);
+    assert_eq!(changed[0]["params"], json!({ "settings": null }));
+    server.request(
+        1,
+        "workspace/configuration",
+        json!({ "items": [{ "section": "demo.option" }] }),
+    );
+    cx.run_until_parked();
+    assert_eq!(server.response(1)["result"], json!([7]));
+    assert_eq!(
+        client.read_with(cx, |client, _| client.settings().clone()),
+        json!({ "demo": { "option": 7 } })
+    );
+}
