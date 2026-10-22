@@ -2233,3 +2233,363 @@ fn scroll_before_first_layout_keeps_stuck_file_sides_in_sync(cx: &mut TestAppCon
     });
     assert_eq!(cursor, PointUtf16::new(5, 0));
 }
+
+/// The labels of the files in view (`visible_items`), top first.
+fn visible_labels(multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext) -> Vec<String> {
+    multi.read_with(cx, |m, _| {
+        m.visible_items()
+            .iter()
+            .map(|&index| m.document(index).unwrap().label.to_string())
+            .collect()
+    })
+}
+
+fn visible_items(multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext) -> Vec<usize> {
+    multi.read_with(cx, |m, _| m.visible_items().to_vec())
+}
+
+/// Binary files named `names`: 140px each in every variant (a 40px header
+/// and the 100px placeholder), with nothing to measure.
+fn binary_documents(names: &[&str], cx: &mut gpui::App) -> Vec<MultiDiffDocument> {
+    names
+        .iter()
+        .map(|name| MultiDiffDocument {
+            label: format!("{name}.png").into(),
+            original: Some(cx.new(|_| TextModel::new(""))),
+            modified: Some(cx.new(|_| TextModel::new(""))),
+            binary: true,
+            ..Default::default()
+        })
+        .collect()
+}
+
+/// Monaco's "exposes the host view model and the diff items visible in the
+/// viewport" (`multiDiffEditorWidget.test.ts`): `visibleDiffItems` are the
+/// files intersecting the viewport, the one at its top first, through a
+/// reveal, a scroll, a variant change and clearing the files. Monaco's
+/// `viewModel` is the editor's documents.
+#[gpui::test]
+fn the_files_visible_in_the_viewport(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let (multi, cx) = cx.add_window_view(|window, cx| MultiDiffEditor::new(Vec::new(), window, cx));
+    cx.simulate_resize(gpui::size(px(800.), px(100.)));
+    paint(cx);
+    let before_documents = (
+        multi.read_with(cx, |m, _| m.len()),
+        visible_labels(&multi, cx),
+    );
+    cx.update(|window, cx| {
+        multi.update(cx, |m, cx| {
+            let documents = binary_documents(&["first", "second", "third"], cx);
+            m.set_documents(documents, window, cx)
+        })
+    });
+    paint(cx);
+    let initial = (
+        multi.read_with(cx, |m, _| m.len()),
+        visible_labels(&multi, cx),
+    );
+    multi.update(cx, |m, cx| m.reveal(1, cx));
+    paint(cx);
+    let after_reveal = visible_labels(&multi, cx);
+    multi.update(cx, |m, cx| {
+        let state = gpui_monaco::MultiDiffEditorViewState {
+            scroll_top: px(200.),
+            ..Default::default()
+        };
+        m.restore_view_state(&state, cx)
+    });
+    paint(cx);
+    let after_scroll = visible_labels(&multi, cx);
+    set_variant(&multi, MultiDiffEditorVariant::Cards, cx);
+    let after_variant_change = visible_labels(&multi, cx);
+    cx.update(|window, cx| multi.update(cx, |m, cx| m.set_documents(Vec::new(), window, cx)));
+    paint(cx);
+    let after_clear = (
+        multi.read_with(cx, |m, _| m.len()),
+        visible_labels(&multi, cx),
+    );
+    assert_eq!(
+        (
+            before_documents,
+            initial,
+            after_reveal,
+            after_scroll,
+            after_variant_change,
+            after_clear
+        ),
+        (
+            (0, vec![]),
+            (3, vec!["first.png".to_string()]),
+            vec!["second.png".to_string()],
+            vec!["second.png".to_string(), "third.png".to_string()],
+            vec!["second.png".to_string(), "third.png".to_string()],
+            (0, vec![]),
+        )
+    );
+}
+
+/// The files drawn, by their headers' chevrons: each file in view has its
+/// header.
+fn painted_files(multi: &Entity<MultiDiffEditor>, cx: &mut VisualTestContext) -> Vec<usize> {
+    let len = multi.read_with(cx, |m, _| m.len());
+    (0..len)
+        .filter(|index| {
+            // `debug_bounds` takes a `&'static str`.
+            let selector = format!("multi-diff-collapse-{index}").leak();
+            cx.debug_bounds(selector).is_some()
+        })
+        .collect()
+}
+
+/// The files intersecting a viewport `height` tall at the scroll position
+/// drawn (Monaco's `visibility === 'visible'`).
+fn files_intersecting(
+    multi: &Entity<MultiDiffEditor>,
+    height: gpui::Pixels,
+    cx: &mut VisualTestContext,
+) -> Vec<usize> {
+    multi.read_with(cx, |m, _| {
+        let (shown, leading, _) = m.scroll_state_for_tests();
+        let top = shown - leading;
+        (0..m.len())
+            .filter(|&i| {
+                let (start, size) = m.item_bounds_for_tests(i);
+                start < top + height && start + size > top
+            })
+            .collect()
+    })
+}
+
+/// `visible_items` are the files drawn, those intersecting the viewport,
+/// after scrolling, collapsing and resizing (Monaco `visibleDiffItems`).
+#[gpui::test]
+fn visible_items_are_the_files_drawn(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(20, cx);
+    let check = |height: f32, cx: &mut VisualTestContext| {
+        let visible = visible_items(&multi, cx);
+        assert_eq!(visible, painted_files(&multi, cx));
+        assert_eq!(visible, files_intersecting(&multi, px(height), cx));
+        visible
+    };
+    assert_eq!(check(800., cx)[0], 0);
+    // Scrolled to another file: it's at the top, so first.
+    for index in [3, 7] {
+        let top = multi.read_with(cx, |m, _| m.item_bounds_for_tests(index).0);
+        multi.update(cx, |m, cx| m.set_scroll_top(top, cx));
+        paint(cx);
+        assert_eq!(check(800., cx)[0], index);
+    }
+    // Scrolled into a file, it stays first until it has gone by.
+    let (top, height) = multi.read_with(cx, |m, _| m.item_bounds_for_tests(7));
+    multi.update(cx, |m, cx| m.set_scroll_top(top + height - px(1.), cx));
+    paint(cx);
+    assert_eq!(check(800., cx)[0], 7);
+    multi.update(cx, |m, cx| m.set_scroll_top(top + height, cx));
+    paint(cx);
+    assert_eq!(check(800., cx)[0], 8);
+    let expanded = check(800., cx);
+
+    // Collapsed files are their headers: more of them show.
+    multi.update(cx, |m, cx| m.set_all_collapsed(true, cx));
+    paint(cx);
+    let collapsed = check(800., cx);
+    assert!(collapsed.len() > expanded.len(), "{collapsed:?}");
+    assert_eq!(collapsed[0], 8);
+    multi.update(cx, |m, cx| m.set_all_collapsed(false, cx));
+    paint(cx);
+    let expanded_again = check(800., cx);
+    assert_eq!(expanded_again[0], 8);
+    assert!(expanded_again.len() < collapsed.len(), "{expanded_again:?}");
+
+    // Resized, the viewport shows fewer or more files.
+    cx.simulate_resize(gpui::size(px(1200.), px(200.)));
+    paint(cx);
+    let short = check(200., cx);
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    let tall = check(800., cx);
+    assert!(short.len() < tall.len(), "{short:?} {tall:?}");
+}
+
+/// Logs each `VisibleItemsChanged`, with the list it reports.
+fn log_visible_items_changes(
+    multi: &Entity<MultiDiffEditor>,
+    cx: &mut VisualTestContext,
+) -> Rc<RefCell<Vec<Vec<usize>>>> {
+    let events = Rc::new(RefCell::new(Vec::new()));
+    let log = events.clone();
+    cx.update(|_, cx| {
+        cx.subscribe(multi, move |multi, event: &MultiDiffEditorEvent, cx| {
+            if *event == MultiDiffEditorEvent::VisibleItemsChanged {
+                log.borrow_mut()
+                    .push(multi.read(cx).visible_items().to_vec());
+            }
+        })
+        .detach()
+    });
+    events
+}
+
+/// Monaco lays the list out as soon as it's resized (`layout(dimension)`):
+/// a resize alone, without another redraw, shows the files that fit the new
+/// size, and reports them.
+#[gpui::test]
+fn a_resize_lays_the_list_out_at_the_new_size(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(20, cx);
+    let events = log_visible_items_changes(&multi, cx);
+    for height in [200., 800., 500.] {
+        cx.simulate_resize(gpui::size(px(1200.), px(height)));
+        cx.run_until_parked();
+        let visible = visible_items(&multi, cx);
+        assert_eq!(
+            visible,
+            files_intersecting(&multi, px(height), cx),
+            "{height}"
+        );
+        assert_eq!(visible, painted_files(&multi, cx));
+        assert_eq!(events.borrow().last(), Some(&visible));
+    }
+    assert_eq!(events.borrow().len(), 3);
+}
+
+/// `VisibleItemsChanged` fires once per change of `visible_items` (Monaco
+/// derives `visibleDiffItems` with `arrayEqualsC`), when scrolling,
+/// collapsing and resizing, and not for a scroll that keeps the same files
+/// in view.
+#[gpui::test]
+fn visible_items_changed_fires_once_per_change(cx: &mut TestAppContext) {
+    let (multi, cx) = setup_many(12, cx);
+    // Every file measured first, so each step lays the list out once.
+    for step in 0..12 {
+        multi.update(cx, |m, cx| m.set_scroll_top(px(step as f32 * 300.), cx));
+        paint(cx);
+    }
+    multi.update(cx, |m, cx| m.set_scroll_top(px(0.), cx));
+    paint(cx);
+    let events = log_visible_items_changes(&multi, cx);
+    let mut previous = visible_items(&multi, cx);
+    let mut step = |update: &dyn Fn(&mut MultiDiffEditor, &mut gpui::Context<MultiDiffEditor>),
+                    cx: &mut VisualTestContext| {
+        let before = events.borrow().len();
+        multi.update(cx, |m, cx| update(m, cx));
+        paint(cx);
+        let visible = visible_items(&multi, cx);
+        let fired = events.borrow()[before..].to_vec();
+        let changed = visible != previous;
+        if changed {
+            assert_eq!(fired, vec![visible.clone()], "from {previous:?}");
+        } else {
+            assert_eq!(fired, Vec::<Vec<usize>>::new(), "at {visible:?}");
+        }
+        previous = visible;
+        changed
+    };
+    let (mut same, mut changes) = (0, 0);
+    for offset in 1..=80 {
+        let top = px(offset as f32 * 25.);
+        if step(&|m, cx| m.set_scroll_top(top, cx), cx) {
+            changes += 1;
+        } else {
+            same += 1;
+        }
+    }
+    assert!(
+        same > 10 && changes > 5,
+        "{same} scrolls kept the files, {changes} changed them"
+    );
+    // Collapsing the file at the top brings the next ones into view; a
+    // file below, out of view, changes nothing.
+    step(&|m, cx| m.set_scroll_top(px(300.), cx), cx);
+    let first = visible_items(&multi, cx)[0];
+    assert!(step(&|m, cx| m.set_collapsed(first, true, cx), cx));
+    assert!(!step(&|m, cx| m.set_collapsed(11, true, cx), cx));
+    assert!(step(&|m, cx| m.set_all_collapsed(false, cx), cx));
+    // Resizing: once each way.
+    let before = events.borrow().len();
+    cx.simulate_resize(gpui::size(px(1200.), px(200.)));
+    paint(cx);
+    assert_eq!(events.borrow().len(), before + 1);
+    assert_eq!(
+        events.borrow().last().unwrap(),
+        &files_intersecting(&multi, px(200.), cx)
+    );
+    cx.simulate_resize(gpui::size(px(1200.), px(800.)));
+    paint(cx);
+    assert_eq!(events.borrow().len(), before + 2);
+    assert_eq!(
+        events.borrow().last().unwrap(),
+        &files_intersecting(&multi, px(800.), cx)
+    );
+    // A redraw without a change fires nothing.
+    paint(cx);
+    assert_eq!(events.borrow().len(), before + 2);
+}
+
+/// `set_documents` changes `visible_items` with the files: the files in
+/// view take their new indices at once, and the event fires when the files
+/// in view or their indices changed (Monaco's `visibleDiffItems` holds the
+/// files' view models), even with the same indices in view.
+#[gpui::test]
+fn visible_items_follow_document_changes(cx: &mut TestAppContext) {
+    cx.update(gpui_monaco::init);
+    let names = ["a", "b", "c", "d", "e", "f", "g", "h"];
+    let (multi, cx) = cx.add_window_view(|window, cx| {
+        let documents = binary_documents(&names, cx);
+        MultiDiffEditor::new(documents, window, cx)
+    });
+    // 140px files in a 300px viewport: three in view.
+    cx.simulate_resize(gpui::size(px(800.), px(300.)));
+    paint(cx);
+    assert_eq!(visible_labels(&multi, cx), ["a.png", "b.png", "c.png"]);
+    let events = log_visible_items_changes(&multi, cx);
+    // Sets each list of files in turn, in one update (so without a draw
+    // between them), and gives `visible_items` before the next draw.
+    let set_documents = |lists: &[&[&str]], cx: &mut VisualTestContext| {
+        cx.update(|window, cx| {
+            multi.update(cx, |m, cx| {
+                for names in lists {
+                    let documents = binary_documents(names, cx);
+                    m.set_documents(documents, window, cx);
+                }
+                m.visible_items().to_vec()
+            })
+        })
+    };
+    let with_new = ["new", "a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    let swapped = ["a", "new", "b", "c", "d", "e", "f", "g", "h", "i"];
+
+    // A file added below, out of view: nothing changes.
+    set_documents(&[&["a", "b", "c", "d", "e", "f", "g", "h", "i"]], cx);
+    paint(cx);
+    assert!(events.borrow().is_empty());
+    // A file added above: the same indices in view, but other files. Until
+    // drawn, the files drawn at their new indices.
+    assert_eq!(set_documents(&[&with_new], cx), [1, 2, 3]);
+    paint(cx);
+    assert_eq!(*events.borrow(), [vec![0, 1, 2]]);
+    assert_eq!(visible_labels(&multi, cx), ["new.png", "a.png", "b.png"]);
+    // Two files in view swapped: in the order drawn until drawn again.
+    assert_eq!(set_documents(&[&swapped], cx), [1, 0, 2]);
+    paint(cx);
+    assert_eq!(events.borrow().len(), 2);
+    assert_eq!(visible_labels(&multi, cx), ["a.png", "new.png", "b.png"]);
+    // Moved there and back before a draw: no change.
+    assert_eq!(set_documents(&[&with_new, &swapped], cx), [0, 1, 2]);
+    paint(cx);
+    assert_eq!(events.borrow().len(), 2);
+    // A file in view removed, then every file.
+    let without_new = ["a", "b", "c", "d", "e", "f", "g", "h", "i"];
+    assert_eq!(set_documents(&[&without_new], cx), [0, 1]);
+    paint(cx);
+    assert_eq!(events.borrow().len(), 3);
+    assert_eq!(visible_labels(&multi, cx), ["a.png", "b.png", "c.png"]);
+    let cleared = multi.update(cx, |m, cx| {
+        m.set_documents_loading(cx);
+        m.visible_items().to_vec()
+    });
+    assert!(cleared.is_empty());
+    paint(cx);
+    assert_eq!(events.borrow().len(), 4);
+    assert_eq!(*events.borrow().last().unwrap(), Vec::<usize>::new());
+}
