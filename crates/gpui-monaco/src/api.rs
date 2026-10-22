@@ -2151,6 +2151,9 @@ pub struct FontInfo {
     /// The font's features, as CSS `font-feature-settings` (Monaco
     /// `fontFeatureSettings`, from the validated `font_ligatures`).
     pub font_feature_settings: gpui::SharedString,
+    /// Room after each character (Monaco `letterSpacing`), included in
+    /// the widths below.
+    pub letter_spacing: gpui::Pixels,
     /// The window's scale factor (Monaco `pixelRatio`).
     pub pixel_ratio: f32,
     /// A space, the digits, `→`, `·` and `|/-_ilm%` (also italic and bold)
@@ -2281,6 +2284,7 @@ impl CodeEditor {
             font_size: metrics.font_size,
             line_height: metrics.line_height,
             font_feature_settings: self.options.font_ligatures.font_feature_settings(),
+            letter_spacing: metrics.letter_spacing,
             pixel_ratio: metrics.pixel_ratio,
             is_monospace: measured.is_monospace,
             typical_halfwidth_character_width: metrics.em_width,

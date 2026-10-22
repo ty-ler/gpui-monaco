@@ -1836,6 +1836,10 @@ pub struct EditorOptions {
     pub font_weight: FontWeight,
     /// Monaco `fontLigatures` (default off).
     pub font_ligatures: FontLigatures,
+    /// Monaco `letterSpacing`: room added after each character of the
+    /// text (CSS `letter-spacing`), default 0, clamped to -5–20px. Column
+    /// widths, wrapping and the measured font widths include it.
+    pub letter_spacing: Pixels,
     /// Monaco `lineNumbers`.
     pub line_numbers: LineNumbers,
     /// Monaco `lineNumbersMinChars`: the number column is at least this many digits
@@ -2305,6 +2309,7 @@ impl Default for EditorOptions {
             line_height: None,
             font_weight: FontWeight::NORMAL,
             font_ligatures: FontLigatures::Off,
+            letter_spacing: px(0.),
             line_numbers: LineNumbers::On,
             line_numbers_min_chars: 5,
             line_decorations_width: LineDecorationsWidth::default(),
@@ -2583,7 +2588,8 @@ impl EditorOptions {
     ///   0–150, `None` for 0 ([`resolved_line_height`](Self::resolved_line_height)
     ///   applies the rest); `font_weight`: 1–1000; `font_ligatures`:
     ///   `Settings("")` and `Settings("false")` are `Off`,
-    ///   `Settings("true")` `On` ([`FontLigatures::validated`]).
+    ///   `Settings("true")` `On` ([`FontLigatures::validated`]);
+    ///   `letter_spacing`: -5–20px.
     /// - `line_numbers_min_chars`: 1–300; `line_decorations_width`,
     ///   `reveal_horizontal_right_padding`, `padding`, the scrollbar sizes,
     ///   `arrow_size` and slider sizes: 0–1000px; `overview_ruler_lanes`:
@@ -2614,6 +2620,7 @@ impl EditorOptions {
             .filter(|height| *height != px(0.));
         options.font_weight = FontWeight(clamped_int(self.font_weight.0, 400., 1., 1000.));
         options.font_ligatures = self.font_ligatures.validated();
+        options.letter_spacing = px(clamped_float(f32::from(self.letter_spacing), 0., -5., 20.));
         options.line_numbers_min_chars = self.line_numbers_min_chars.clamp(1, 300);
         options.line_decorations_width = match self.line_decorations_width {
             LineDecorationsWidth::Pixels(width) => {

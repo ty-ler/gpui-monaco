@@ -1032,8 +1032,12 @@ pub(crate) fn prepaint(
     };
     let header_foreground = colors.foreground;
     let max_header_width = (inner_width - MINIMAP_GUTTER_WIDTH) * sx;
+    // Monaco's `sectionHeaderLetterSpacing` is in canvas pixels, "intentionally
+    // not multiplying by pixelRatio".
+    let header_letter_spacing =
+        px((f64::from(options.minimap.section_header_letter_spacing) * sx) as f32);
     let shape = |text: &str, window: &mut Window| {
-        window.text_system().shape_line(
+        let mut shaped = window.text_system().shape_line(
             text.to_string().into(),
             header_font_px,
             &[gpui::TextRun {
@@ -1045,7 +1049,9 @@ pub(crate) fn prepaint(
                 strikethrough: None,
             }],
             None,
-        )
+        );
+        crate::element::space_letters(&mut shaped, header_letter_spacing);
+        shaped
     };
     for (line, text, underlined) in headers {
         let y = layout.y_for_line_number(line, minimap_line_height) + header_font_size;

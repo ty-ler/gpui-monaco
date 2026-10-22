@@ -5,7 +5,7 @@
 > - the untracked leftovers #225–#230;
 > - the P3 items #231–#235.
 >
-> #231 (`copyWithSyntaxHighlighting`), #232 (`letterSpacing`) and #233 (`fontVariations`) stay open, blocked until GPUI supports rich clipboard contents, letter spacing and font variation axes. See [`MONACO_PARITY.md`](MONACO_PARITY.md) for the current state.
+> #233 (`fontVariations`) stays open, blocked until GPUI supports font variation axes; #231 (`copyWithSyntaxHighlighting`) and #232 (`letterSpacing`) were worked around in the editor. See [`MONACO_PARITY.md`](MONACO_PARITY.md) for the current state.
 
 This audit compares the vendored Monaco source (`vendor/vscode/src/vs/editor`) with the port in four parts:
 - the `contrib/` features
