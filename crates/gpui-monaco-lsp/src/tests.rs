@@ -1,5 +1,7 @@
 //! The bridge against an in-process fake server.
 
+mod pull_diagnostics;
+
 use std::sync::{Arc, Mutex};
 
 use futures_lite::io::{AsyncWriteExt, BufReader};
