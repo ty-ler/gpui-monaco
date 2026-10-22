@@ -31,6 +31,7 @@ mod call_hierarchy;
 mod client;
 pub mod convert;
 mod features;
+mod inline_completions;
 mod inline_values;
 pub mod rpc;
 mod type_hierarchy;

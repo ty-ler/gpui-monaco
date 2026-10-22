@@ -754,7 +754,10 @@ impl LspClient {
             LanguageSelector::Languages(self.options.languages.clone())
         };
         let features = LspFeatures::new(cx.weak_entity(), &self.capabilities);
-        self.registrations = features.register(selector, &self.capabilities, cx);
+        self.registrations = features.register(selector.clone(), &self.capabilities, cx);
+        let inline_completions =
+            crate::inline_completions::register(self, cx.weak_entity(), selector, cx);
+        self.registrations.extend(inline_completions);
         // The server's commands run on the server (`workspace/executeCommand`).
         let ids = self
             .capabilities
@@ -1231,6 +1234,10 @@ fn initialize_params(options: &LspClientOptions) -> Result<Value> {
     // `lsp-types` names this `workspace.diagnostic`; the protocol has
     // `workspace.diagnostics`.
     params["capabilities"]["workspace"]["diagnostics"] = json!({ "refreshSupport": true });
+    // `lsp-types` has `textDocument.inlineCompletion` only behind its
+    // `proposed` feature.
+    params["capabilities"]["textDocument"]["inlineCompletion"] =
+        json!({ "dynamicRegistration": false });
     Ok(params)
 }
 
