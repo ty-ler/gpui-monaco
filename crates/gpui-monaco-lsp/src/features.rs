@@ -395,7 +395,22 @@ impl LspFeatures {
         if capabilities.signature_help_provider.is_some() {
             registrations.push(register_signature_help_provider(cx, selector, self.clone()));
         }
+        // Not tied to a language, as in `vscode-languageclient`.
+        if matches!(
+            capabilities.workspace_symbol_provider,
+            Some(lsp::OneOf::Left(true) | lsp::OneOf::Right(_))
+        ) {
+            registrations.push(gpui_monaco::providers::register_workspace_symbol_provider(
+                cx,
+                self.clone(),
+            ));
+        }
         registrations
+    }
+
+    /// The client the providers forward to.
+    pub(crate) fn client(&self) -> &WeakEntity<LspClient> {
+        &self.client
     }
 
     /// Syncs the document and returns what a request needs, or `None` when

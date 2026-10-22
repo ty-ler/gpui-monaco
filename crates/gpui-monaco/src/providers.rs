@@ -1583,6 +1583,54 @@ pub trait DocumentSymbolProvider: 'static {
     }
 }
 
+// ----- workspace symbols ----------------------------------------------------------
+
+/// A symbol anywhere in the workspace (VS Code `SymbolInformation`), for
+/// "Go to Symbol in Workspace" (quick access with `#`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct WorkspaceSymbol {
+    /// Its name.
+    pub name: SharedString,
+    /// Its kind.
+    pub kind: SymbolKind,
+    /// Tagged deprecated.
+    pub deprecated: bool,
+    /// The name of the symbol containing it, such as its class.
+    pub container_name: Option<SharedString>,
+    /// Its model's uri, in [`normalize_uri`](crate::normalize_uri)'s form.
+    pub uri: SharedString,
+    /// Where it is in `uri`, or `None` until
+    /// [`WorkspaceSymbolProvider::resolve_workspace_symbol`] finds it.
+    pub range: Option<Range<PointUtf16>>,
+    /// Anything the provider needs to resolve it.
+    pub data: Option<serde_json::Value>,
+}
+
+/// Finds symbols across the workspace (VS Code `WorkspaceSymbolProvider`).
+/// Monaco has no such provider; quick access lists their symbols with
+/// `#`. Unlike other providers, it's not tied to a language.
+///
+/// Register with [`register_workspace_symbol_provider`].
+pub trait WorkspaceSymbolProvider: 'static {
+    /// The symbols matching `query`. The quick access list scores them
+    /// against the query too, so a provider may return more than match.
+    fn provide_workspace_symbols(
+        &self,
+        query: &str,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<WorkspaceSymbol>>>;
+
+    /// Fills in a chosen symbol, such as its missing `range` (VS Code
+    /// `resolveWorkspaceSymbol`); `None` if there's nothing to resolve.
+    fn resolve_workspace_symbol(
+        &self,
+        _symbol: &WorkspaceSymbol,
+        _cx: &mut App,
+    ) -> Option<Task<anyhow::Result<WorkspaceSymbol>>> {
+        None
+    }
+}
+
 // ----- code lens -----------------------------------------------------------------
 
 /// A command shown above a line (Monaco `CodeLens`).
@@ -3060,6 +3108,7 @@ struct LanguageFeatures {
     linked_editing: Vec<Entry<dyn LinkedEditingRangeProvider>>,
     code_lens: Vec<Entry<dyn CodeLensProvider>>,
     document_symbols: Vec<Entry<dyn DocumentSymbolProvider>>,
+    workspace_symbols: Vec<Entry<dyn WorkspaceSymbolProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -3190,6 +3239,36 @@ register_fn!(
     document_symbols,
     DocumentSymbolProvider
 );
+/// Registers a workspace symbol provider (VS Code
+/// `registerWorkspaceSymbolProvider`): quick access lists the symbols of
+/// every registered one with `#`.
+pub fn register_workspace_symbol_provider(
+    cx: &mut App,
+    provider: impl WorkspaceSymbolProvider,
+) -> ProviderRegistration {
+    let features = features(cx);
+    features.next_id += 1;
+    let id = ProviderRegistration(features.next_id);
+    features.workspace_symbols.push(Entry {
+        id,
+        selector: LanguageSelector::All,
+        provider: Arc::new(provider),
+    });
+    id
+}
+
+/// The registered workspace symbol providers, in registration order.
+pub fn workspace_symbol_providers(cx: &App) -> Vec<Arc<dyn WorkspaceSymbolProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| {
+            f.workspace_symbols
+                .iter()
+                .map(|e| e.provider.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Registers a code lens provider for the models `selector` matches
 /// (Monaco `registerCodeLensProvider`). Lenses from all are shown.
 /// Editors ask for lenses again, as they do when one is unregistered
@@ -3408,6 +3487,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.code_lens.retain(|e| e.id != registration);
     let code_lens_changed = features.code_lens.len() != code_lens_changed;
     features.document_symbols.retain(|e| e.id != registration);
+    features.workspace_symbols.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);

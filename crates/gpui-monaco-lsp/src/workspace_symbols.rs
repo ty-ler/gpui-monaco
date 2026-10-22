@@ -2,9 +2,10 @@
 //! `vscode-languageclient`'s `WorkspaceSymbolFeature` sends them for VS
 //! Code's "Go to Symbol in Workspace".
 //!
-//! gpui-monaco has no workspace symbol provider or quick access mode (Monaco
-//! has neither), so this is an API on [`LspClient`] for hosts to build that
-//! UI on.
+//! The bridge registers a gpui-monaco
+//! [`WorkspaceSymbolProvider`](gpui_monaco::providers::WorkspaceSymbolProvider)
+//! on top of it, for quick access's `#` mode; hosts can also call
+//! [`LspClient::workspace_symbols`] for a picker of their own.
 
 use std::ops::Range;
 
@@ -16,6 +17,7 @@ use lsp_types as lsp;
 
 use crate::LspClient;
 use crate::convert;
+use crate::features::LspFeatures;
 
 /// A symbol from `workspace/symbol`.
 #[derive(Clone, Debug, PartialEq)]
@@ -146,5 +148,53 @@ impl LspClient {
             .request::<lsp::request::WorkspaceSymbolResolve>(symbol.server_symbol.clone());
         cx.background_executor()
             .spawn(async move { Ok(workspace_symbol(request.await?)) })
+    }
+}
+
+/// The editor's form of `symbol`, with the server's symbol as its `data`
+/// for resolving.
+fn provider_symbol(symbol: WorkspaceSymbol) -> gpui_monaco::providers::WorkspaceSymbol {
+    gpui_monaco::providers::WorkspaceSymbol {
+        data: serde_json::to_value(&symbol.server_symbol).ok(),
+        name: symbol.name,
+        kind: symbol.kind,
+        deprecated: symbol.deprecated,
+        container_name: symbol.container_name,
+        uri: symbol.uri,
+        range: symbol.range,
+    }
+}
+
+/// `vscode-languageclient`'s `WorkspaceSymbolFeature`: quick access's `#`
+/// mode asks the server.
+impl gpui_monaco::providers::WorkspaceSymbolProvider for LspFeatures {
+    fn provide_workspace_symbols(
+        &self,
+        query: &str,
+        cx: &mut App,
+    ) -> Task<Result<Vec<gpui_monaco::providers::WorkspaceSymbol>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let request = client.read(cx).workspace_symbols(query, cx);
+        cx.background_executor()
+            .spawn(async move { Ok(request.await?.into_iter().map(provider_symbol).collect()) })
+    }
+
+    fn resolve_workspace_symbol(
+        &self,
+        symbol: &gpui_monaco::providers::WorkspaceSymbol,
+        cx: &mut App,
+    ) -> Option<Task<Result<gpui_monaco::providers::WorkspaceSymbol>>> {
+        let server_symbol: lsp::WorkspaceSymbol =
+            serde_json::from_value(symbol.data.clone()?).ok()?;
+        let client = self.client().upgrade()?;
+        let request = client
+            .read(cx)
+            .resolve_workspace_symbol(&workspace_symbol(server_symbol), cx);
+        Some(
+            cx.background_executor()
+                .spawn(async move { Ok(provider_symbol(request.await?)) }),
+        )
     }
 }
