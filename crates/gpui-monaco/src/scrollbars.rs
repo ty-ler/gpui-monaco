@@ -7,11 +7,15 @@
 
 use std::cell::Cell;
 use std::rc::Rc;
+use std::time::Duration;
 
+use web_time::Instant;
+
+use gpui::prelude::FluentBuilder as _;
 use gpui::{
-    AnyElement, AppContext as _, InteractiveElement as _, IntoElement as _, MouseButton,
-    ParentElement as _, Pixels, ScrollHandle, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, point, px,
+    AnyElement, AppContext as _, Context, EntityId, InteractiveElement as _, IntoElement as _,
+    MouseButton, ParentElement as _, Pixels, ScrollHandle, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Task, Window, canvas, div, point, px,
 };
 
 use crate::theme::EditorColors;
@@ -287,4 +291,269 @@ pub(crate) fn follow_extent<T: 'static>(
             view.update(cx, |_, cx| cx.notify()).ok();
         });
     }
+}
+
+/// How long Monaco's `ScrollbarVisibility.Auto` scrollbars stay after
+/// scrolling (`HIDE_TIMEOUT`).
+pub(crate) const SCROLLBAR_HIDE: Duration = Duration::from_millis(500);
+/// `.monaco-scrollable-element > .visible { transition: opacity 100ms }`.
+const SCROLLBAR_FADE_IN: Duration = Duration::from_millis(100);
+/// `.monaco-scrollable-element > .invisible.fade { transition: opacity
+/// 800ms }`.
+const SCROLLBAR_FADE_OUT: Duration = Duration::from_millis(800);
+/// The mouse is over the scrollable element (for [`ScrollbarFade::hover`]).
+pub(crate) const HOVER_AREA: u8 = 1;
+/// The mouse is over the slider, which takes the mouse from the area
+/// under it.
+pub(crate) const HOVER_SLIDER: u8 = 2;
+
+/// Monaco `ScrollableElement`'s `ScrollbarVisibility.Auto` and its
+/// `ScrollbarVisibilityController`: a scrollbar shows while the mouse is
+/// over its `.monaco-scrollable-element` or its slider is dragged, and
+/// for `HIDE_TIMEOUT` after scrolling. It fades in over 100ms (`.visible`)
+/// and out over 800ms (`.invisible.fade`), from wherever it was.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct ScrollbarFade {
+    /// What the mouse is over ([`HOVER_AREA`], [`HOVER_SLIDER`]); Monaco's
+    /// `_mouseIsOver`.
+    pub(crate) hover: u8,
+    /// When it last scrolled (Monaco `_reveal`, then `_scheduleHide`).
+    pub(crate) revealed_at: Option<Instant>,
+    /// Whether it's showing (or fading in), since when, and its opacity
+    /// then.
+    visible: bool,
+    changed_at: Option<Instant>,
+    from: f32,
+}
+
+impl ScrollbarFade {
+    /// Whether it should show at `now`, the mouse aside: dragged, or just
+    /// scrolled.
+    pub(crate) fn revealed(&self, dragging: bool, now: Instant) -> bool {
+        dragging || self.revealed_at.is_some_and(|at| now < at + SCROLLBAR_HIDE)
+    }
+
+    /// The opacity at `now` of the transition under way.
+    fn current(&self, now: Instant) -> f32 {
+        let Some(at) = self.changed_at else {
+            return if self.visible { 1. } else { 0. };
+        };
+        let elapsed = now.saturating_duration_since(at).as_secs_f32();
+        if self.visible {
+            let t = (elapsed / SCROLLBAR_FADE_IN.as_secs_f32()).min(1.);
+            self.from + (1. - self.from) * t
+        } else {
+            let t = (elapsed / SCROLLBAR_FADE_OUT.as_secs_f32()).min(1.);
+            self.from * (1. - t)
+        }
+    }
+
+    /// The opacity at `now`, starting a fade when whether it should show
+    /// changed, and whether it's still fading.
+    pub(crate) fn opacity(&mut self, dragging: bool, now: Instant) -> (f32, bool) {
+        let show = self.hover != 0 || self.revealed(dragging, now);
+        if show != self.visible {
+            self.from = self.current(now);
+            self.visible = show;
+            self.changed_at = Some(now);
+        }
+        let opacity = self.current(now);
+        let target = if self.visible { 1. } else { 0. };
+        (opacity, opacity != target)
+    }
+}
+
+/// The vertical scrollbar of a list of rows that its view scrolls itself
+/// (the peek views' trees), as Monaco's `ScrollableElement` draws it with
+/// `ScrollbarVisibility.Auto`: shown while the mouse is over the list, its
+/// slider is dragged, or for a while after scrolling, fading in and out
+/// (see [`ScrollbarFade`]).
+#[derive(Default)]
+pub(crate) struct ListScrollbar {
+    fade: ScrollbarFade,
+    hide: Option<Task<()>>,
+    dragging: bool,
+    track_top: Rc<Cell<Pixels>>,
+}
+
+/// A [`ListScrollbar`]'s slider being dragged by the view `view`, grabbed
+/// `grab` below its top.
+struct ListSliderDrag {
+    view: EntityId,
+    grab: Rc<Cell<Pixels>>,
+}
+
+impl ListScrollbar {
+    /// The mouse entered or left the list.
+    pub(crate) fn set_hovered<V: 'static>(&mut self, hovered: bool, cx: &mut Context<V>) {
+        let before = self.fade.hover;
+        if hovered {
+            self.fade.hover |= HOVER_AREA;
+        } else {
+            self.fade.hover &= !HOVER_AREA;
+        }
+        if self.fade.hover != before {
+            cx.notify();
+        }
+    }
+
+    /// The list scrolled: shows the scrollbar for `HIDE_TIMEOUT` (Monaco
+    /// `_reveal`, then `_scheduleHide`).
+    pub(crate) fn reveal<V: 'static>(&mut self, cx: &mut Context<V>) {
+        self.fade.revealed_at = Some(cx.background_executor().now());
+        self.hide = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(SCROLLBAR_HIDE).await;
+            // Rendering starts the fade out.
+            this.update(cx, |_, cx| cx.notify()).ok();
+        }));
+    }
+
+    /// The scrollbar's opacity for this frame, asking for the next frame
+    /// while it fades.
+    pub(crate) fn opacity<V: 'static>(&mut self, window: &mut Window, cx: &mut Context<V>) -> f32 {
+        if !cx.has_active_drag() {
+            self.dragging = false;
+        }
+        let now = cx.background_executor().now();
+        let (opacity, fading) = self.fade.opacity(self.dragging, now);
+        if fading {
+            window.request_animation_frame();
+        }
+        opacity
+    }
+
+    /// The scrollbar along a track `visible` tall at the list's right edge
+    /// (`width` wide) for `content` scrolled by `position`, at `opacity`,
+    /// or `None` when everything fits. Clicking the track centers the
+    /// slider there; dragging the slider scrolls. `scroll_to` sets the
+    /// list's scroll position and `state` finds this scrollbar in the view.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn render<V: 'static>(
+        &self,
+        id: &'static str,
+        width: Pixels,
+        visible: Pixels,
+        content: Pixels,
+        position: Pixels,
+        opacity: f32,
+        colors: &EditorColors,
+        state: fn(&mut V) -> &mut ListScrollbar,
+        scroll_to: fn(&mut V, Pixels, &mut Context<V>),
+        cx: &mut Context<V>,
+    ) -> Option<AnyElement> {
+        if content <= visible || visible <= px(0.) {
+            return None;
+        }
+        let length = (visible * (visible / content))
+            .max(px(MIN_SLIDER))
+            .min(visible);
+        let room = (visible - length).max(px(1.));
+        let top = room * (position / (content - visible)).clamp(0., 1.);
+        let to_position =
+            move |slider_top: Pixels| (content - visible) * (slider_top / room).clamp(0., 1.);
+        let view = cx.entity_id();
+        let grab = Rc::new(Cell::new(px(0.)));
+        let track_top = self.track_top.clone();
+        let click_top = self.track_top.clone();
+        let (track_id, slider_id): (SharedString, SharedString) = (
+            format!("{id}-scrollbar").into(),
+            format!("{id}-slider").into(),
+        );
+        let slider_selector = slider_id.clone();
+        let track_selector = track_id.clone();
+        let hover = colors.scrollbar_slider_hover;
+        let active = colors.scrollbar_slider_active;
+        let dragging = self.dragging;
+        Some(
+            div()
+                .id(track_id)
+                .debug_selector(move || track_selector.to_string())
+                .absolute()
+                .top_0()
+                .right_0()
+                .w(width)
+                .h(visible)
+                .opacity(opacity)
+                // Monaco's `.invisible` scrollbar lets the mouse through.
+                .when(opacity <= 0., |this| this.invisible())
+                // GPUI keeps a drag's cursor over the whole window
+                // (Monaco's pointer capture): the slider's arrow.
+                .cursor(gpui::CursorStyle::Arrow)
+                .child(
+                    canvas(
+                        move |bounds, _, _| track_top.set(bounds.top()),
+                        |_, _, _, _| {},
+                    )
+                    .absolute()
+                    .size_full(),
+                )
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, event: &gpui::MouseDownEvent, _, cx| {
+                        cx.stop_propagation();
+                        // Monaco centers the slider where the track is
+                        // clicked.
+                        let slider_top = event.position.y - click_top.get() - length / 2.;
+                        scroll_to(this, to_position(slider_top), cx);
+                        state(this).reveal(cx);
+                    }),
+                )
+                .on_drag_move(cx.listener(
+                    move |this, event: &gpui::DragMoveEvent<ListSliderDrag>, _, cx| {
+                        let drag = event.drag(cx);
+                        if drag.view != view {
+                            return;
+                        }
+                        let slider_top =
+                            event.event.position.y - event.bounds.top() - drag.grab.get();
+                        state(this).dragging = true;
+                        scroll_to(this, to_position(slider_top), cx);
+                        state(this).reveal(cx);
+                    },
+                ))
+                .child(
+                    div()
+                        .id(slider_id)
+                        .debug_selector(move || slider_selector.to_string())
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top(top)
+                        .h(length)
+                        .map(|slider| {
+                            if dragging {
+                                slider.bg(active)
+                            } else {
+                                slider
+                                    .bg(colors.scrollbar_slider)
+                                    .hover(move |style| style.bg(hover))
+                            }
+                        })
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_drag(ListSliderDrag { view, grab }, |drag, offset, _, cx| {
+                            drag.grab.set(offset.y);
+                            cx.new(|_| gpui::Empty)
+                        }),
+                )
+                .into_any_element(),
+        )
+    }
+}
+
+/// Monaco's scrollbar shadow along the top of a list scrolled down
+/// (`scrollbar.shadow`).
+pub(crate) fn list_top_shadow(colors: &EditorColors) -> gpui::Div {
+    div()
+        .absolute()
+        .top(px(-6.))
+        .left_0()
+        .right_0()
+        .h(px(6.))
+        .shadow(vec![gpui::BoxShadow {
+            color: colors.scrollbar_shadow,
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(6.),
+            spread_radius: px(0.),
+            inset: false,
+        }])
 }
