@@ -667,7 +667,7 @@ fn font_size_and_aria_options(cx: &mut TestAppContext) {
     let (editor, cx) = setup("x", cx);
     editor.update(cx, |e, cx| {
         let size = e.options().font_size;
-        assert_eq!(e.get_font_size_at_position(p(0, 0)), Some(size));
+        assert_eq!(e.get_font_size_at_position(p(0, 0), cx), Some(size));
         let options = AriaOptions {
             role: Some(gpui::Role::ComboBox),
             active_descendant: None,
@@ -698,10 +698,12 @@ fn an_editor_without_a_model(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.set_model(None, cx));
     draw(cx);
     assert_eq!(changes.borrow().len(), 1);
+    editor.update(cx, |e, cx| {
+        assert_eq!(e.get_font_size_at_position(p(0, 0), cx), None);
+    });
     editor.read_with(cx, |e, cx| {
         assert!(!e.has_model());
         assert!(e.get_model().is_none());
-        assert_eq!(e.get_font_size_at_position(p(0, 0)), None);
         // The stand-in isn't a model hosts see.
         assert!(!gpui_monaco::models(cx).contains(e.model()));
         // Nothing is laid out.
@@ -816,4 +818,82 @@ fn minimap_marks_follow_theme_colors(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.set_theme(Arc::new(Theme::hc_black()), cx));
     assert!(has_mark(high_contrast, cx));
     assert!(!has_mark(dark, cx));
+}
+
+/// Monaco's decoration `fontSize`: the decorated text is shaped in its
+/// size (here narrower), the text after it follows, clicks find it, and
+/// `getFontSizeAtPosition` reports it while variable fonts are allowed.
+#[gpui::test]
+fn decoration_font_size(cx: &mut TestAppContext) {
+    let (editor, cx) = setup("abcdefgh", cx);
+    let x = |column: u32, cx: &mut VisualTestContext| {
+        editor.read_with(cx, |e, _| {
+            e.scrolled_visible_position(p(0, column)).unwrap().x
+        })
+    };
+    let plain: Vec<_> = (0..=8).map(|column| x(column, cx)).collect();
+    let size = editor.read_with(cx, |e, _| e.options().font_size);
+    let ids = decorate(
+        &editor,
+        vec![(
+            2..5,
+            DecorationOptions {
+                font_size: Some(size / 2.),
+                ..Default::default()
+            },
+        )],
+        cx,
+    );
+    let sized: Vec<_> = (0..=8).map(|column| x(column, cx)).collect();
+    // Before it, nothing moves; it's half as wide; after it, the text
+    // follows it.
+    assert_eq!(sized[..=2], plain[..=2]);
+    let width = |xs: &[Pixels], a: usize, b: usize| f32::from(xs[b] - xs[a]);
+    assert!((width(&sized, 2, 5) - width(&plain, 2, 5) / 2.).abs() < 0.01);
+    assert!((width(&sized, 5, 8) - width(&plain, 5, 8)).abs() < 0.01);
+    // A click on the small text finds its character.
+    let top = editor.read_with(cx, |e, _| e.scrolled_visible_position(p(0, 4)).unwrap().y);
+    cx.simulate_click(
+        gpui::point(sized[4] + px(0.5), top + px(2.)),
+        Modifiers::default(),
+    );
+    draw(cx);
+    assert_eq!(editor.read_with(cx, |e, _| e.position()), p(0, 4));
+    editor.update(cx, |e, cx| {
+        assert_eq!(e.get_font_size_at_position(p(0, 3), cx), Some(size / 2.));
+        assert_eq!(e.get_font_size_at_position(p(0, 7), cx), Some(size));
+        // Without variable fonts the decoration's left out.
+        e.update_options_with(|o| o.allow_variable_fonts = false, cx);
+        assert_eq!(e.get_font_size_at_position(p(0, 3), cx), Some(size));
+    });
+    draw(cx);
+    assert_eq!(
+        (0..=8).map(|column| x(column, cx)).collect::<Vec<_>>(),
+        plain
+    );
+    // The editor's own size is no box of its own.
+    editor.update(cx, |e, cx| {
+        e.update_options_with(|o| o.allow_variable_fonts = true, cx)
+    });
+    editor.update(cx, |e, cx| {
+        e.model().update(cx, |model, cx| {
+            model.delta_decorations(
+                None,
+                &ids,
+                vec![(
+                    2..5,
+                    DecorationOptions {
+                        font_size: Some(size),
+                        ..Default::default()
+                    },
+                )],
+                cx,
+            )
+        })
+    });
+    draw(cx);
+    assert_eq!(
+        (0..=8).map(|column| x(column, cx)).collect::<Vec<_>>(),
+        plain
+    );
 }

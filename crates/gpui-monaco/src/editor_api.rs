@@ -102,11 +102,25 @@ impl CodeEditor {
     }
 
     /// The font size of the text at `position` (Monaco
-    /// `getFontSizeAtPosition`): the editor's, with the font zoom applied;
-    /// decorations don't change the text's size here. `None` without a
-    /// model, as Monaco's `null`.
-    pub fn get_font_size_at_position(&self, _position: PointUtf16) -> Option<Pixels> {
-        self.has_model().then_some(self.options.font_size)
+    /// `getFontSizeAtPosition`): the first decoration there with a
+    /// [`font_size`](crate::DecorationOptions::font_size), as the editor
+    /// shows its decorations (none when
+    /// [`allows_variable_fonts`](Self::allows_variable_fonts) is off), else
+    /// the editor's. `None` without a model, as Monaco's `null`.
+    pub fn get_font_size_at_position(
+        &self,
+        position: PointUtf16,
+        cx: &Context<Self>,
+    ) -> Option<Pixels> {
+        if !self.has_model() {
+            return None;
+        }
+        // Font decorations are left out when variable fonts aren't allowed.
+        let decorated = self
+            .decorations_in_range(position..position, cx)
+            .into_iter()
+            .find_map(|decoration| decoration.options.font_size);
+        Some(decorated.unwrap_or(self.options.font_size))
     }
 
     /// Has screen readers read the editor's content again (Monaco

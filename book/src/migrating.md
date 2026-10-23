@@ -133,7 +133,7 @@ This page maps Monaco's API to gpui-monaco for people porting a Monaco integrati
 | `addOverlayWidget(w)` | `add_overlay_widget(w, cx)` |
 | `addGlyphMarginWidget(w)` / `layoutGlyphMarginWidget(w)` | `add_glyph_margin_widget(GlyphMarginWidget { range, view, lane, z_index }, cx)` (`GlyphMarginWidget::new(row, view)` for a line) / `layout_glyph_margin_widget(id, GlyphMarginWidgetPosition { range, lane, z_index }, cx)` |
 | `getContribution(id)` | built-in contributions are `CodeEditor` methods (the find controller's are `start_find`, …); a host's own per-editor state goes in `add_contribution(value)` and comes back by type from `get_contribution::<T>()` |
-| `getFontSizeAtPosition(p)` | `get_font_size_at_position(p)` (`Pixels`; the editor's size, with the zoom) |
+| `getFontSizeAtPosition(p)` | `get_font_size_at_position(p, cx)` (`Pixels`; a decoration's `font_size` there, else the editor's) |
 | `writeScreenReaderContent(reason)`, `setAriaOptions({ activeDescendant, role })` | `write_screen_reader_content(reason, cx)`, `set_aria_options(AriaOptions { active_descendant, role }, cx)` (an AccessKit node id and role) |
 | `getFoldingModel()…` | `folding_ranges(cx)`, `collapsed_folds(cx)` |
 
