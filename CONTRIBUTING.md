@@ -68,14 +68,15 @@ gpui's web platform, which needs a nightly toolchain; CI's `build-web` job build
 
 ## Releasing
 
-The five library crates publish to crates.io; the examples don't (`publish = false`).
+The six library crates publish to crates.io; the examples don't (`publish = false`).
 
 1. Bump `version` in the workspace `Cargo.toml`, and the `version` on each internal
    dependency in `[workspace.dependencies]`.
 2. Move the CHANGELOG's `[Unreleased]` entries under the new version.
 3. Dry run: `cargo package --workspace` packages every crate and builds each one from
    its package, against the others through a temporary registry.
-4. Publish in dependency order: `gpui-monaco-text`, `gpui-monaco-syntax`,
-   `gpui-monaco`, `gpui-monaco-languages`, `gpui-monaco-lsp`. Or run
-   `cargo publish --workspace`, which orders them itself.
+4. Publish with `cargo publish --workspace`, which orders them itself and skips the
+   examples (`cargo publish --workspace --dry-run` first). By hand, the order is
+   `gpui-monaco-codicons`, `gpui-monaco-text`, `gpui-monaco-syntax`,
+   `gpui-monaco-languages`, `gpui-monaco`, `gpui-monaco-lsp`.
 5. Tag `vX.Y.Z` and push the tag.
