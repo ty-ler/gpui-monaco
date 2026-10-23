@@ -36,6 +36,7 @@ use crate::providers::{
 use crate::theme::{EditorColors, Theme};
 use crate::view::reveal::{RevealType, ScrollType};
 use crate::widgets::{WidgetId, ZoneHeight};
+use gpui::AnimationExt as _;
 
 /// The zone's height in lines (the references peek view's default).
 const HEIGHT_IN_LINES: f32 = 18.;
@@ -45,6 +46,12 @@ const PREVIEW_RATIO: f32 = 0.6;
 const ROW_HEIGHT: Pixels = px(22.);
 const INDENT: Pixels = px(8.);
 const TWISTIE_WIDTH: Pixels = px(22.);
+/// The tree's scrollbar (`ScrollableElement`'s `verticalScrollbarSize`).
+const SCROLLBAR_WIDTH: Pixels = px(10.);
+/// `.monaco-tl-twistie.codicon-tree-item-loading::before { animation:
+/// codicon-spin 1.25s steps(30) infinite }`.
+const LOADING_SPIN: std::time::Duration = std::time::Duration::from_millis(1250);
+const LOADING_STEPS: f32 = 30.;
 /// The head's height.
 const HEAD_HEIGHT: Pixels = px(30.);
 
@@ -163,6 +170,8 @@ pub(crate) struct HierarchyPeek {
     scroll_top: Pixels,
     /// The mouse is over the tree, which shows its indent guides.
     tree_hovered: bool,
+    /// The tree's scrollbar.
+    scrollbar: crate::scrollbars::ListScrollbar,
 }
 
 impl HierarchyPeek {
@@ -217,6 +226,7 @@ impl HierarchyPeek {
             height_in_lines: HEIGHT_IN_LINES,
             scroll_top: px(0.),
             tree_hovered: false,
+            scrollbar: Default::default(),
         }
     }
 
@@ -476,9 +486,9 @@ impl HierarchyPeek {
             let top = ROW_HEIGHT * row as f32;
             let height = self.list_height();
             if top < self.scroll_top {
-                self.scroll_top = top;
+                self.set_scroll_top(top, cx);
             } else if top + ROW_HEIGHT > self.scroll_top + height {
-                self.scroll_top = top + ROW_HEIGHT - height;
+                self.set_scroll_top(top + ROW_HEIGHT - height, cx);
             }
         }
         self.show_focused(cx);
@@ -583,10 +593,20 @@ impl HierarchyPeek {
 
     fn scroll_wheel(&mut self, event: &ScrollWheelEvent, cx: &mut Context<Self>) {
         let delta = event.delta.pixel_delta(ROW_HEIGHT).y;
-        let max = (ROW_HEIGHT * self.rows().len() as f32 - self.list_height()).max(px(0.));
-        self.scroll_top = (self.scroll_top - delta).clamp(px(0.), max);
+        self.set_scroll_top(self.scroll_top - delta, cx);
         cx.stop_propagation();
         cx.notify();
+    }
+
+    /// Scrolls the tree, showing its scrollbar for a while.
+    fn set_scroll_top(&mut self, top: Pixels, cx: &mut Context<Self>) {
+        let max = (ROW_HEIGHT * self.rows().len() as f32 - self.list_height()).max(px(0.));
+        let top = top.clamp(px(0.), max);
+        if top != self.scroll_top {
+            self.scroll_top = top;
+            self.scrollbar.reveal(cx);
+            cx.notify();
+        }
     }
 
     /// The title: the root's name, and its detail.
@@ -642,7 +662,13 @@ impl HierarchyPeek {
         };
         let (icon, icon_color) = crate::quick_access::symbol_icon(node.item.kind, colors);
         let leaf = node.children.as_ref().is_some_and(|c| c.is_empty());
-        let twistie = if leaf {
+        // While its children load, the twistie spins
+        // (`codicon-tree-item-loading`).
+        let loading = node.loading.is_some();
+        let loading_color = selection_foreground
+            .filter(|_| focused)
+            .unwrap_or(colors.peek_view_result_file_foreground);
+        let twistie = if leaf || loading {
             None
         } else if node.expanded {
             Some(Codicon::TreeItemExpanded)
@@ -711,6 +737,20 @@ impl HierarchyPeek {
                     .justify_end()
                     .pr(TWISTIE_SHIFT)
                     .children(twistie.map(codicon))
+                    .when(loading, |twistie| {
+                        twistie.child(div().size(px(16.)).flex_none().with_animation(
+                            ("hierarchy-loading", ix),
+                            gpui::Animation::new(LOADING_SPIN).repeat(),
+                            move |this, delta| {
+                                let turn = (delta * LOADING_STEPS).floor() / LOADING_STEPS;
+                                this.child(crate::inline_progress::spinner(
+                                    turn,
+                                    px(16.),
+                                    loading_color,
+                                ))
+                            },
+                        ))
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
                         window.focus(&this.focus, cx);
@@ -788,6 +828,20 @@ impl Render for HierarchyPeek {
             .iter()
             .map(|&ix| self.render_row(ix, list_focused, cx))
             .collect();
+        let scrolled = self.scroll_top > px(0.);
+        let scrollbar_opacity = self.scrollbar.opacity(window, cx);
+        let scrollbar = self.scrollbar.render(
+            "hierarchy",
+            SCROLLBAR_WIDTH,
+            body_height,
+            ROW_HEIGHT * rows.len() as f32,
+            self.scroll_top,
+            scrollbar_opacity,
+            &colors,
+            |this: &mut Self| &mut this.scrollbar,
+            |this, top, cx| this.set_scroll_top(top, cx),
+            cx,
+        );
         let toggle_label = match self.direction.toggled() {
             HierarchyDirection::IncomingCalls => "Show Incoming Calls",
             HierarchyDirection::OutgoingCalls => "Show Outgoing Calls",
@@ -885,6 +939,7 @@ impl Render for HierarchyPeek {
             .text_size(px(13.))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.tree_hovered = *hovered;
+                this.scrollbar.set_hovered(*hovered, cx);
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
@@ -904,7 +959,12 @@ impl Render for HierarchyPeek {
                     .right_0()
                     .top(-self.scroll_top)
                     .children(visible),
-            );
+            )
+            // Monaco's scrollbar shadow along the top once scrolled.
+            .when(scrolled, |list| {
+                list.child(crate::scrollbars::list_top_shadow(&colors))
+            })
+            .children(scrollbar);
         let preview = self.preview.clone();
         div().size_full().child(
             div()

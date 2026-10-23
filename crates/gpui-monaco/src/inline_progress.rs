@@ -88,7 +88,7 @@ struct InlineProgressWidget {
 }
 
 /// A codicon `loading` spinner turned by `turn` (0 to 1), `size` square.
-fn spinner(turn: f32, size: Pixels, color: Hsla) -> impl IntoElement {
+pub(crate) fn spinner(turn: f32, size: Pixels, color: Hsla) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {

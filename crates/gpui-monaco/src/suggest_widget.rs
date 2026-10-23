@@ -15,7 +15,6 @@ use std::cell::Cell;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::Duration;
 
 use gpui::{
     App, AppContext as _, AvailableSpace, Bounds, Context, DragMoveEvent, FontWeight, Global,
@@ -23,7 +22,6 @@ use gpui::{
     Render, Role, SharedString, Size, StatefulInteractiveElement, Styled, StyledText, Task,
     WeakEntity, Window, div, point, px, rgb, size,
 };
-use web_time::Instant;
 
 use crate::accessibility::AriaNode;
 use crate::codicons::{Codicon, icon as codicon};
@@ -32,6 +30,7 @@ use crate::editor::CodeEditor;
 use crate::markdown::{MarkdownStyle, render_documentation};
 use crate::options::{SuggestInsertMode, SuggestOptions};
 use crate::providers::{CompletionItem, CompletionItemKind, CompletionItemTag};
+use crate::scrollbars::{HOVER_AREA, HOVER_SLIDER, SCROLLBAR_HIDE, ScrollbarFade};
 use crate::theme::{EditorColors, Theme};
 use crate::widgets::{ContentWidgetPreference, OverflowRoom, WidgetAnchor};
 
@@ -61,14 +60,6 @@ const DETAILS_PAGE_STEP: f32 = 80.;
 const SCROLLBAR_WIDTH: f32 = 10.;
 /// Monaco `ScrollbarState`'s `MINIMUM_SLIDER_SIZE`.
 const MIN_SLIDER: f32 = 20.;
-/// How long Monaco's `ScrollbarVisibility.Auto` scrollbars stay after
-/// scrolling (`HIDE_TIMEOUT`).
-const SCROLLBAR_HIDE: Duration = Duration::from_millis(500);
-/// `.monaco-scrollable-element > .visible { transition: opacity 100ms }`.
-const SCROLLBAR_FADE_IN: Duration = Duration::from_millis(100);
-/// `.monaco-scrollable-element > .invisible.fade { transition: opacity
-/// 800ms }`.
-const SCROLLBAR_FADE_OUT: Duration = Duration::from_millis(800);
 /// Monaco `SuggestWidget.showSuggestions` reveals the focused row of a new
 /// list at the top, with a third of the row above it showing.
 const REVEAL_PADDING_ROWS: f32 = 0.33;
@@ -450,68 +441,6 @@ impl ScrollbarTarget {
 struct SliderDrag {
     target: ScrollbarTarget,
     grab: Rc<Cell<Pixels>>,
-}
-
-/// The mouse is over the scrollable element (for [`ScrollbarFade::hover`]).
-const HOVER_AREA: u8 = 1;
-/// The mouse is over the slider, which takes the mouse from the area
-/// under it.
-const HOVER_SLIDER: u8 = 2;
-
-/// Monaco `ScrollableElement`'s `ScrollbarVisibility.Auto` and its
-/// `ScrollbarVisibilityController`: a scrollbar shows while the mouse is
-/// over its `.monaco-scrollable-element` or its slider is dragged, and
-/// for `HIDE_TIMEOUT` after scrolling. It fades in over 100ms (`.visible`)
-/// and out over 800ms (`.invisible.fade`), from wherever it was.
-#[derive(Clone, Copy, Debug, Default)]
-struct ScrollbarFade {
-    /// What the mouse is over ([`HOVER_AREA`], [`HOVER_SLIDER`]); Monaco's
-    /// `_mouseIsOver`.
-    hover: u8,
-    /// When it last scrolled (Monaco `_reveal`, then `_scheduleHide`).
-    revealed_at: Option<Instant>,
-    /// Whether it's showing (or fading in), since when, and its opacity
-    /// then.
-    visible: bool,
-    changed_at: Option<Instant>,
-    from: f32,
-}
-
-impl ScrollbarFade {
-    /// Whether it should show at `now`, the mouse aside: dragged, or just
-    /// scrolled.
-    fn revealed(&self, dragging: bool, now: Instant) -> bool {
-        dragging || self.revealed_at.is_some_and(|at| now < at + SCROLLBAR_HIDE)
-    }
-
-    /// The opacity at `now` of the transition under way.
-    fn current(&self, now: Instant) -> f32 {
-        let Some(at) = self.changed_at else {
-            return if self.visible { 1. } else { 0. };
-        };
-        let elapsed = now.saturating_duration_since(at).as_secs_f32();
-        if self.visible {
-            let t = (elapsed / SCROLLBAR_FADE_IN.as_secs_f32()).min(1.);
-            self.from + (1. - self.from) * t
-        } else {
-            let t = (elapsed / SCROLLBAR_FADE_OUT.as_secs_f32()).min(1.);
-            self.from * (1. - t)
-        }
-    }
-
-    /// The opacity at `now`, starting a fade when whether it should show
-    /// changed, and whether it's still fading.
-    fn opacity(&mut self, dragging: bool, now: Instant) -> (f32, bool) {
-        let show = self.hover != 0 || self.revealed(dragging, now);
-        if show != self.visible {
-            self.from = self.current(now);
-            self.visible = show;
-            self.changed_at = Some(now);
-        }
-        let opacity = self.current(now);
-        let target = if self.visible { 1. } else { 0. };
-        (opacity, opacity != target)
-    }
 }
 
 /// The list's size and side (Monaco `SuggestWidget._layout`).

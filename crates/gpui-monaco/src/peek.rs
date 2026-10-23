@@ -77,9 +77,8 @@ pub(crate) fn label_description_opacity(light: bool, selected: bool) -> f32 {
     }
 }
 /// Monaco's list scrollbar (`ScrollableElement`'s default
-/// `verticalScrollbarSize`) and its minimum slider length.
+/// `verticalScrollbarSize`).
 const LIST_SCROLLBAR_WIDTH: Pixels = px(10.);
-const MIN_SLIDER: Pixels = px(20.);
 /// Monaco `TypeNavigationController`: typed characters add to the word
 /// until a pause this long.
 const TYPE_NAVIGATION_DELAY: Duration = Duration::from_millis(800);
@@ -110,7 +109,6 @@ impl gpui::Global for PeekLayout {}
 enum PeekDrag {
     Split,
     Height,
-    Slider,
 }
 
 #[derive(Default)]
@@ -229,10 +227,10 @@ pub(crate) struct PeekView {
     height_in_lines: f32,
     /// The list's scroll offset.
     scroll_top: Pixels,
-    /// The mouse is over the list (Monaco shows its slider then).
+    /// The mouse is over the list, which shows its indent guides.
     list_hovered: bool,
-    /// Where a slider drag grabbed it, from the slider's top.
-    slider_grab: Pixels,
+    /// The list's scrollbar.
+    scrollbar: crate::scrollbars::ListScrollbar,
     /// A height sash drag's start: the pointer's y and the height in lines
     /// (Monaco `ZoneWidget._initSash`'s `data`).
     sash_start: Option<(Pixels, f32)>,
@@ -567,7 +565,7 @@ impl PeekView {
             height_in_lines: HEIGHT_IN_LINES,
             scroll_top: px(0.),
             list_hovered: false,
-            slider_grab: px(0.),
+            scrollbar: Default::default(),
             sash_start: None,
             sash_hover: Default::default(),
             sash_active: None,
@@ -718,6 +716,7 @@ impl PeekView {
         let top = top.clamp(px(0.), self.max_scroll(rows));
         if top != self.scroll_top {
             self.scroll_top = top;
+            self.scrollbar.reveal(cx);
             cx.notify();
         }
     }
@@ -1129,31 +1128,6 @@ impl PeekView {
         self.set_scroll_top(self.scroll_top - delta, rows, cx);
     }
 
-    /// The list's slider: (top, height) in a track `height` tall, or `None`
-    /// when every row fits.
-    fn slider(&self, rows: usize) -> Option<(Pixels, Pixels)> {
-        let height = self.list_height();
-        let total = ROW_HEIGHT * rows as f32;
-        if total <= height || height <= px(0.) {
-            return None;
-        }
-        let size = (height * (height / total)).max(MIN_SLIDER).min(height);
-        let top = (height - size) * (self.scroll_top / (total - height));
-        Some((top, size))
-    }
-
-    /// Scrolls so the slider's top is at `slider_top` in the track.
-    fn drag_slider(&mut self, slider_top: Pixels, cx: &mut Context<Self>) {
-        let rows = self.rows().len();
-        let Some((_, size)) = self.slider(rows) else {
-            return;
-        };
-        let height = self.list_height();
-        let room = (height - size).max(px(1.));
-        let fraction = (slider_top / room).clamp(0., 1.);
-        self.set_scroll_top(self.max_scroll(rows) * fraction, rows, cx);
-    }
-
     fn render_row(
         &self,
         ix: usize,
@@ -1397,6 +1371,14 @@ pub(crate) fn tree_indent_guides(
                     .filter(|_| tree_hovered)
             };
             div()
+                .debug_selector(move || {
+                    if color.is_some() {
+                        "tree-indent-guide"
+                    } else {
+                        "tree-indent-guide-hidden"
+                    }
+                    .into()
+                })
                 .w(TREE_INDENT)
                 .h_full()
                 .flex_none()
@@ -1405,6 +1387,7 @@ pub(crate) fn tree_indent_guides(
         .collect();
     (!guides.is_empty()).then(|| {
         div()
+            .debug_selector(|| "tree-indent-guides".into())
             .absolute()
             .top_0()
             .left(px(16.))
@@ -1473,8 +1456,22 @@ impl Render for PeekView {
             .map(|ix| self.render_row(ix, rows[ix], list_focused, cx))
             .collect();
         let rows_top = ROW_HEIGHT * first as f32 - self.scroll_top;
-        let slider = self.slider(row_count);
-        let show_slider = self.list_hovered || cx.has_active_drag();
+        let scrollbar_opacity = self.scrollbar.opacity(window, cx);
+        let scrollbar = self.scrollbar.render(
+            "peek",
+            LIST_SCROLLBAR_WIDTH,
+            body_height,
+            ROW_HEIGHT * row_count as f32,
+            self.scroll_top,
+            scrollbar_opacity,
+            &colors,
+            |this: &mut Self| &mut this.scrollbar,
+            |this, top, cx| {
+                let rows = this.rows().len();
+                this.set_scroll_top(top, rows, cx);
+            },
+            cx,
+        );
         let scrolled = self.scroll_top > px(0.);
         let preview = self.preview.clone();
         // Monaco `Sash`: `sash.hoverBorder` once the mouse has rested on
@@ -1605,6 +1602,7 @@ impl Render for PeekView {
             .text_size(px(13.))
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 this.list_hovered = *hovered;
+                this.scrollbar.set_hovered(*hovered, cx);
                 cx.notify();
             }))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
@@ -1652,72 +1650,9 @@ impl Render for PeekView {
             )
             // Monaco's scrollbar shadow along the top once scrolled.
             .when(scrolled, |list| {
-                list.child(
-                    div()
-                        .absolute()
-                        .top(px(-6.))
-                        .left_0()
-                        .right_0()
-                        .h(px(6.))
-                        .shadow(vec![gpui::BoxShadow {
-                            color: colors.scrollbar_shadow,
-                            offset: point(px(0.), px(0.)),
-                            blur_radius: px(6.),
-                            spread_radius: px(0.),
-                            inset: false,
-                        }]),
-                )
+                list.child(crate::scrollbars::list_top_shadow(&colors))
             })
-            .when_some(slider, |list, (top, size)| {
-                list.child(
-                    div()
-                        .id("peek-scrollbar")
-                        .absolute()
-                        .top_0()
-                        .bottom_0()
-                        .right_0()
-                        .w(LIST_SCROLLBAR_WIDTH)
-                        // GPUI keeps a drag's cursor over the whole window
-                        // (Monaco's pointer capture): the slider's arrow.
-                        .cursor(gpui::CursorStyle::Arrow)
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                cx.stop_propagation();
-                                // Monaco: a click on the track centers the
-                                // slider there, then drags it.
-                                this.slider_grab = size / 2.;
-                                let y = this.list_y_of(event);
-                                this.drag_slider(y - size / 2., cx);
-                            }),
-                        )
-                        .on_drag(PeekDrag::Slider, |_, _, _, cx| cx.new(|_| gpui::Empty))
-                        .when(show_slider, |track| {
-                            track.child(
-                                div()
-                                    .id("peek-slider")
-                                    .absolute()
-                                    .left_0()
-                                    .right_0()
-                                    .top(top)
-                                    .h(size)
-                                    .cursor(gpui::CursorStyle::Arrow)
-                                    .bg(colors.scrollbar_slider)
-                                    .hover(|style| style.bg(colors.scrollbar_slider_hover))
-                                    .on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                            cx.stop_propagation();
-                                            this.slider_grab = this.list_y_of(event) - top;
-                                        }),
-                                    )
-                                    .on_drag(PeekDrag::Slider, |_, _, _, cx| {
-                                        cx.new(|_| gpui::Empty)
-                                    }),
-                            )
-                        }),
-                )
-            });
+            .children(scrollbar);
         div()
             .size_full()
             .relative()
@@ -1843,17 +1778,9 @@ impl Render for PeekView {
 }
 
 impl PeekView {
-    /// The y of `event` from the list's top (the zone's top plus the
-    /// header).
-    fn list_y_of(&self, event: &MouseDownEvent) -> Pixels {
-        let (arrow, head, _) = self.layout_heights();
-        let zone_top = self.zone_top.get();
-        event.position.y - (zone_top + arrow + px(1.) + head + px(1.))
-    }
-
     /// A drag in the peek view: Monaco's split view between preview and
     /// list, the zone widget's height sash (in whole lines from where the
-    /// drag started, `floor`ed down and `ceil`ed up), or the list's slider.
+    /// drag started, `floor`ed down and `ceil`ed up).
     /// The layout is kept for the next peek view, like Monaco's
     /// `peekViewLayout`.
     fn drag(&mut self, drag: PeekDrag, event: &DragMoveEvent<PeekDrag>, cx: &mut Context<Self>) {
@@ -1891,12 +1818,6 @@ impl PeekView {
                         editor.update(cx, |editor, cx| editor.set_peek_height(lines, cx));
                     }
                 }
-            }
-            PeekDrag::Slider => {
-                let (arrow, head, _) = self.layout_heights();
-                let list_top = bounds.top() + arrow + px(1.) + head + px(1.);
-                let y = position.y - list_top - self.slider_grab;
-                self.drag_slider(y, cx);
             }
         }
     }

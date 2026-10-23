@@ -19,7 +19,7 @@
 //! in [`MarkdownStyle::code_language`].
 //!
 //! The text is laid out by GPUI's `StyledText`, which can't be selected,
-//! so each block registers its layout for [`crate::selectable_text`],
+//! so each block registers its layout for `crate::selectable_text`,
 //! which selects it as the browser does Monaco's.
 //! Inline code is padded with spaces in its background, rounded by
 //! [`MarkdownStyle::code_corner_radius`] (the backgrounds are drawn under
