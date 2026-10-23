@@ -26,6 +26,9 @@ pub(crate) fn read_html(text: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
+// The platform clipboard is only reachable through its unsafe bindings;
+// each block says why it's sound.
+#[allow(unsafe_code)]
 mod imp {
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
     use objc2_foundation::NSString;
@@ -58,6 +61,9 @@ mod imp {
 }
 
 #[cfg(target_os = "windows")]
+// The platform clipboard is only reachable through its unsafe bindings;
+// each block says why it's sound.
+#[allow(unsafe_code)]
 mod imp {
     use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
     use windows::Win32::System::DataExchange::{
