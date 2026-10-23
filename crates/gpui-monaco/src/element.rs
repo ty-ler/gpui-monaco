@@ -4492,6 +4492,7 @@ fn prepaint_editor(
     editor.refresh_links(cx);
     editor.refresh_ghost_text(cx);
     editor.refresh_code_lenses(cx);
+    editor.refresh_inline_values(cx);
     editor.refresh_sticky_model(cx);
     editor.refresh_colors(cx);
     editor.refresh_section_headers(cx);

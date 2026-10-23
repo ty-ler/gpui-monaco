@@ -13,6 +13,7 @@ gpui-monaco has no language server or other language intelligence built in. Your
 | `ImplementationProvider` | `ImplementationProvider` | Cmd/Ctrl+F12 and Cmd/Ctrl+Shift+F12 (peek) |
 | `CallHierarchyProvider` | (VS Code's) | Peek Call Hierarchy, Shift+Alt+H |
 | `TypeHierarchyProvider` | (VS Code's) | Peek Type Hierarchy |
+| `InlineValuesProvider` | `InlineValuesProvider` | values after lines while a host's debugger is paused |
 | `RenameProvider` | `RenameProvider` | F2 (rename box) |
 | `NewSymbolNamesProvider` | `NewSymbolNamesProvider` | suggested names in the rename box |
 | `SelectionRangeProvider` | `SelectionRangeProvider` | expand and shrink selection |
@@ -320,6 +321,26 @@ Peek Call Hierarchy (Shift+Alt+H, `show_call_hierarchy`, VS Code's `editor.showC
 - Without a symbol at the cursor the view says "No results"; an item with nothing in that direction says so, such as "No calls to 'name'".
 
 The view has no resizing sash, no list/preview split sash and no context menu items, and doesn't virtualize the tree. `hierarchy_direction` says which hierarchy is open, if any, and `close_hierarchy` closes it. The LSP bridge registers both providers for servers that have them.
+
+## Inline values
+
+An `InlineValuesProvider` (Monaco's) finds the values to show after lines while a debugger is paused: `InlineValue::Text` to show as it is, a `VariableLookup` for the debugger to look up, or an `EvaluatableExpression` for it to evaluate, each with its range. Monaco only declares it, and VS Code's debugger draws the values; here the editor draws them, and the host's debugger looks them up:
+
+```rust,ignore
+// Paused at a frame in this editor's model.
+editor.show_inline_values(
+    InlineValueContext { frame_id, stopped_location },
+    move |lookup, cx| match lookup {
+        InlineValueLookup::Variable { name, case_sensitive } => debugger.find_variable(&name, case_sensitive, cx),
+        InlineValueLookup::Expression(expression) => debugger.evaluate(&expression, cx),
+    },
+    cx,
+);
+// Running again.
+editor.clear_inline_values(cx);
+```
+
+As VS Code's debugger does, the editor asks every matching provider about the rows on screen and a screen's worth above and below (`visible_ranges_plus_viewport_above_below`). A variable or expression without a name uses the text in its range. Each line shows its values after its end, sorted by column and separated by commas, as `name = value` (values the debugger gives `None` for are left out, and the same text only once), cut to 150 characters, in `editor.inlineValuesForeground` on `editor.inlineValuesBackground`. The cursor doesn't stop in them. They're asked for again after scrolling past what was asked about, 200ms after the last edit, when providers change and on `refresh_inline_values`, and show only while the editor shows the model it was paused in. `inline_values()` lists each line's text. VS Code's fallback without a provider (showing every variable in scope where its name appears) isn't there. The LSP bridge registers a provider for servers with `inlineValueProvider`.
 
 ## Code lens
 

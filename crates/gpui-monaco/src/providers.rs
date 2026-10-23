@@ -1732,6 +1732,90 @@ pub trait TypeHierarchyProvider: 'static {
     ) -> Task<anyhow::Result<Vec<HierarchyItem>>>;
 }
 
+// ----- inline values -------------------------------------------------------------
+
+/// Where a debugger is paused (Monaco `InlineValueContext`).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct InlineValueContext {
+    /// The debug adapter's id of the stack frame (its `frameId`).
+    pub frame_id: i32,
+    /// The range of the statement execution stopped at.
+    pub stopped_location: Range<PointUtf16>,
+}
+
+/// A value to show after a line while debugging (Monaco `InlineValue`).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum InlineValue {
+    /// Text to show as it is (Monaco `InlineValueText`).
+    Text {
+        /// The range it's about; it shows at the end of its first line.
+        range: Range<PointUtf16>,
+        /// What to show.
+        text: SharedString,
+    },
+    /// A variable whose value the debugger looks up (Monaco
+    /// `InlineValueVariableLookup`).
+    VariableLookup {
+        /// The range it's about.
+        range: Range<PointUtf16>,
+        /// The variable's name; `None` uses the text in `range`.
+        variable_name: Option<SharedString>,
+        /// Whether the name matches only in the same case.
+        case_sensitive_lookup: bool,
+    },
+    /// An expression the debugger evaluates (Monaco
+    /// `InlineValueEvaluatableExpression`).
+    EvaluatableExpression {
+        /// The range it's about.
+        range: Range<PointUtf16>,
+        /// The expression; `None` uses the text in `range`.
+        expression: Option<SharedString>,
+    },
+}
+
+impl InlineValue {
+    /// The range it's about.
+    pub fn range(&self) -> &Range<PointUtf16> {
+        match self {
+            Self::Text { range, .. }
+            | Self::VariableLookup { range, .. }
+            | Self::EvaluatableExpression { range, .. } => range,
+        }
+    }
+}
+
+/// Finds the values to show after lines while a debugger is paused (Monaco
+/// `InlineValuesProvider`), which the debugger then looks up. See
+/// [`CodeEditor::show_inline_values`](crate::CodeEditor::show_inline_values).
+///
+/// Register with [`register_inline_values_provider`]; call
+/// [`refresh_inline_values`] when they change (Monaco
+/// `onDidChangeInlineValues`).
+pub trait InlineValuesProvider: 'static {
+    /// The values in `view_port`, the rows on or near the screen.
+    fn provide_inline_values(
+        &self,
+        context: &ProviderContext,
+        view_port: Range<PointUtf16>,
+        inline_context: &InlineValueContext,
+        cx: &mut App,
+    ) -> Task<anyhow::Result<Vec<InlineValue>>>;
+}
+
+/// Bumped by [`refresh_inline_values`]; editors showing inline values ask
+/// again when it changes.
+#[derive(Default)]
+pub(crate) struct InlineValuesEpoch(pub u64);
+
+impl Global for InlineValuesEpoch {}
+
+/// Asks every editor showing inline values for them again (Monaco's
+/// `onDidChangeInlineValues`), e.g. after a language server's
+/// `workspace/inlineValue/refresh`.
+pub fn refresh_inline_values(cx: &mut App) {
+    cx.default_global::<InlineValuesEpoch>().0 += 1;
+}
+
 // ----- code lens -----------------------------------------------------------------
 
 /// A command shown above a line (Monaco `CodeLens`).
@@ -2318,6 +2402,7 @@ pub(crate) fn observe_language_features<V: 'static>(
         cx.observe_global::<InlayHintsEpoch>(|_, cx| cx.notify()),
         cx.observe_global::<FoldingRangesEpoch>(|_, cx| cx.notify()),
         cx.observe_global::<CodeLensEpoch>(|_, cx| cx.notify()),
+        cx.observe_global::<InlineValuesEpoch>(|_, cx| cx.notify()),
     ]
 }
 
@@ -3216,6 +3301,7 @@ struct LanguageFeatures {
     workspace_symbols: Vec<Entry<dyn WorkspaceSymbolProvider>>,
     call_hierarchy: Vec<Entry<dyn CallHierarchyProvider>>,
     type_hierarchy: Vec<Entry<dyn TypeHierarchyProvider>>,
+    inline_values: Vec<Entry<dyn InlineValuesProvider>>,
     range_semantic_tokens: Vec<Entry<dyn DocumentRangeSemanticTokensProvider>>,
     folding: Vec<Entry<dyn FoldingRangeProvider>>,
     selection_range: Vec<Entry<dyn SelectionRangeProvider>>,
@@ -3362,6 +3448,25 @@ register_fn!(
     type_hierarchy,
     TypeHierarchyProvider
 );
+register_fn!(
+    /// Registers an inline values provider for the models `selector`
+    /// matches (Monaco `registerInlineValuesProvider`). Editors showing
+    /// inline values ask every matching one.
+    register_inline_values_provider,
+    inline_values,
+    InlineValuesProvider
+);
+
+/// The registered inline values providers whose selector matches
+/// `target`, best first (see [`LanguageSelector`]).
+pub fn inline_values_providers(
+    cx: &App,
+    target: impl Into<ProviderTarget>,
+) -> Vec<Arc<dyn InlineValuesProvider>> {
+    cx.try_global::<LanguageFeatures>()
+        .map(|f| matching(&f.inline_values, &target.into()))
+        .unwrap_or_default()
+}
 
 /// The registered call hierarchy providers whose selector matches
 /// `target`, best first (see [`LanguageSelector`]).
@@ -3636,6 +3741,7 @@ pub fn unregister_provider(cx: &mut App, registration: ProviderRegistration) {
     features.workspace_symbols.retain(|e| e.id != registration);
     features.call_hierarchy.retain(|e| e.id != registration);
     features.type_hierarchy.retain(|e| e.id != registration);
+    features.inline_values.retain(|e| e.id != registration);
     features
         .range_semantic_tokens
         .retain(|e| e.id != registration);

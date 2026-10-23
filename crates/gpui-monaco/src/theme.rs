@@ -330,6 +330,10 @@ editor_colors! { r;
     button_secondary_border: Option<Hsla> = r.visible("button.secondaryBorder");
     /// Code lens text (`editorCodeLens.foreground`).
     code_lens_foreground: Hsla = r.color("editorCodeLens.foreground");
+    /// Debugger inline values' text (`editor.inlineValuesForeground`).
+    inline_values_foreground: Hsla = r.color("editor.inlineValuesForeground");
+    /// Debugger inline values' background (`editor.inlineValuesBackground`).
+    inline_values_background: Hsla = r.color("editor.inlineValuesBackground");
     /// Linked editing ranges (`editor.linkedEditingBackground`).
     linked_editing_background: Hsla = r.color("editor.linkedEditingBackground");
     /// Ghost text (`editorGhostText.foreground`; high contrast themes keep

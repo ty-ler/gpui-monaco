@@ -874,6 +874,7 @@ pub struct CodeEditor {
     /// The peek view, if open.
     pub(crate) peek: crate::peek::PeekState,
     pub(crate) hierarchy: crate::hierarchy::HierarchyState,
+    pub(crate) inline_values: crate::inline_values::InlineValuesState,
     /// The inspect tokens widget, if launched.
     pub(crate) inspect_tokens: crate::developer::InspectTokensState,
     /// Requests Escape can cancel (Monaco `editor.cancelOperation`).
@@ -1182,6 +1183,7 @@ impl CodeEditor {
             goto: Default::default(),
             peek: Default::default(),
             hierarchy: Default::default(),
+            inline_values: Default::default(),
             inspect_tokens: Default::default(),
             cancellable: Default::default(),
             banner: None,

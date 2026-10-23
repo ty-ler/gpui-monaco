@@ -87,6 +87,7 @@ mod geometry;
 mod goto;
 mod hierarchy;
 mod high_contrast;
+mod inline_values;
 pub use high_contrast::{
     auto_detect_high_contrast, os_high_contrast, set_auto_detect_high_contrast,
     set_os_high_contrast,
@@ -192,6 +193,7 @@ pub use goto::has_symbol_navigation;
 pub use hierarchy::HierarchyDirection;
 pub use hover::{HOVER_DELAY, HoverWidget};
 pub use inline_completions::inline_edits::InlineEditViewKind;
+pub use inline_values::InlineValueLookup;
 pub use languages::{
     LanguageTokenizer, on_language, on_language_encountered, register_language,
     register_tokens_provider_factory, set_language_configuration, set_monarch_tokens_provider,

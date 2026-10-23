@@ -601,6 +601,8 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     ("editorLineNumber.dimmedForeground", [N, N, N, N]),
     ("editorRuler.foreground", [H(0x5a5a5aff), H(0xd3d3d3ff), H(0xffffffff), H(0x292929ff)]),
     ("editorCodeLens.foreground", [H(0x999999ff), H(0x919191ff), H(0x999999ff), H(0x292929ff)]),
+    ("editor.inlineValuesForeground", [H(0xffffff80), H(0x00000080), H(0xffffff80), H(0x00000080)]),
+    ("editor.inlineValuesBackground", [H(0xffc80033), H(0xffc80033), H(0xffc80033), H(0xffc80033)]),
     ("editorBracketMatch.background", [H(0x0064001a), H(0x0064001a), H(0x0064001a), H(0x00000000)]),
     ("editorBracketMatch.border", [H(0x888888ff), H(0xb9b9b9ff), R("contrastBorder"), R("contrastBorder")]),
     ("editorBracketMatch.foreground", [N, N, N, N]),
