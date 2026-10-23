@@ -1371,6 +1371,14 @@ pub(crate) fn tree_indent_guides(
                     .filter(|_| tree_hovered)
             };
             div()
+                .debug_selector(move || {
+                    if color.is_some() {
+                        "tree-indent-guide"
+                    } else {
+                        "tree-indent-guide-hidden"
+                    }
+                    .into()
+                })
                 .w(TREE_INDENT)
                 .h_full()
                 .flex_none()
@@ -1379,6 +1387,7 @@ pub(crate) fn tree_indent_guides(
         .collect();
     (!guides.is_empty()).then(|| {
         div()
+            .debug_selector(|| "tree-indent-guides".into())
             .absolute()
             .top_0()
             .left(px(16.))

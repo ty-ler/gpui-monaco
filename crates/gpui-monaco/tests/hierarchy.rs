@@ -247,3 +247,17 @@ fn type_hierarchy(cx: &mut TestAppContext) {
     editor.update(cx, |e, cx| e.show_call_hierarchy(cx));
     assert_eq!(rows(&editor, cx), vec!["> main", "  caller"]);
 }
+
+#[gpui::test]
+fn children_show_their_parents_indent_guide(cx: &mut TestAppContext) {
+    let (editor, cx) = setup(cx);
+    editor.update(cx, |e, cx| e.show_call_hierarchy(cx));
+    assert_eq!(rows(&editor, cx), vec!["> main", "  caller"]);
+    // The focused root is expanded, so its guide, beside its child, is
+    // active: drawn without hovering the tree.
+    let guides = cx.debug_bounds("tree-indent-guides").unwrap();
+    let guide = cx.debug_bounds("tree-indent-guide").unwrap();
+    assert_eq!(guide.origin, guides.origin);
+    assert_eq!(guide.size, gpui::size(gpui::px(8.), gpui::px(22.)));
+    assert!(cx.debug_bounds("tree-indent-guide-hidden").is_none());
+}

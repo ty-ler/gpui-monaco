@@ -30,6 +30,7 @@ pub(crate) fn read_html(text: &str) -> Option<String> {
 // each block says why it's sound.
 #[allow(unsafe_code)]
 mod imp {
+    use objc2::MainThreadMarker;
     use objc2_app_kit::{NSPasteboard, NSPasteboardTypeHTML, NSPasteboardTypeString};
     use objc2_foundation::NSString;
 
@@ -39,8 +40,16 @@ mod imp {
         string.is_some_and(|string| string.to_string() == text)
     }
 
+    /// The general pasteboard, on the main thread only: AppKit isn't
+    /// thread-safe, and tests run on other threads, at once.
+    fn pasteboard() -> Option<objc2::rc::Retained<NSPasteboard>> {
+        MainThreadMarker::new().map(|_| NSPasteboard::generalPasteboard())
+    }
+
     pub(super) fn add_html(text: &str, html: &str) -> bool {
-        let pasteboard = NSPasteboard::generalPasteboard();
+        let Some(pasteboard) = pasteboard() else {
+            return false;
+        };
         if !holds_text(&pasteboard, text) {
             return false;
         }
@@ -50,7 +59,7 @@ mod imp {
     }
 
     pub(super) fn read_html(text: &str) -> Option<String> {
-        let pasteboard = NSPasteboard::generalPasteboard();
+        let pasteboard = pasteboard()?;
         if !holds_text(&pasteboard, text) {
             return None;
         }
