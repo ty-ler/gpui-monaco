@@ -419,6 +419,8 @@ static REGISTRY: &[(&str, [V; 4])] = &[
     ("list.focusHighlightForeground", [R("list.highlightForeground"), If("list.activeSelectionBackground", &R("list.highlightForeground"), &H(0xbbe7ffff)), R("list.highlightForeground"), R("list.highlightForeground")]),
     ("list.invalidItemForeground", [H(0xb89500ff), H(0xb89500ff), H(0xb89500ff), H(0xb5200dff)]),
     ("list.deemphasizedForeground", [H(0x8c8c8cff), H(0x8e8e90ff), H(0xa7a8a9ff), H(0x666666ff)]),
+    ("tree.indentGuidesStroke", [H(0x585858ff), H(0xa9a9a9ff), H(0xa9a9a9ff), H(0xa5a5a5ff)]),
+    ("tree.inactiveIndentGuidesStroke", [T(&R("tree.indentGuidesStroke"), 0.4), T(&R("tree.indentGuidesStroke"), 0.4), T(&R("tree.indentGuidesStroke"), 0.4), T(&R("tree.indentGuidesStroke"), 0.4)]),
     ("editorActionList.background", [R("editorWidget.background"), R("editorWidget.background"), R("editorWidget.background"), R("editorWidget.background")]),
     ("editorActionList.foreground", [R("editorWidget.foreground"), R("editorWidget.foreground"), R("editorWidget.foreground"), R("editorWidget.foreground")]),
     ("editorActionList.focusForeground", [R("list.activeSelectionForeground"), R("list.activeSelectionForeground"), R("list.activeSelectionForeground"), R("list.activeSelectionForeground")]),

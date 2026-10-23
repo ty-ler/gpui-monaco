@@ -25,7 +25,7 @@ use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
 use crate::model::{TextModel, model_for_uri};
-use crate::peek::PEEK_KEY_CONTEXT;
+use crate::peek::{PEEK_KEY_CONTEXT, TREE_DEFAULT_INDENT, TWISTIE_SHIFT};
 use crate::providers::{
     CallHierarchyProvider, HierarchyItem, Location, TypeHierarchyProvider,
     call_hierarchy_providers, type_hierarchy_providers,
@@ -107,6 +107,8 @@ enum Provider {
 struct Node {
     item: HierarchyItem,
     depth: usize,
+    /// The item it was found under; `None` for the root.
+    parent: Option<usize>,
     /// Its children: `None` until asked for.
     children: Option<Vec<usize>>,
     expanded: bool,
@@ -154,6 +156,8 @@ pub(crate) struct HierarchyPeek {
     height_in_lines: f32,
     line_height: Pixels,
     scroll_top: Pixels,
+    /// The mouse is over the tree, which shows its indent guides.
+    tree_hovered: bool,
 }
 
 impl HierarchyPeek {
@@ -198,6 +202,7 @@ impl HierarchyPeek {
             focus_pending: true,
             height_in_lines: HEIGHT_IN_LINES,
             scroll_top: px(0.),
+            tree_hovered: false,
         }
     }
 
@@ -218,6 +223,7 @@ impl HierarchyPeek {
             preview_ranges: vec![item.selection_range.clone()],
             item,
             depth: 0,
+            parent: None,
             children: None,
             expanded: false,
             loading: None,
@@ -336,6 +342,7 @@ impl HierarchyPeek {
                     this.nodes.push(Node {
                         item,
                         depth,
+                        parent: Some(ix),
                         children: None,
                         expanded: false,
                         loading: None,
@@ -632,7 +639,26 @@ impl HierarchyPeek {
             Some(detail) => format!("{} {detail}", node.item.name),
             None => node.item.name.to_string(),
         };
-        AriaNode::new(Role::TreeItem, label)
+        // A guide per ancestor; the focused item's parent's, or its own
+        // while it's expanded, are active.
+        let active = self.focused.and_then(|f| {
+            let focused = &self.nodes[f];
+            let has_children = focused.children.as_ref().is_some_and(|c| !c.is_empty());
+            if focused.expanded && has_children {
+                Some(f)
+            } else {
+                focused.parent
+            }
+        });
+        let mut ancestors = Vec::new();
+        let mut parent = node.parent;
+        while let Some(p) = parent {
+            ancestors.push(Some(p) == active);
+            parent = self.nodes[p].parent;
+        }
+        ancestors.reverse();
+        let guides = crate::peek::tree_indent_guides(&ancestors, self.tree_hovered, colors);
+        let row = AriaNode::new(Role::TreeItem, label)
             .level(node.depth + 1)
             .selected(focused)
             .active_descendant(focused)
@@ -643,17 +669,25 @@ impl HierarchyPeek {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            .relative()
             // `.monaco-list.mouse-support .monaco-list-row { cursor: pointer }`.
             .cursor_pointer()
-            .pl(INDENT * node.depth as f32)
+            .pl(TREE_DEFAULT_INDENT + INDENT * node.depth as f32)
+            // `.call-hierarchy .tree { color: peekViewResult.fileForeground }`.
             .text_color(
                 selection_foreground
                     .filter(|_| focused)
-                    .unwrap_or(colors.peek_view_result_line_foreground),
+                    .unwrap_or(colors.peek_view_result_file_foreground),
             )
             .when(focused, |row| {
                 row.when_some(selection_background, |row, bg| row.bg(bg))
+                    // `list.focusOutline`, inside the row.
+                    .when_some(
+                        colors.list_focus_outline.filter(|_| list_focused),
+                        |row, c| row.border_1().border_color(c),
+                    )
             })
+            .children(guides)
             .child(
                 div()
                     .id(("hierarchy-twistie", ix))
@@ -661,7 +695,7 @@ impl HierarchyPeek {
                     .flex_none()
                     .flex()
                     .justify_end()
-                    .pr(px(6.))
+                    .pr(TWISTIE_SHIFT)
                     .children(twistie.map(codicon))
                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                         cx.stop_propagation();
@@ -670,10 +704,11 @@ impl HierarchyPeek {
                         this.set_expanded(ix, !expanded, cx);
                     })),
             )
+            // The `IconLabel` after the icon has `padding-left: 4px`.
             .child(
                 div()
                     .flex_none()
-                    .mr(px(6.))
+                    .mr(px(4.))
                     .text_color(icon_color)
                     .child(codicon(icon)),
             )
@@ -701,8 +736,8 @@ impl HierarchyPeek {
                 if event.click_count() == 2 {
                     this.open_focused(cx);
                 }
-            }))
-            .into_any_element()
+            }));
+        crate::peek::list_row_states(row, colors, focused, list_focused).into_any_element()
     }
 }
 
@@ -830,6 +865,10 @@ impl Render for HierarchyPeek {
             .overflow_hidden()
             .bg(colors.peek_view_result_background)
             .text_size(px(13.))
+            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                this.tree_hovered = *hovered;
+                cx.notify();
+            }))
             .on_scroll_wheel(cx.listener(|this, event, _, cx| this.scroll_wheel(event, cx)))
             .on_action(cx.listener(|this, _: &PeekSelectNext, _, cx| this.move_in_list(1, cx)))
             .on_action(cx.listener(|this, _: &PeekSelectPrevious, _, cx| this.move_in_list(-1, cx)))

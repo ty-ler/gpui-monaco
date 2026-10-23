@@ -53,9 +53,14 @@ const MAX_LINES: f32 = 35.;
 /// line-height: 23px }`).
 const ROW_HEIGHT: Pixels = px(23.);
 /// The workbench tree's indent per level and twistie (`.monaco-tl-twistie`:
-/// 16px wide with 6px right padding).
-const TREE_INDENT: Pixels = px(8.);
-const TWISTIE_WIDTH: Pixels = px(22.);
+/// 16px wide with 6px right padding), and the left padding of a top-level
+/// twistie (`TreeRenderer.DefaultIndent`).
+pub(crate) const TREE_INDENT: Pixels = px(8.);
+pub(crate) const TWISTIE_WIDTH: Pixels = px(22.);
+pub(crate) const TREE_DEFAULT_INDENT: Pixels = px(8.);
+/// `.monaco-tl-twistie { transform: translateX(3px) }`: the chevron sits
+/// 3px right of the twistie's 16px box.
+pub(crate) const TWISTIE_SHIFT: Pixels = px(3.);
 /// Monaco's list scrollbar (`ScrollableElement`'s default
 /// `verticalScrollbarSize`) and its minimum slider length.
 const LIST_SCROLLBAR_WIDTH: Pixels = px(10.);
@@ -1176,6 +1181,7 @@ impl PeekView {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            .relative()
             // `.monaco-list.mouse-support .monaco-list-row { cursor: pointer }`.
             .cursor_pointer()
             .when(focused, |row| {
@@ -1186,6 +1192,7 @@ impl PeekView {
                         |row, c| row.border_1().border_color(c),
                     )
             });
+        let base = list_row_states(base, colors, focused, list_focused);
         match row {
             Row::File(g) => {
                 let group = &self.groups[g];
@@ -1204,11 +1211,11 @@ impl PeekView {
                     // collapsed.
                     .child(
                         div()
-                            .w(TWISTIE_WIDTH)
+                            .w(TREE_DEFAULT_INDENT + TWISTIE_WIDTH)
                             .flex_none()
                             .flex()
                             .justify_end()
-                            .pr(px(6.))
+                            .pr(TWISTIE_SHIFT)
                             .child(codicon(if group.collapsed {
                                 Codicon::ChevronRight
                             } else {
@@ -1263,11 +1270,21 @@ impl PeekView {
                     .unwrap_or(colors.peek_view_result_line_foreground);
                 // Roots without a file row; otherwise one level in.
                 let indent = if single_file {
-                    TWISTIE_WIDTH
+                    TREE_DEFAULT_INDENT + TWISTIE_WIDTH
                 } else {
-                    TREE_INDENT + TWISTIE_WIDTH
+                    TREE_DEFAULT_INDENT + TREE_INDENT + TWISTIE_WIDTH
                 };
+                // The file's guide; it's active while one of its
+                // references or the expanded file has the focus.
+                let guide_active = match self.focused {
+                    Row::File(f) => f == g && !self.groups[g].collapsed,
+                    Row::Reference(f, _) => f == g,
+                };
+                let guides = (!single_file)
+                    .then(|| tree_indent_guides(&[guide_active], self.list_hovered, colors))
+                    .flatten();
                 base.pl(indent)
+                    .children(guides)
                     .pr(px(6.))
                     .text_color(foreground)
                     .child(before)
@@ -1295,6 +1312,84 @@ impl PeekView {
             }
         }
     }
+}
+
+/// Monaco's list row styles for the mouse and high contrast
+/// (`DefaultStyleController`): a row other than the selected one shows
+/// `list.hoverBackground` and `list.hoverForeground` under the mouse; in high
+/// contrast any hovered row gets a dashed `contrastActiveBorder` outline and
+/// the selected row a dotted one while the list isn't focused (dashed here,
+/// as GPUI has no dotted borders).
+pub(crate) fn list_row_states(
+    row: gpui::Stateful<gpui::Div>,
+    colors: &EditorColors,
+    selected: bool,
+    list_focused: bool,
+) -> gpui::Stateful<gpui::Div> {
+    let hover_background = colors.list_hover_background.filter(|_| !selected);
+    let hover_foreground = colors.list_hover_foreground.filter(|_| !selected);
+    let contrast = colors.contrast_active_border;
+    row.when_some(contrast.filter(|_| selected && !list_focused), |row, c| {
+        row.border_1().border_dashed().border_color(c)
+    })
+    .when(
+        hover_background.is_some() || hover_foreground.is_some() || contrast.is_some(),
+        |row| {
+            row.hover(move |style| {
+                let style = match hover_background {
+                    Some(bg) => style.bg(bg),
+                    None => style,
+                };
+                let style = match hover_foreground {
+                    Some(fg) => style.text_color(fg),
+                    None => style,
+                };
+                match contrast {
+                    Some(c) => style.border_1().border_dashed().border_color(c),
+                    None => style,
+                }
+            })
+        },
+    )
+}
+
+/// The workbench tree's indent guides (`renderIndentGuides: onHover`): a 1px
+/// line per ancestor, 8px apart from 16px in (`.monaco-tl-indent`). The
+/// guides of the focused item's parent, or of the item itself while it's
+/// expanded, are drawn in `tree.indentGuidesStroke`; the rest only while
+/// the tree is hovered, in `tree.inactiveIndentGuidesStroke`. `active` has
+/// one entry per ancestor, the top-level one first.
+pub(crate) fn tree_indent_guides(
+    active: &[bool],
+    tree_hovered: bool,
+    colors: &EditorColors,
+) -> Option<gpui::Div> {
+    let guides: Vec<_> = active
+        .iter()
+        .map(|&active| {
+            let color = if active {
+                colors.tree_indent_guides_stroke
+            } else {
+                colors
+                    .tree_inactive_indent_guides_stroke
+                    .filter(|_| tree_hovered)
+            };
+            div()
+                .w(TREE_INDENT)
+                .h_full()
+                .flex_none()
+                .when_some(color, |guide, c| guide.border_l_1().border_color(c))
+        })
+        .collect();
+    (!guides.is_empty()).then(|| {
+        div()
+            .absolute()
+            .top_0()
+            .left(px(16.))
+            .h_full()
+            .flex()
+            .children(guides)
+    })
 }
 
 impl Focusable for PeekView {

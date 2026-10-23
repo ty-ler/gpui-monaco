@@ -751,6 +751,12 @@ editor_colors! { r;
     list_focus_foreground: Option<Hsla> = r.get("list.focusForeground");
     /// Its outline (`list.focusOutline`).
     list_focus_outline: Option<Hsla> = r.visible("list.focusOutline");
+    /// The tree's indent guides under the focused item's parent
+    /// (`tree.indentGuidesStroke`).
+    tree_indent_guides_stroke: Option<Hsla> = r.visible("tree.indentGuidesStroke");
+    /// The other indent guides, shown while the tree is hovered
+    /// (`tree.inactiveIndentGuidesStroke`).
+    tree_inactive_indent_guides_stroke: Option<Hsla> = r.visible("tree.inactiveIndentGuidesStroke");
     /// Matched characters in lists (`list.highlightForeground`).
     list_highlight_foreground: Hsla = r.color("list.highlightForeground");
     /// Matched characters on the focused row (`list.focusHighlightForeground`).
