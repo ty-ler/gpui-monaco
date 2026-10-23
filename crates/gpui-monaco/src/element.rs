@@ -1004,7 +1004,22 @@ impl ChunkedLine {
             .partition_point(|(_, chunk_x, _)| *chunk_x <= x)
             .saturating_sub(1);
         let (start, chunk_x, shaped) = &self.chunks[ix];
-        start + shaped.closest_index_for_x(x - *chunk_x)
+        let x = x - *chunk_x;
+        let mut index = shaped.closest_index_for_x(x);
+        // Past the last glyph's left edge GPUI gives the chunk's end, so a
+        // click on the left half of a chunk's last character takes its start
+        // instead, as for any other character.
+        if index == shaped.len
+            && let Some(last) = shaped
+                .runs
+                .iter()
+                .flat_map(|run| &run.glyphs)
+                .max_by(|a, b| f32::from(a.position.x).total_cmp(&f32::from(b.position.x)))
+            && x < (last.position.x + shaped.width) / 2.
+        {
+            index = last.index;
+        }
+        start + index
     }
 
     /// Paints just the glyphs of display bytes `range` in `color`, where
@@ -1632,7 +1647,7 @@ pub(crate) fn layout_segment<'a>(
             text_box
         })
     };
-    let boxes: Vec<ShapeBox> = injected
+    let mut boxes: Vec<ShapeBox> = injected
         .iter()
         .filter_map(|shown| {
             let (range, (_, _, text, _), _) = shown;
@@ -1650,6 +1665,44 @@ pub(crate) fn layout_segment<'a>(
             })
         })
         .collect();
+    // Decorated text in another font size (Monaco `fontSize`) is shaped on
+    // its own, and centered on the line, as injected text in its own size
+    // is. The last decoration's font wins, as for the family.
+    if fonts.iter().any(|(_, font)| font.size.is_some()) {
+        let mut sized: Vec<ShapeBox> = Vec::new();
+        for pair in bounds.windows(2) {
+            let (start, end) = (pair[0], pair[1]);
+            if start >= end
+                || end > display_len
+                || injected
+                    .iter()
+                    .any(|(range, _, _)| range.start <= start && end <= range.end)
+            {
+                continue;
+            }
+            let Some(size) = fonts
+                .iter()
+                .rev()
+                .find(|(range, _)| range.start <= start && end <= range.end)
+                .and_then(|(_, font)| font.size)
+                .filter(|size| *size != metrics.font_size)
+            else {
+                continue;
+            };
+            match sized.last_mut() {
+                Some(last) if last.range.end == start && last.size == Some(size) => {
+                    last.range.end = end
+                }
+                _ => sized.push(ShapeBox {
+                    range: start..end,
+                    size: Some(size),
+                    lead: px(0.),
+                    trail: px(0.),
+                }),
+            }
+        }
+        boxes.extend(sized);
+    }
     let shaped = ChunkedLine::shape(
         display,
         metrics.font_size,
@@ -1983,6 +2036,7 @@ pub(crate) fn row_segment(view_lines: &ViewLines, view_line: u32) -> RowSegment 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(crate) struct DecorationFont {
     pub family: Option<SharedString>,
+    pub size: Option<Pixels>,
     pub weight: Option<FontWeight>,
     pub style: Option<FontStyle>,
 }
@@ -2042,7 +2096,7 @@ pub(crate) fn decoration_styles_and_injections(
             };
             from..to
         };
-        // Monaco's `fontFamily`, `fontWeight` and `fontStyle`.
+        // Monaco's `fontFamily`, `fontSize`, `fontWeight` and `fontStyle`.
         if decoration_options.has_font() {
             let range = row_range();
             if !range.is_empty() {
@@ -2050,6 +2104,7 @@ pub(crate) fn decoration_styles_and_injections(
                     range,
                     DecorationFont {
                         family: decoration_options.font_family.clone(),
+                        size: decoration_options.font_size,
                         weight: decoration_options.font_weight,
                         style: decoration_options.font_style,
                     },
@@ -9194,6 +9249,7 @@ mod decoration_option_tests {
                 1..4,
                 DecorationFont {
                     family: Some("Courier".into()),
+                    size: None,
                     weight: Some(FontWeight::BOLD),
                     style: Some(FontStyle::Italic),
                 }

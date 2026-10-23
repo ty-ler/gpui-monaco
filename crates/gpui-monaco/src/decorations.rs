@@ -480,6 +480,11 @@ pub struct DecorationOptions {
     /// The decorated text's font family (Monaco `fontFamily`); `None` keeps
     /// the editor's. Line wrapping still measures the editor's font.
     pub font_family: Option<SharedString>,
+    /// The decorated text's font size (Monaco `fontSize`); `None` keeps the
+    /// editor's. The text is centered on the line, which keeps its height
+    /// (use [`line_height`](Self::line_height) for a taller one), and line
+    /// wrapping still measures the editor's font.
+    pub font_size: Option<Pixels>,
     /// The decorated text's weight (Monaco `fontWeight`).
     pub font_weight: Option<FontWeight>,
     /// The decorated text's style, e.g. italic (Monaco `fontStyle`).
@@ -517,7 +522,10 @@ impl DecorationOptions {
 
     /// Whether it changes the decorated text's font.
     pub(crate) fn has_font(&self) -> bool {
-        self.font_family.is_some() || self.font_weight.is_some() || self.font_style.is_some()
+        self.font_family.is_some()
+            || self.font_size.is_some()
+            || self.font_weight.is_some()
+            || self.font_style.is_some()
     }
 }
 
