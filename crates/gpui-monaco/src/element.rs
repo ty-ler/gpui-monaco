@@ -276,6 +276,9 @@ pub(crate) struct TextMetrics {
     /// full-width characters are centered in (two spaces wide), with a
     /// monospace font.
     pub full_width_cell: Option<Pixels>,
+    /// Monaco `letterSpacing`: room after each character of the text,
+    /// included in the widths above.
+    pub letter_spacing: Pixels,
 }
 
 impl TextMetrics {
@@ -292,16 +295,20 @@ impl TextMetrics {
             ..font(options.font_family.clone())
         };
         let font_size = options.font_size;
+        let letter_spacing = options.letter_spacing;
         // Monaco measures ligatures for `isMonospace` when they're on.
         let ligatures_off =
             options.font_ligatures.font_feature_settings() == crate::options::FontLigatures::OFF;
         let measurements = match cached {
-            Some(measured) if measured.is_for(&font, font_size, ligatures_off) => measured.clone(),
+            Some(measured) if measured.is_for(&font, font_size, ligatures_off, letter_spacing) => {
+                measured.clone()
+            }
             _ => {
                 let measured = std::sync::Arc::new(FontMeasurements::measure(
                     &font,
                     font_size,
                     ligatures_off,
+                    letter_spacing,
                     window,
                 ));
                 *cached = Some(measured.clone());
@@ -324,20 +331,23 @@ impl TextMetrics {
             pixel_ratio: window.scale_factor(),
             render_control_characters: options.render_control_characters,
             full_width_cell: two_cells.then_some(measurements.space_width * 2.),
+            letter_spacing,
             measurements,
         }
     }
 }
 
 /// What Monaco reads from the editor font (`FontMeasurementsImpl.
-/// _actualReadFontInfo`), each character measured alone. The editor keeps
-/// the last one and measures again when the font, its size or its
-/// features change.
+/// _actualReadFontInfo`), each character measured alone, with the letter
+/// spacing after it (Monaco measures in an element with the editor's
+/// `letter-spacing`). The editor keeps the last one and measures again when
+/// the font, its size, its features or the letter spacing change.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FontMeasurements {
     font: Font,
     font_size: Pixels,
     ligatures_off: bool,
+    letter_spacing: Pixels,
     /// The width of `n` (Monaco `typicalHalfwidthCharacterWidth`).
     pub typical_halfwidth_character_width: Pixels,
     /// The width of `ｍ` (Monaco `typicalFullwidthCharacterWidth`).
@@ -361,11 +371,26 @@ pub(crate) struct FontMeasurements {
 }
 
 impl FontMeasurements {
-    fn is_for(&self, font: &Font, font_size: Pixels, ligatures_off: bool) -> bool {
-        self.font == *font && self.font_size == font_size && self.ligatures_off == ligatures_off
+    fn is_for(
+        &self,
+        font: &Font,
+        font_size: Pixels,
+        ligatures_off: bool,
+        letter_spacing: Pixels,
+    ) -> bool {
+        self.font == *font
+            && self.font_size == font_size
+            && self.ligatures_off == ligatures_off
+            && self.letter_spacing == letter_spacing
     }
 
-    fn measure(font: &Font, font_size: Pixels, ligatures_off: bool, window: &mut Window) -> Self {
+    fn measure(
+        font: &Font,
+        font_size: Pixels,
+        ligatures_off: bool,
+        letter_spacing: Pixels,
+        window: &mut Window,
+    ) -> Self {
         let italic = Font {
             style: FontStyle::Italic,
             ..font.clone()
@@ -384,6 +409,7 @@ impl FontMeasurements {
                     None,
                 )
                 .width
+                + letter_spacing * text.chars().count() as f32
         };
         let width = |ch: char, font: &Font| width_of(ch.encode_utf8(&mut [0; 4]), font);
         let typical_halfwidth_character_width = width('n', font);
@@ -420,6 +446,7 @@ impl FontMeasurements {
             font: font.clone(),
             font_size,
             ligatures_off,
+            letter_spacing,
             typical_halfwidth_character_width,
             typical_fullwidth_character_width: width('\u{ff4d}', font),
             space_width,
@@ -508,6 +535,7 @@ pub(crate) struct CharWidths {
     font: Font,
     font_id: gpui::FontId,
     font_size: Pixels,
+    letter_spacing: Pixels,
     column_width: Pixels,
     ascii: [f32; 128],
     max_ascii: f32,
@@ -526,6 +554,7 @@ impl CharWidths {
             font: metrics.font.clone(),
             font_id,
             font_size: metrics.font_size,
+            letter_spacing: metrics.letter_spacing,
             column_width: metrics.em_width.max(px(1.)),
             ascii: [0.; 128],
             max_ascii: 0.,
@@ -553,6 +582,7 @@ impl CharWidths {
             Some(widths)
                 if widths.font == metrics.font
                     && widths.font_size == metrics.font_size
+                    && widths.letter_spacing == metrics.letter_spacing
                     && widths.column_width == metrics.em_width.max(px(1.))
                     && widths.full_width_columns.is_some() == metrics.full_width_cell.is_some() =>
             {
@@ -566,8 +596,8 @@ impl CharWidths {
         let advance = self
             .text_system
             .advance(self.font_id, self.font_size, ch)
-            .map_or(self.column_width, |size| size.width);
-        advance / self.column_width
+            .map_or(self.column_width - self.letter_spacing, |size| size.width);
+        (advance + self.letter_spacing) / self.column_width
     }
 }
 
@@ -814,11 +844,13 @@ struct ShapeBox {
 
 impl ChunkedLine {
     /// Shapes `display` in `font_size`, except the `boxes`, each shaped on
-    /// its own in its size, with its room before and after. A box's
+    /// its own in its size, with its room before and after, and
+    /// `letter_spacing` after each character. A box's
     /// [`Self::x_for_index`] range includes that room.
     fn shape(
         display: String,
         font_size: Pixels,
+        letter_spacing: Pixels,
         full_width_cell: Option<Pixels>,
         boxes: &[ShapeBox],
         runs: &[TextRun],
@@ -884,6 +916,7 @@ impl ChunkedLine {
                 &chunk_runs,
                 None,
             );
+            space_letters(&mut shaped, letter_spacing);
             if let Some(cell) = full_width_cell.filter(|_| size == font_size) {
                 for (range, left) in fit_full_width_to_cells(&mut shaped, cell) {
                     cells.push((start + range.start..start + range.end, x + left));
@@ -1042,6 +1075,49 @@ impl ChunkedLine {
 /// Lines with right-to-left glyphs, and characters drawn with several
 /// glyphs, are left alone, as Monaco leaves RTL parts and multi code point
 /// characters.
+/// CSS `letter-spacing`: moves `shaped`'s glyphs apart by `spacing` after
+/// each character, and after the last, as browsers do. A character is a
+/// cluster of glyphs from one byte offset, so a ligature or a base with its
+/// combining marks gets it once. Nothing changes when `spacing` is 0.
+pub(crate) fn space_letters(shaped: &mut ShapedLine, spacing: Pixels) {
+    if spacing == px(0.) || shaped.runs.iter().all(|run| run.glyphs.is_empty()) {
+        return;
+    }
+    // The glyphs in visual order: (run, glyph, x, byte index).
+    let mut glyphs: Vec<(usize, usize, Pixels, usize)> = shaped
+        .runs
+        .iter()
+        .enumerate()
+        .flat_map(|(r, run)| {
+            run.glyphs
+                .iter()
+                .enumerate()
+                .map(move |(g, glyph)| (r, g, glyph.position.x, glyph.index))
+        })
+        .collect();
+    glyphs.sort_by(|a, b| f32::from(a.2).total_cmp(&f32::from(b.2)));
+    let mut runs = shaped.runs.clone();
+    let mut shift = px(0.);
+    let mut previous = None;
+    for (r, g, x, index) in glyphs {
+        if previous.is_some_and(|previous| previous != index) {
+            shift += spacing;
+        }
+        previous = Some(index);
+        runs[r].glyphs[g].position.x = x + shift;
+    }
+    let layout = gpui::LineLayout {
+        font_size: shaped.font_size,
+        width: shaped.width + shift + spacing,
+        ascent: shaped.ascent,
+        descent: shaped.descent,
+        runs,
+        len: shaped.len,
+    };
+    // `ShapedLine` derefs to its `Arc<LineLayout>`.
+    **shaped = std::sync::Arc::new(layout);
+}
+
 fn fit_full_width_to_cells(shaped: &mut ShapedLine, cell: Pixels) -> Vec<(Range<usize>, Pixels)> {
     use crate::cursor::strings::is_full_width_character;
     let text = shaped.text.clone();
@@ -1577,6 +1653,7 @@ pub(crate) fn layout_segment<'a>(
     let shaped = ChunkedLine::shape(
         display,
         metrics.font_size,
+        metrics.letter_spacing,
         metrics.full_width_cell,
         &boxes,
         &runs,
@@ -5158,12 +5235,14 @@ fn prepaint_editor(
                     _ => None,
                 };
                 let number = label.map(|label| {
-                    window.text_system().shape_line(
+                    let mut shaped = window.text_system().shape_line(
                         label.clone().into(),
                         metrics.font_size,
                         &[run(label.len(), &metrics.number_font, colors.line_number)],
                         None,
-                    )
+                    );
+                    space_letters(&mut shaped, metrics.letter_spacing);
+                    shaped
                 });
                 // Monaco `_renderFoldingIconForLine`: with folding on and
                 // `showFoldingControls` not `never`, on a folding range's
@@ -6401,12 +6480,14 @@ fn prepaint_editor(
             } else {
                 color
             };
-            let shaped = window.text_system().shape_line(
+            let mut shaped = window.text_system().shape_line(
                 label.clone().into(),
                 metrics.font_size,
                 &[run(label.len(), &metrics.number_font, color)],
                 None,
             );
+            // Monaco's margin has the editor's letter spacing too.
+            space_letters(&mut shaped, metrics.letter_spacing);
             // Right-aligned, but for the relative mode's current line
             // (`.relative-current-line-number`).
             let x = if options.line_numbers == LineNumbers::Relative && is_active {
@@ -9892,6 +9973,7 @@ mod gutter_font_tests {
                 font: font("Helvetica"),
                 font_size: px(14.),
                 ligatures_off: true,
+                letter_spacing: px(0.),
                 typical_halfwidth_character_width: px(8.),
                 typical_fullwidth_character_width: px(14.),
                 space_width: px(4.),
@@ -9904,6 +9986,7 @@ mod gutter_font_tests {
             pixel_ratio: 2.,
             render_control_characters: false,
             full_width_cell: None,
+            letter_spacing: px(0.),
         };
         assert_eq!(guide_left(&metrics, 1), px(0.));
         // The level-2 guide of 4-space indents, on the indented code.

@@ -16,6 +16,7 @@ editor.update(cx, |editor, cx| {
 |---|---|---|
 | `font_family`, `font_size`, `line_height` | `fontFamily`, `fontSize`, `lineHeight` | `line_height: None` derives it from the font size, as Monaco does; see [Validation](#validation) |
 | `font_weight`, `font_ligatures` | `fontWeight`, `fontLigatures` | weights 1–1000; ligatures are `Off` (default), `On`, or CSS `font-feature-settings`, where `""` and `"false"` mean `Off` and `"true"` `On` |
+| `letter_spacing` | `letterSpacing` | room after each character, -5–20px (default 0); the measured font widths (`font_info`), columns and wrapping include it |
 | `mouse_wheel_zoom` | `mouseWheelZoom` | Cmd+wheel (Ctrl elsewhere) and trackpad pinch zoom every editor's font; see `set_editor_zoom_level` |
 | `line_numbers` | `lineNumbers` | `On`, `Off`, `Relative`, `Interval` (every 10th line, the current line, and the line whose number is the view's line count: the last line, unless lines are folded or wrapped, as in Monaco), or `LineNumbers::custom(\|n\| …)` for Monaco's function: a label per 1-based line, empty for none |
 | `select_on_line_numbers` | `selectOnLineNumbers` | clicking a line number selects the line (on); other gutter clicks never select |
@@ -149,10 +150,11 @@ Like Monaco's `validate` methods, the editor clamps options to their limits and 
 
 - `font_size` is 6–100px, and 0 means the platform default (`resolved_font_size`).
 - `font_ligatures`: `Settings("")` and `Settings("false")` are `Off`, `Settings("true")` is `On`.
+- `letter_spacing` is -5–20px.
 - `line_height` is clamped to 0–150. `None` or 0 computes it from the font size (1.5× on macOS, 1.35× elsewhere), a value below 8 multiplies the font size (`Some(px(1.5))` is 1.5 lines), and the result is rounded and at least 8px (`resolved_line_height`). The font zoom then scales it without rounding again, as Monaco does: 18px lines are 19.8px at zoom level 1 (`computed_options().line_height`).
 - `fast_scroll_sensitivity` of 0 or less is 5; `mouse_wheel_scroll_sensitivity` of 0 is 1.
 - `line_numbers_min_chars` is 1–300; `line_decorations_width`, `padding`, `reveal_horizontal_right_padding` and the scrollbar sizes 0–1000px; `overview_ruler_lanes` 0–3; `word_wrap_column`, `multi_cursor_limit` (to 100 000) and `accessibility_page_size` at least 1; `folding_maximum_regions` 10–65 000; `color_decorators_limit` 1–1 000 000; `code_lens_font_size` and `inlay_hints.font_size` 0–100; `suggest.font_size` and `suggest.line_height` 0–1000; ruler columns at most 10 000.
-- `minimap.scale` is 1, 2 or 3; `minimap.max_column` 1–10 000; `minimap.section_header_font_size` 4–32; `sticky_scroll.max_line_count` 1–20. A `minimap.mark_section_header_regex` that doesn't compile keeps the default.
+- `minimap.scale` is 1, 2 or 3; `minimap.max_column` 1–10 000; `minimap.section_header_font_size` 4–32; `minimap.section_header_letter_spacing` 0–5; `sticky_scroll.max_line_count` 1–20. A `minimap.mark_section_header_regex` that doesn't compile keeps the default.
 - `occurrences_highlight_delay` is at most 2s, `hover.delay` 10s, `hover.hiding_delay` 10 minutes and `inline_suggest.min_show_delay` 10s.
 
 `ModelOptions::validated` (applied by `TextModel`) keeps `tab_size` and `indent_size` at least 1.
@@ -185,4 +187,4 @@ Some options are shaped differently from Monaco's:
 - `gotoLocation.multiple` (deprecated) is `GotoLocationOptions::with_multiple`.
 - Sizes are `Pixels` and delays `Duration`s.
 
-These Monaco options have no field because they'd change nothing here: `renameOnType` (a deprecated alias of `linked_editing`), `inDiffEditor` (an internal context key), `disableMonospaceOptimizations`, `renderRichScreenReaderContent`, `experimentalWhitespaceRendering`, `experimentalGpuAcceleration` and `allowOverflow` (DOM rendering choices). `letterSpacing` and `fontVariations` wait on GPUI text support (#232, #233).
+These Monaco options have no field because they'd change nothing here: `renameOnType` (a deprecated alias of `linked_editing`), `inDiffEditor` (an internal context key), `disableMonospaceOptimizations`, `renderRichScreenReaderContent`, `experimentalWhitespaceRendering`, `experimentalGpuAcceleration` and `allowOverflow` (DOM rendering choices). `fontVariations` waits on GPUI text support (#233).
