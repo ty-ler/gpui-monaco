@@ -643,6 +643,8 @@ impl HierarchyPeek {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            // `.monaco-list.mouse-support .monaco-list-row { cursor: pointer }`.
+            .cursor_pointer()
             .pl(INDENT * node.depth as f32)
             .text_color(
                 selection_foreground

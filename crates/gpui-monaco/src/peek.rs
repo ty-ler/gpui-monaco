@@ -1176,6 +1176,8 @@ impl PeekView {
             .items_center()
             .overflow_hidden()
             .whitespace_nowrap()
+            // `.monaco-list.mouse-support .monaco-list-row { cursor: pointer }`.
+            .cursor_pointer()
             .when(focused, |row| {
                 row.when_some(selection_background, |row, bg| row.bg(bg))
                     // `list.focusOutline`, inside the row.
