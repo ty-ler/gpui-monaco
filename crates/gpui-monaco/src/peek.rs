@@ -61,6 +61,21 @@ pub(crate) const TREE_DEFAULT_INDENT: Pixels = px(8.);
 /// `.monaco-tl-twistie { transform: translateX(3px) }`: the chevron sits
 /// 3px right of the twistie's 16px box.
 pub(crate) const TWISTIE_SHIFT: Pixels = px(3.);
+/// `margin-left: 0.5em` on text in `font-size: 0.9em` of 13px: an
+/// `IconLabel`'s description and the peek title's folder.
+pub(crate) const DESCRIPTION_GAP: Pixels = px(5.85);
+
+/// The opacity of an `IconLabel`'s description: `.7`, `.95` in the light
+/// theme (`.vs`, not high contrast light), and `1` on a selected row.
+pub(crate) fn label_description_opacity(light: bool, selected: bool) -> f32 {
+    if selected {
+        1.
+    } else if light {
+        0.95
+    } else {
+        0.7
+    }
+}
 /// Monaco's list scrollbar (`ScrollableElement`'s default
 /// `verticalScrollbarSize`) and its minimum slider length.
 const LIST_SCROLLBAR_WIDTH: Pixels = px(10.);
@@ -201,6 +216,8 @@ pub(crate) struct PeekView {
     line_height: Pixels,
     colors: EditorColors,
     high_contrast: bool,
+    /// Monaco's `vs` base: a light theme that isn't high contrast.
+    light: bool,
     focus: FocusHandle,
     focus_pending: bool,
     /// Monaco `peekWidgetDefaultFocus: editor`: focus the preview instead
@@ -221,6 +238,9 @@ pub(crate) struct PeekView {
     sash_start: Option<(Pixels, f32)>,
     /// The sash showing `sash.hoverBorder` for the mouse resting on it.
     sash_hover: crate::sash::SashHover,
+    /// The sash under a pressed mouse, which shows `sash.hoverBorder` at
+    /// once (Monaco's `active` class).
+    sash_active: Option<&'static str>,
     /// Monaco `TypeNavigationController`: the word typed so far and when
     /// its last character came.
     typed: Option<(String, Instant)>,
@@ -533,6 +553,7 @@ impl PeekView {
             no_preview: cx.new(|_| TextModel::new_internal("no preview available")),
             colors: theme.colors.clone(),
             high_contrast: theme.high_contrast,
+            light: theme.kind == crate::theme::ThemeKind::Light && !theme.high_contrast,
             preview_theme: Arc::new(preview_theme),
             // Until the opening editor sets its zoomed height.
             line_height: preview_options.resolved_line_height(),
@@ -549,6 +570,7 @@ impl PeekView {
             slider_grab: px(0.),
             sash_start: None,
             sash_hover: Default::default(),
+            sash_active: None,
             typed: None,
             zone_top: Default::default(),
             rendered: 0..0,
@@ -1223,15 +1245,15 @@ impl PeekView {
                             })),
                     )
                     // `IconLabel`: the name, then the folder as its
-                    // description (`.9em`, `.7` opacity, `.5em` apart).
+                    // description (`.9em`, `.5em` apart).
                     .child(div().flex_none().child(name))
                     .child(
                         div()
                             .flex_1()
                             .min_w_0()
-                            .ml(px(6.5))
+                            .ml(DESCRIPTION_GAP)
                             .text_size(px(11.7))
-                            .opacity(0.7)
+                            .opacity(label_description_opacity(self.light, focused))
                             .text_ellipsis()
                             .child(dir),
                     )
@@ -1458,10 +1480,8 @@ impl Render for PeekView {
         // Monaco `Sash`: `sash.hoverBorder` once the mouse has rested on
         // the sash for its hover delay.
         let sash_hover = colors.sash_hover_border;
-        let shown = [
-            self.sash_hover.shows("peek-sash-split"),
-            self.sash_hover.shows("peek-sash-height"),
-        ];
+        let shown = ["peek-sash-split", "peek-sash-height"]
+            .map(|id| self.sash_hover.shows(id) || self.sash_active == Some(id));
         let sash = |id: &'static str, drag: PeekDrag, cx: &mut Context<Self>| {
             let shown = shown[usize::from(id == "peek-sash-height")];
             div()
@@ -1477,6 +1497,27 @@ impl Render for PeekView {
                         cx,
                     );
                 }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.sash_active = Some(id);
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                        this.sash_active = None;
+                        cx.notify();
+                    }),
+                )
+                .on_mouse_up_out(
+                    MouseButton::Left,
+                    cx.listener(|this, _: &gpui::MouseUpEvent, _, cx| {
+                        this.sash_active = None;
+                        cx.notify();
+                    }),
+                )
                 .on_drag(drag, |_, _, _, cx| cx.new(|_| gpui::Empty))
         };
         // Monaco `peekViewWidget.css`: the action bar's close action.
@@ -1518,7 +1559,7 @@ impl Render for PeekView {
             .when(!description.is_empty(), |title| {
                 title.child(
                     div()
-                        .ml(px(6.5))
+                        .ml(DESCRIPTION_GAP)
                         .text_size(px(11.7))
                         .flex_shrink_1()
                         .min_w_0()

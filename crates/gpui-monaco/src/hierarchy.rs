@@ -25,7 +25,10 @@ use crate::codicons::{Codicon, icon as codicon};
 use crate::decorations::DecorationOptions;
 use crate::editor::CodeEditor;
 use crate::model::{TextModel, model_for_uri};
-use crate::peek::{PEEK_KEY_CONTEXT, TREE_DEFAULT_INDENT, TWISTIE_SHIFT};
+use crate::peek::{
+    DESCRIPTION_GAP, PEEK_KEY_CONTEXT, TREE_DEFAULT_INDENT, TWISTIE_SHIFT,
+    label_description_opacity,
+};
 use crate::providers::{
     CallHierarchyProvider, HierarchyItem, Location, TypeHierarchyProvider,
     call_hierarchy_providers, type_hierarchy_providers,
@@ -143,6 +146,8 @@ pub(crate) struct HierarchyPeek {
     nodes: Vec<Node>,
     roots: Vec<usize>,
     focused: Option<usize>,
+    /// Monaco's `vs` base: a light theme that isn't high contrast.
+    light: bool,
     /// Still preparing the root.
     loading: bool,
     preview: Option<Entity<CodeEditor>>,
@@ -172,6 +177,14 @@ impl HierarchyPeek {
         let mut preview_theme = (*theme).clone();
         preview_theme.colors.background = theme.colors.peek_view_editor_background;
         preview_theme.colors.gutter_background = theme.colors.peek_view_editor_gutter_background;
+        // `.sticky-widget.peek`, as in any embedded peek editor.
+        preview_theme.colors.sticky_scroll_background =
+            Some(theme.colors.peek_view_editor_sticky_scroll_background);
+        preview_theme.colors.sticky_scroll_gutter_background = Some(
+            theme
+                .colors
+                .peek_view_editor_sticky_scroll_gutter_background,
+        );
         let mut preview_options = options.clone();
         preview_options.scroll_beyond_last_line = false;
         preview_options.minimap.enabled = false;
@@ -198,6 +211,7 @@ impl HierarchyPeek {
             line_height: preview_options.resolved_line_height(),
             options: preview_options,
             colors: theme.colors.clone(),
+            light: theme.kind == crate::theme::ThemeKind::Light && !theme.high_contrast,
             focus: cx.focus_handle(),
             focus_pending: true,
             height_in_lines: HEIGHT_IN_LINES,
@@ -709,7 +723,9 @@ impl HierarchyPeek {
                 div()
                     .flex_none()
                     .mr(px(4.))
-                    .text_color(icon_color)
+                    // `.peekview-widget .monaco-list-row.focused .codicon {
+                    // color: inherit }`.
+                    .when(!focused, |icon| icon.text_color(icon_color))
                     .child(codicon(icon)),
             )
             .child(
@@ -720,12 +736,14 @@ impl HierarchyPeek {
             )
             .when_some(node.item.detail.clone(), |row, detail| {
                 row.child(
+                    // `strikethrough` crosses out the description too.
                     div()
                         .flex_1()
                         .min_w_0()
-                        .ml(px(6.5))
+                        .ml(DESCRIPTION_GAP)
                         .text_size(px(11.7))
-                        .opacity(0.7)
+                        .opacity(label_description_opacity(self.light, focused))
+                        .when(node.item.deprecated, |detail| detail.line_through())
                         .text_ellipsis()
                         .child(detail),
                 )
@@ -827,7 +845,7 @@ impl Render for HierarchyPeek {
                     .when(!description.is_empty(), |title| {
                         title.child(
                             div()
-                                .ml(px(6.5))
+                                .ml(DESCRIPTION_GAP)
                                 .text_size(px(11.7))
                                 .min_w_0()
                                 .text_ellipsis()
