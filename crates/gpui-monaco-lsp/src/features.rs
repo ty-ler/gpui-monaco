@@ -405,6 +405,16 @@ impl LspFeatures {
                 self.clone(),
             ));
         }
+        if matches!(
+            capabilities.inline_value_provider,
+            Some(lsp::OneOf::Left(true) | lsp::OneOf::Right(_))
+        ) {
+            registrations.push(gpui_monaco::providers::register_inline_values_provider(
+                cx,
+                selector.clone(),
+                self.clone(),
+            ));
+        }
         if capabilities.signature_help_provider.is_some() {
             registrations.push(register_signature_help_provider(cx, selector, self.clone()));
         }

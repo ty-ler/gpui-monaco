@@ -96,8 +96,8 @@ pub enum LspClientEvent {
         respond: MessageResponder,
     },
     /// `workspace/inlineValue/refresh`: the server's inline values
-    /// changed, so a host showing them asks for them again
-    /// ([`LspClient::inline_values`]).
+    /// changed. Editors showing inline values ask again on their own; a
+    /// host showing them itself asks again ([`LspClient::inline_values`]).
     InlineValuesRefresh,
     /// The server registered or unregistered file watchers: watch what
     /// [`LspClient::file_watchers`] lists now.
@@ -1004,6 +1004,7 @@ impl LspClient {
                 Ok(Value::Null)
             }
             lsp_types::request::InlineValueRefreshRequest::METHOD => {
+                gpui_monaco::providers::refresh_inline_values(cx);
                 cx.emit(LspClientEvent::InlineValuesRefresh);
                 Ok(Value::Null)
             }

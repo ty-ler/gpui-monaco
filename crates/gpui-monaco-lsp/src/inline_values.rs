@@ -2,73 +2,26 @@
 //! `InlineValueFeature` sends it for VS Code's `InlineValuesProvider`:
 //! debuggers show the values while execution is paused.
 //!
-//! gpui-monaco has no inline values provider or rendering (Monaco declares
-//! the provider, but VS Code's debugger draws the values), so this is an API
-//! on [`LspClient`] for hosts that embed a debugger.
-//! `workspace/inlineValue/refresh` is
+//! The bridge registers an inline values provider, so an editor showing
+//! inline values (`CodeEditor::show_inline_values`) asks the server; hosts
+//! can also ask with [`LspClient::inline_values`].
+//! `workspace/inlineValue/refresh` asks the editors again
+//! (`refresh_inline_values`) and emits
 //! [`LspClientEvent::InlineValuesRefresh`](crate::LspClientEvent::InlineValuesRefresh).
 
 use std::ops::Range;
 
 use anyhow::Result;
-use gpui::{Context, Entity, SharedString, Task};
+use gpui::{App, Context, Entity, Task};
 use gpui_monaco::TextModel;
 use gpui_monaco::text::PointUtf16;
 use lsp_types as lsp;
 
 use crate::LspClient;
 use crate::convert;
+use crate::features::LspFeatures;
 
-/// Where the debugger stopped (VS Code `InlineValueContext`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct InlineValueContext {
-    /// The stack frame (the debug adapter protocol's `frameId`) the values
-    /// are for.
-    pub frame_id: i32,
-    /// The range where execution stopped, usually the current line.
-    pub stopped_location: Range<PointUtf16>,
-}
-
-/// A value to show, or how to find it (VS Code `InlineValue`).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum InlineValue {
-    /// Text to show as is (`InlineValueText`).
-    Text {
-        /// The range it's for.
-        range: Range<PointUtf16>,
-        /// The text.
-        text: SharedString,
-    },
-    /// A variable whose value the debugger looks up
-    /// (`InlineValueVariableLookup`).
-    VariableLookup {
-        /// The range it's for.
-        range: Range<PointUtf16>,
-        /// The variable's name; the text in `range` if `None`.
-        variable_name: Option<SharedString>,
-        /// Whether the name is looked up case sensitively.
-        case_sensitive_lookup: bool,
-    },
-    /// An expression the debugger evaluates
-    /// (`InlineValueEvaluatableExpression`).
-    EvaluatableExpression {
-        /// The range it's for.
-        range: Range<PointUtf16>,
-        /// The expression; the text in `range` if `None`.
-        expression: Option<SharedString>,
-    },
-}
-
-impl InlineValue {
-    /// The range it's for.
-    pub fn range(&self) -> &Range<PointUtf16> {
-        match self {
-            Self::Text { range, .. }
-            | Self::VariableLookup { range, .. }
-            | Self::EvaluatableExpression { range, .. } => range,
-        }
-    }
-}
+pub use gpui_monaco::providers::{InlineValue, InlineValueContext};
 
 fn inline_value(value: lsp::InlineValue) -> InlineValue {
     match value {
@@ -108,11 +61,22 @@ impl LspClient {
         context: InlineValueContext,
         cx: &mut Context<Self>,
     ) -> Task<Result<Vec<InlineValue>>> {
+        let uri = model.read(cx).resource().to_string();
+        self.inline_values_at(&uri, range, context, cx)
+    }
+
+    /// [`LspClient::inline_values`] for the attached document `uri`.
+    pub(crate) fn inline_values_at(
+        &mut self,
+        uri: &str,
+        range: Range<PointUtf16>,
+        context: InlineValueContext,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Vec<InlineValue>>> {
         if !self.supports_inline_values() {
             return Task::ready(Ok(Vec::new()));
         }
-        let uri = model.read(cx).resource().to_string();
-        let Some((connection, text_document)) = self.prepare_request(&uri, cx) else {
+        let Some((connection, text_document)) = self.prepare_request(uri, cx) else {
             return Task::ready(Ok(Vec::new()));
         };
         let request =
@@ -132,6 +96,25 @@ impl LspClient {
                 .into_iter()
                 .map(inline_value)
                 .collect())
+        })
+    }
+}
+
+impl gpui_monaco::providers::InlineValuesProvider for LspFeatures {
+    fn provide_inline_values(
+        &self,
+        context: &gpui_monaco::providers::ProviderContext,
+        view_port: Range<PointUtf16>,
+        inline_context: &InlineValueContext,
+        cx: &mut App,
+    ) -> Task<Result<Vec<InlineValue>>> {
+        let Some(client) = self.client().upgrade() else {
+            return Task::ready(Ok(Vec::new()));
+        };
+        let uri = context.resource.to_string();
+        let inline_context = inline_context.clone();
+        client.update(cx, |client, cx| {
+            client.inline_values_at(&uri, view_port, inline_context, cx)
         })
     }
 }
