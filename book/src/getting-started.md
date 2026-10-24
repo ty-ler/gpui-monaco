@@ -10,24 +10,17 @@ Add gpui at the **same snapshot** gpui-monaco uses, plus the editor crates:
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.8" }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit"] }
-gpui-monaco = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
+gpui-monaco = "0.2"
 # Optional: bundled tree-sitter grammars and language configurations.
-gpui-monaco-languages = { git = "https://github.com/ty-ler/gpui-monaco", tag = "v0.1.0" }
+gpui-monaco-languages = "0.2"
 ```
 
 You need Rust 1.98 or newer, the toolchain pinned in the repository's `rust-toolchain.toml`.
 
-While the repository is private, cargo's built-in git client can't authenticate. Tell cargo to use the `git` CLI, which uses your GitHub credentials, in `.cargo/config.toml`:
-
-```toml
-[net]
-git-fetch-with-cli = true
-```
-
 `gpui-monaco-languages` enables every language by default. To keep fewer grammars, pick features:
 
 ```toml
-gpui-monaco-languages = { git = "…", tag = "v0.1.0", default-features = false, features = ["lang-rust", "lang-json"] }
+gpui-monaco-languages = { version = "0.2", default-features = false, features = ["lang-rust", "lang-json"] }
 ```
 
 The language features are `lang-rust`, `lang-js`, `lang-ts` (TypeScript and TSX), `lang-json`, `lang-yaml`, `lang-toml`, `lang-markdown`, `lang-html` and `lang-css`.
@@ -35,7 +28,7 @@ The language features are `lang-rust`, `lang-js`, `lang-ts` (TypeScript and TSX)
 `gpui-monaco` has one feature, `word-segmenter` (on by default). It adds ICU4X's word segmenter and its compiled data (about 2.5 MB) for the `word_segmenter_locales` [option](options.md), which finds words in Japanese, Chinese, Thai and other languages written without spaces. To leave it out:
 
 ```toml
-gpui-monaco = { git = "…", tag = "v0.1.0", default-features = false }
+gpui-monaco = { version = "0.2", default-features = false }
 ```
 
 ### Icons and licensing
@@ -43,7 +36,7 @@ gpui-monaco = { git = "…", tag = "v0.1.0", default-features = false }
 Monaco's widgets draw their icons with Microsoft's [codicon](https://github.com/microsoft/vscode-codicons) font. In gpui-monaco the font is optional, behind the `codicons` feature (off by default):
 
 ```toml
-gpui-monaco = { git = "…", tag = "v0.1.0", features = ["codicons"] }
+gpui-monaco = { version = "0.2", features = ["codicons"] }
 ```
 
 With it, `gpui_monaco::init` registers the font (about 150 KB, from the `gpui-monaco-codicons` crate) with GPUI's text system and the suggest list, find widget, lightbulb, folding chevrons, peek view and other widgets show Monaco's icons. Without it they draw similar Unicode characters. Either way, `gpui_monaco::codicons` has every Monaco icon id (`Codicon::SymbolMethod`, `Codicon::from_id("symbol-method")`), the `icon(Codicon)` element for host UI and `codicons_available(cx)`.
