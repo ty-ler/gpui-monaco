@@ -2,7 +2,7 @@
 
 ## Licensing rules
 
-gpui-monaco is MIT OR Apache-2.0. Keep it that way:
+gpui-monaco is MIT. Keep it that way:
 
 - **Do not copy code from Zed's GPL crates** (`rope`, `text`, `language`, `multi_buffer`,
   `editor`, and anything else under GPL-3.0 in the zed repo). Reading them for ideas is
