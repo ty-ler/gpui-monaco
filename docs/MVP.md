@@ -24,7 +24,7 @@ Key environment facts that shaped decisions:
 |---|---|
 | Audience | Public crate for any GPUI developer |
 | Fidelity | **Behavior/UX-faithful** to Monaco; idiomatic Rust/GPUI API (not a 1:1 TS API clone) |
-| License | MIT OR Apache-2.0; own text/editor stack |
+| License | MIT; own text/editor stack |
 | GPUI dep | The `gpui-pre` crates.io snapshots of zed (gpui, gpui_platform, sum_tree), pinned exactly to the snapshot gpui-component uses so apps can use both (#188; was: zed git at a pinned rev). Distribute via git until published to crates.io (#57) |
 | Platforms | macOS first-class; Linux/Windows compile in CI, best-effort |
 | Perf bar | Large files: 100k+ lines / multi-MB smooth. Huge/minified long lines = post-MVP |

@@ -15,7 +15,7 @@ A Monaco-like code editor component for [GPUI](https://github.com/zed-industries
   `CodeEditor` views; host-supplied providers for completion, hover, diagnostics and more.
 - **Large files**: 100k+ lines stay smooth (rope on `sum_tree`, viewport-only layout,
   incremental tree-sitter parsing off the main thread).
-- **Permissive license**: MIT OR Apache-2.0 (the optional codicon font is CC-BY-4.0; see [License](#license)).
+- **Permissive license**: MIT (the optional codicon font is CC-BY-4.0; see [License](#license)).
 
 ## Non-goals (for the MVP)
 
@@ -77,8 +77,7 @@ PLAYGROUND_SCREENSHOT=/tmp/pg.png cargo run -p playground --features screenshot
 
 ## License
 
-Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
-[MIT license](LICENSE-MIT) at your option.
+Licensed under the [MIT license](LICENSE-MIT).
 
 Monaco's icons come from Microsoft's [codicon](https://github.com/microsoft/vscode-codicons)
 font, which is optional: `gpui-monaco`'s `codicons` cargo feature (off by
