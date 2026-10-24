@@ -4,6 +4,10 @@ All notable changes to this project are documented here. The format follows [Kee
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-24
+
+The first release on crates.io: depend on `gpui-monaco = "0.2"` rather than the git tag.
+
 ### Changed
 - **License:** gpui-monaco and its crates are now MIT only, rather than MIT OR Apache-2.0. `LICENSE-APACHE` is gone. `gpui-monaco-codicons` stays CC-BY-4.0.
 
@@ -1863,4 +1867,6 @@ The [post-MVP issues](https://github.com/ty-ler/gpui-monaco/issues?q=label%3Apos
 
 [Differences from Monaco](book/src/differences.md) lists the smaller gaps, such as comment toggling, indent guides, bracket pair colorization and reindent on paste.
 
+[Unreleased]: https://github.com/ty-ler/gpui-monaco/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/ty-ler/gpui-monaco/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/ty-ler/gpui-monaco/releases/tag/v0.1.0

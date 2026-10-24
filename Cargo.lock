@@ -2349,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-monaco"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2386,11 +2386,11 @@ dependencies = [
 
 [[package]]
 name = "gpui-monaco-codicons"
-version = "0.1.0"
+version = "0.2.0"
 
 [[package]]
 name = "gpui-monaco-languages"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gpui-monaco-syntax",
  "gpui-monaco-text",
@@ -2407,7 +2407,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-monaco-lsp"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-channel",
@@ -2424,7 +2424,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-monaco-syntax"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "fancy-regex",
  "gpui-monaco-text",
@@ -2441,7 +2441,7 @@ dependencies = [
 
 [[package]]
 name = "gpui-monaco-text"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrayvec",
  "criterion",
@@ -5085,7 +5085,7 @@ checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
 
 [[package]]
 name = "playground"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gpui-monaco",
@@ -7812,7 +7812,7 @@ dependencies = [
 
 [[package]]
 name = "web"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "console_error_panic_hook",
  "gpui-monaco",
@@ -8702,7 +8702,7 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "with-gpui-component"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "gpui-component",
  "gpui-monaco",
